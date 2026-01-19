@@ -2721,7 +2721,7 @@ struct SceneViewExtensionAnalyzer {
 
         RHIThreadWorker::get().execute();
 
-        if (runtime->get_synchronize_stage() == VRRuntime::SynchronizeStage::EARLY) {
+        if (vr->get_synchronize_stage() == VR::SynchronizeStage::EARLY) {
             if (runtime->is_openxr()) {
                 if (g_framework->get_renderer_type() == Framework::RendererType::D3D11) {
                     if (!runtime->got_first_sync || runtime->synchronize_frame(frame_count) != VRRuntime::Error::SUCCESS) {
@@ -2837,7 +2837,7 @@ struct SceneViewExtensionAnalyzer {
 
             RHIThreadWorker::get().execute();
 
-            if (runtime->get_synchronize_stage() == VRRuntime::SynchronizeStage::EARLY) {
+            if (vr->get_synchronize_stage() == VR::SynchronizeStage::EARLY) {
                 if (runtime->is_openxr()) {
                     if (g_framework->get_renderer_type() == Framework::RendererType::D3D11) {
                         if (!runtime->got_first_sync || runtime->synchronize_frame() != VRRuntime::Error::SUCCESS) {
@@ -4692,7 +4692,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         }
     }
 
-    /*if (view_index % 2 == 1 && VR::get()->get_runtime()->get_synchronize_stage() == VRRuntime::SynchronizeStage::EARLY) {
+    /*if (view_index % 2 == 1 && VR::get()->get_synchronize_stage() == VR::SynchronizeStage::EARLY) {
         std::scoped_lock _{ vr->get_runtime()->render_mtx };
         SPDLOG_INFO("SYNCING!!!");
         //vr->get_runtime()->synchronize_frame();
@@ -6505,6 +6505,14 @@ void VRRenderTargetManager_Base::pre_texture_hook_callback(safetyhook::Context& 
 
                     x = size.x;
                     y = size.y;
+
+                    uint8_t* format = (uint8_t*)(ctx.r9 + width_offset.value() + 15);
+
+                    // some games have 10 bit format
+                    if (*format == 18) {
+                        *format = 2; // PF_B8G8R8A8
+                    }
+
                     break;
                 }
             }
@@ -6827,6 +6835,7 @@ void VRRenderTargetManager_Base::texture_hook_callback(safetyhook::Context& ctx,
     if (!rtm->allocate_texture_called) {
         g_hook->set_should_recreate_textures(true);
         rtm->render_target = nullptr;
+        rtm->ui_target = nullptr;
         rtm->texture_hook_ref = nullptr;
 
         SPDLOG_INFO("[Post texture hook] Allocate texture was not called, skipping...");
@@ -7672,15 +7681,14 @@ bool VRRenderTargetManager_Base::allocate_render_target_texture(uintptr_t return
                                         next_call_is_not_the_right_one = true;
                                     }
                                 }
+                            } else if (utility::find_pattern_in_path((uint8_t*)fn, 30, true, "66 41 C7 40 34 00 FF")) {
+                                SPDLOG_INFO("Found 66 41 C7 40 34 00 FF pattern within the function, skipping this call!");
+                                next_call_is_not_the_right_one = true;
                             } else {
                                 // Check how many instructions are in the call. If there's <= 30 AND there's no call/jmp in it, this is not the right one
                                 size_t insn_count = 0;
                                 bool encountered_branch = false;
                                 utility::exhaustive_decode((uint8_t*)fn, 200, [&](const utility::ExhaustionContext& ctx) -> utility::ExhaustionResult {
-                                    if (++insn_count >= 30) {
-                                        return utility::ExhaustionResult::BREAK;
-                                    }
-
                                     if (std::string_view{ctx.instrux.Mnemonic}.starts_with("CALL") || std::string_view{ctx.instrux.Mnemonic}.starts_with("JMP")) {
                                         encountered_branch = true;
                                         return utility::ExhaustionResult::BREAK;

@@ -72,12 +72,12 @@ FetchContent_Declare(bddisasm
 )
 FetchContent_MakeAvailable(bddisasm)
 
-message(STATUS "Fetching kananlib (ac256f2a06c1ad473aaa193d36afb589fd6ca63d)...")
+message(STATUS "Fetching kananlib (7a99a94cea3dbcbd46b54885bd3d04f1d242e21a)...")
 FetchContent_Declare(kananlib
 	GIT_REPOSITORY
 		"https://github.com/cursey/kananlib"
 	GIT_TAG
-		ac256f2a06c1ad473aaa193d36afb589fd6ca63d
+		7a99a94cea3dbcbd46b54885bd3d04f1d242e21a
 )
 FetchContent_MakeAvailable(kananlib)
 
@@ -176,10 +176,10 @@ set(spdlog_SOURCES "")
 
 list(APPEND spdlog_SOURCES
 	"dependencies/submodules/spdlog/src/async.cpp"
+	"dependencies/submodules/spdlog/src/bundled_fmtlib_format.cpp"
 	"dependencies/submodules/spdlog/src/cfg.cpp"
 	"dependencies/submodules/spdlog/src/color_sinks.cpp"
 	"dependencies/submodules/spdlog/src/file_sinks.cpp"
-	"dependencies/submodules/spdlog/src/fmt.cpp"
 	"dependencies/submodules/spdlog/src/spdlog.cpp"
 	"dependencies/submodules/spdlog/src/stdout_sinks.cpp"
 )
@@ -200,6 +200,11 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${spdlog_SOURCES})
 add_library(spdlog::spdlog ALIAS spdlog)
 target_compile_definitions(spdlog PUBLIC
 	SPDLOG_COMPILED_LIB
+	FMT_UNICODE=0
+)
+
+target_compile_options(spdlog PUBLIC
+	"/utf-8"
 )
 
 target_include_directories(spdlog PUBLIC
