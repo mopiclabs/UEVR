@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <unordered_set>
 #include <memory>
 #include <filesystem>
@@ -259,6 +260,7 @@ private:
     bool hook_d3d12();
 
     bool initialize();
+    bool is_in_early_injection_grace_period() const;
     bool initialize_windows_message_hook();
     bool initialize_xinput_hook();
     bool initialize_dinput_hook();
@@ -347,6 +349,12 @@ private:
     std::chrono::steady_clock::time_point m_last_page_dec_time{};
     std::chrono::steady_clock::time_point m_last_page_inc_time{};
     uint32_t m_frames_since_init{0};
+
+    // Injected right at game launch (e.g. auto-inject): give the game time to finish booting
+    // before the mods start hooking the engine. See Framework::initialize().
+    bool m_early_injection{false};
+    bool m_early_injection_grace_logged{false};
+    std::chrono::steady_clock::time_point m_first_initialize_attempt{};
     bool m_has_last_chance{true};
     bool m_first_initialize{true};
 

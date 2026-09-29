@@ -1,4 +1,5 @@
 #include <chrono>
+#include <optional>
 #include <filesystem>
 
 #include <windows.h>
@@ -36,6 +37,43 @@ namespace fs = std::filesystem;
 using namespace std::literals;
 
 std::unique_ptr<Framework> g_framework{};
+
+namespace {
+// If the process is younger than this when we get injected, treat it as an injection at game launch.
+constexpr auto EARLY_INJECTION_MAX_PROCESS_AGE = std::chrono::seconds(60);
+
+// How long to wait after the first hooked Present before initializing when injected at game launch.
+// Initializing the mods (engine/stereo hooks, UObjectHook, CVars, OpenXR session...) while the game is
+// still on its splash/loading/shader-compilation screens is suspected of crashing multiple games.
+// In-game injection (older process) is not delayed.
+// joeyhodge's fork gets a similar ~12 s delay as a side effect of its D3D12 init retry backoff (6e4f0c5e).
+constexpr auto EARLY_INJECTION_INIT_DELAY = std::chrono::seconds(12);
+
+std::optional<std::chrono::milliseconds> get_process_age() {
+    FILETIME creation{}, exit_time{}, kernel_time{}, user_time{};
+
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit_time, &kernel_time, &user_time)) {
+        return std::nullopt;
+    }
+
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+
+    const auto to_u64 = [](const FILETIME& ft) {
+        return ((uint64_t)ft.dwHighDateTime << 32) | (uint64_t)ft.dwLowDateTime;
+    };
+
+    const auto created = to_u64(creation);
+    const auto current = to_u64(now);
+
+    if (current < created) {
+        return std::nullopt;
+    }
+
+    // FILETIME is in 100 ns units
+    return std::chrono::milliseconds{static_cast<int64_t>((current - created) / 10'000)};
+}
+}
 
 UEVRSharedMemory::UEVRSharedMemory() {
     spdlog::info("Shared memory constructor!");
@@ -203,6 +241,13 @@ Framework::Framework(HMODULE framework_module)
     spdlog::info("Total commits: {}", UEVR_TOTAL_COMMITS);
     spdlog::info("Build date: {}", UEVR_BUILD_DATE);
     spdlog::info("Build time: {}", UEVR_BUILD_TIME);
+
+    if (const auto process_age = get_process_age(); process_age) {
+        m_early_injection = *process_age < EARLY_INJECTION_MAX_PROCESS_AGE;
+        spdlog::info("Process age at injection: {} ms{}", process_age->count(), m_early_injection ? " (early injection)" : "");
+    } else {
+        spdlog::warn("Could not determine process age at injection");
+    }
 
     const auto module_size = *utility::get_module_size(m_game_module);
 
@@ -468,7 +513,10 @@ void Framework::on_frame_d3d11() {
 
     if (!m_initialized) {
         if (!initialize()) {
-            spdlog::error("Failed to initialize Framework on DirectX 11");
+            if (!is_in_early_injection_grace_period()) {
+                spdlog::error("Failed to initialize Framework on DirectX 11");
+            }
+
             return;
         }
 
@@ -568,7 +616,10 @@ void Framework::on_frame_d3d12() {
     
     if (!m_initialized) {
         if (!initialize()) {
-            spdlog::error("Failed to initialize Framework on DirectX 12");
+            if (!is_in_early_injection_grace_period()) {
+                spdlog::error("Failed to initialize Framework on DirectX 12");
+            }
+
             return;
         }
 
@@ -1519,12 +1570,38 @@ void Framework::set_imgui_style() noexcept {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 }
 
+bool Framework::is_in_early_injection_grace_period() const {
+    if (!m_early_injection || m_first_initialize_attempt.time_since_epoch().count() == 0) {
+        return false;
+    }
+
+    return std::chrono::steady_clock::now() - m_first_initialize_attempt < EARLY_INJECTION_INIT_DELAY;
+}
+
 bool Framework::initialize() {
     if (m_initialized) {
         return true;
     }
 
     framework::setup_exception_handler();
+
+    if (m_early_injection) {
+        const auto now = std::chrono::steady_clock::now();
+
+        if (m_first_initialize_attempt.time_since_epoch().count() == 0) {
+            m_first_initialize_attempt = now;
+        }
+
+        if (is_in_early_injection_grace_period()) {
+            if (!m_early_injection_grace_logged) {
+                m_early_injection_grace_logged = true;
+                spdlog::info("Injected at game launch, waiting {} ms before initializing to let the game finish booting",
+                    std::chrono::duration_cast<std::chrono::milliseconds>(EARLY_INJECTION_INIT_DELAY).count());
+            }
+
+            return false;
+        }
+    }
 
     if (m_first_initialize) {
         m_frames_since_init = 0;
