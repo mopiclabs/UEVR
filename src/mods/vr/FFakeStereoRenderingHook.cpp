@@ -4,6 +4,8 @@
 #include <winternl.h>
 
 #include <asmjit/asmjit.h>
+#include <atomic>
+#include <chrono>
 #include <future>
 
 #include <spdlog/spdlog.h>
@@ -3149,9 +3151,11 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
     SPDLOG_INFO_ONCE("Called LocalPlayerSetupViewPoint for the first time");
 
     if (!g_hook->m_fixed_localplayer_view_count) {
+        g_hook->note_localplayer_bootstrap_frame();
+
         static bool attempted = false;
 
-        if (!attempted) {
+        if (!attempted && g_hook->is_localplayer_bootstrap_safe()) {
             attempted = true;
 
             if (localplayer != nullptr && !IsBadReadPtr(localplayer, sizeof(void*))) try {
@@ -4936,7 +4940,12 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
     //if (!vr->is_using_afr() || vr->is_ghosting_fix_enabled() || !g_hook->m_get_desired_number_of_views_hook) {
     if (!vr->should_skip_post_init_properties()) {
         if (!g_hook->m_fixed_localplayer_view_count) {
-            if (!g_hook->m_calculate_stereo_projection_matrix_post_hook) {
+            g_hook->note_localplayer_bootstrap_frame();
+
+            // Only install the post hook (which performs the bootstrap on this very return) once it's safe.
+            // This also makes sure the hooked return site is the steady-state caller (GetProjectionData)
+            // and not some one-off call made while the game was still booting.
+            if (!g_hook->m_calculate_stereo_projection_matrix_post_hook && g_hook->is_localplayer_bootstrap_safe()) {
                 const auto return_address = (uintptr_t)_ReturnAddress();
                 SPDLOG_INFO("Inserting midhook after CalculateStereoProjectionMatrix... @ {:x}", return_address);
 
@@ -5332,6 +5341,10 @@ void FFakeStereoRenderingHook::post_calculate_stereo_projection_matrix(safetyhoo
         return;
     }
 
+    if (!g_hook->is_localplayer_bootstrap_safe()) {
+        return; // try again on a later frame
+    }
+
     auto vfunc = utility::find_virtual_function_start(g_hook->m_calculate_stereo_projection_matrix_post_hook.target_address());
 
     if (!vfunc) {
@@ -5471,6 +5484,10 @@ void FFakeStereoRenderingHook::pre_get_projection_data(safetyhook::Context& ctx)
         return;
     }
 
+    if (!g_hook->is_localplayer_bootstrap_safe()) {
+        return; // try again on a later frame
+    }
+
     const auto localplayer = ctx.rcx;
     SPDLOG_INFO("Local player: {:x}", localplayer);
 
@@ -5483,7 +5500,85 @@ void FFakeStereoRenderingHook::pre_get_projection_data(safetyhook::Context& ctx)
     g_hook->post_init_properties(localplayer);
 }
 
+namespace {
+// A gap longer than this between two stereo projection calculations means the game thread stalled
+// (map load, blocking asset load, shader/PSO compilation...). The engine isn't in a steady state.
+constexpr auto LOCALPLAYER_BOOTSTRAP_MAX_FRAME_GAP = std::chrono::milliseconds(250);
+
+// How long frames must have been produced without such a gap before the bootstrap is allowed to run.
+// When injecting in-game this only postpones the second eye's view state by a few seconds.
+constexpr auto LOCALPLAYER_BOOTSTRAP_STABLE_DURATION = std::chrono::seconds(5);
+
+int64_t steady_ticks_now() {
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}
+
+template<typename T>
+int64_t to_steady_ticks(T duration) {
+    return std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration).count();
+}
+
+int64_t steady_ticks_to_ms(int64_t ticks) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::duration{ticks}).count();
+}
+}
+
+void FFakeStereoRenderingHook::note_localplayer_bootstrap_frame() {
+    const auto now = steady_ticks_now();
+    const auto last = m_localplayer_bootstrap_last_frame.exchange(now);
+
+    if (last == 0 || now - last > to_steady_ticks(LOCALPLAYER_BOOTSTRAP_MAX_FRAME_GAP)) {
+        if (last != 0) {
+            // (computed outside the macro, it declares its own `now`/`last`)
+            const auto gap_ms = steady_ticks_to_ms(now - last);
+            SPDLOG_INFO_EVERY_N_SEC(1, "[PostInitProperties] {} ms frame gap while the LocalPlayer bootstrap is pending (loading?), restarting stability window", gap_ms);
+        }
+
+        m_localplayer_bootstrap_stable_since.store(now);
+    }
+}
+
+bool FFakeStereoRenderingHook::is_localplayer_bootstrap_safe() {
+    const auto now = steady_ticks_now();
+    const auto last = m_localplayer_bootstrap_last_frame.load();
+    const auto stable_since = m_localplayer_bootstrap_stable_since.load();
+
+    // No cadence information yet or the game thread is stalling right now.
+    if (last == 0 || stable_since == 0 || now - last > to_steady_ticks(LOCALPLAYER_BOOTSTRAP_MAX_FRAME_GAP)) {
+        return false;
+    }
+
+    if (now - stable_since < to_steady_ticks(LOCALPLAYER_BOOTSTRAP_STABLE_DURATION)) {
+        if (!m_logged_localplayer_bootstrap_deferral.exchange(true)) {
+            SPDLOG_INFO("[PostInitProperties] Deferring LocalPlayer bootstrap until frames have been stable for {} ms (early injection safety)",
+                std::chrono::duration_cast<std::chrono::milliseconds>(LOCALPLAYER_BOOTSTRAP_STABLE_DURATION).count());
+        }
+
+        return false;
+    }
+
+    SPDLOG_INFO_ONCE("[PostInitProperties] Frames stable for {} ms, running LocalPlayer bootstrap", steady_ticks_to_ms(now - stable_since));
+    return true;
+}
+
 void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
+    // Several paths can become eligible on the same frame (post projection midhook, GetProjectionData
+    // midhook, Ghosting Fix SetupViewPoint hook). Never run two bootstraps at once or twice in a row.
+    static std::atomic<bool> s_bootstrap_in_progress{false};
+
+    if (bool expected = false; !s_bootstrap_in_progress.compare_exchange_strong(expected, true)) {
+        SPDLOG_WARN("[PostInitProperties] LocalPlayer bootstrap already in progress, ignoring");
+        return;
+    }
+
+    utility::ScopeGuard clear_bootstrap_in_progress{[]() {
+        s_bootstrap_in_progress.store(false);
+    }};
+
+    if (m_fixed_localplayer_view_count) {
+        return;
+    }
+
     SPDLOG_INFO("Searching for PostInitProperties virtual function...");
 
     std::optional<uint32_t> idx{};
@@ -5548,21 +5643,42 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
     // Just creating the StereoRenderingDevice does not automatically do it, so we have to do it manually.
     // Usually the game just calls this function near startup after calling InitializeHMDDevice.
     if (idx) {
-        SPDLOG_INFO("Calling PostInitProperties on local player!");
-
-        // Get PEB and set debugger present
-        auto peb = (PEB*)__readgsqword(0x60);
-
-        const auto old = peb->BeingDebugged;
-        peb->BeingDebugged = true;
-
         // If the exception count exceeds a certain amount, we need to un-nop the function call because it was supposed to return a pointer.
         static auto exception_count = 0;
         static std::vector<Patch::Ptr> patches{};
         static std::vector<uintptr_t> patch_locations{};
 
         static std::vector<Patch::Ptr> assert_patches{};
+
+        // Thread that is currently running the bootstrap call (0 = none). Read by the vectored exception handler below.
+        static std::atomic<DWORD> s_bootstrap_thread_id{0};
+
         const void (*post_init_properties)(uintptr_t) = (*(decltype(post_init_properties)**)localplayer)[*idx];
+
+        // Shipping builds frequently resolve this slot to a bare RET thunk. Calling it does nothing,
+        // so don't go through the debugger-flag/exception-handler dance for it.
+        if (const auto first_instruction = utility::decode_one((uint8_t*)post_init_properties);
+            first_instruction && std::string_view{first_instruction->Mnemonic}.starts_with("RET"))
+        {
+            SPDLOG_INFO("[PostInitProperties] Slot {} ({:x}) is a no-op thunk, skipping the bootstrap call", *idx, (uintptr_t)post_init_properties);
+            g_hook->m_sceneview_data.known_scene_states.clear();
+            g_hook->m_fixed_localplayer_view_count = true;
+            return;
+        }
+
+        SPDLOG_INFO("Calling PostInitProperties on local player!");
+
+        // Get PEB and set debugger present.
+        // Some debug/development engine builds select assertion behavior from this bit.
+        // It is process-wide, so keep the window as small as possible and restore it on every exit path.
+        auto peb = (PEB*)__readgsqword(0x60);
+
+        const auto old = peb->BeingDebugged;
+        peb->BeingDebugged = true;
+
+        utility::ScopeGuard restore_debugger_flag{[&]() {
+            peb->BeingDebugged = old;
+        }};
 
         // Scan through all of the branches of PostInitProperties to find any assertions
         // The assertion we're looking for is easily identified by a string that it loads in RCX, named "!Reference"
@@ -5612,6 +5728,36 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
         // set up a handler to skip int3 assertions
         // we do this because debug builds assert when the views are already setup.
         const auto seh_handler = [](PEXCEPTION_POINTERS info) -> LONG {
+            // Only touch exceptions raised by the PostInitProperties call on this thread.
+            // This handler is registered first in the chain and it resumes execution after bumping RIP,
+            // so if it's allowed to see other threads' exceptions (render thread, task graph and
+            // PSO/shader compile workers, driver threads...) it silently corrupts them.
+            // That is mostly survivable when injecting in-game, but not while the game is still booting.
+            if (GetCurrentThreadId() != s_bootstrap_thread_id.load(std::memory_order_acquire)) {
+                // The only thing our (process-wide) debugger flag can make other threads do is break into a
+                // debugger that isn't there (e.g. UE's ensure() -> PLATFORM_BREAK when IsDebuggerPresent()).
+                // Step over those plain int3s without patching anything, leave every other exception alone.
+                if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT &&
+                    !IsBadReadPtr((void*)info->ContextRecord->Rip, 1) &&
+                    *(uint8_t*)info->ContextRecord->Rip == 0xCC)
+                {
+                    info->ContextRecord->Rip += 1;
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            switch (info->ExceptionRecord->ExceptionCode) {
+            case 0x40010006: // DBG_PRINTEXCEPTION_C (OutputDebugStringA, the debugger flag is set during the call)
+            case 0x4001000A: // DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)
+            case 0x406D1388: // MS_VC_EXCEPTION (thread naming)
+                // Informational exceptions that are always handled by the code raising them.
+                return EXCEPTION_CONTINUE_SEARCH;
+            default:
+                break;
+            }
+
             ++exception_count;
 
             if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
@@ -5662,17 +5808,28 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
             return EXCEPTION_CONTINUE_EXECUTION;
         };
 
+        s_bootstrap_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
         const auto exception_handler = AddVectoredExceptionHandler(1, seh_handler);
 
-        m_sceneview_data.inside_post_init_properties = true;
-        post_init_properties(localplayer);
-        m_sceneview_data.inside_post_init_properties = false;
+        // remove the handler on every exit path (before the debugger flag is restored)
+        utility::ScopeGuard remove_exception_handler{[&]() {
+            if (exception_handler != nullptr) {
+                RemoveVectoredExceptionHandler(exception_handler);
+            }
+
+            s_bootstrap_thread_id.store(0, std::memory_order_release);
+        }};
+
+        {
+            m_sceneview_data.inside_post_init_properties = true;
+            utility::ScopeGuard leave_post_init_properties{[&]() {
+                m_sceneview_data.inside_post_init_properties = false;
+            }};
+
+            post_init_properties(localplayer);
+        }
 
         SPDLOG_INFO("PostInitProperties called!");
-
-        // remove the handler
-        RemoveVectoredExceptionHandler(exception_handler);
-        peb->BeingDebugged = old;
     }
 
     g_hook->m_sceneview_data.known_scene_states.clear();

@@ -2,6 +2,9 @@
 
 #include <memory>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 
 #include <SafetyHook.hpp>
 
@@ -403,6 +406,15 @@ private:
     bool attempt_runtime_inject_stereo();
     void post_init_properties(uintptr_t localplayer);
 
+    // Early-injection safety for the ULocalPlayer::PostInitProperties bootstrap.
+    // The bootstrap allocates the second eye's FSceneViewState (without it one eye
+    // renders with shared/missing view state: ghosting, wrong or missing auto exposure).
+    // It must not run while the engine is still booting (loading screens, PSO
+    // precompilation, streaming), so it is deferred until frames have been produced
+    // continuously for a while. See note_localplayer_bootstrap_frame().
+    void note_localplayer_bootstrap_frame();
+    bool is_localplayer_bootstrap_safe();
+
     // Hooks
     // UGameEngine
     static void* engine_tick_hook(sdk::UGameEngine* engine, float delta, bool idle);
@@ -537,6 +549,10 @@ private:
     bool m_injected_stereo_at_runtime{false};
     bool m_has_double_precision{false}; // for the projection matrix... AND the view offset... IS UE5 DOING THIS NOW???
     bool m_fixed_localplayer_view_count{false};
+    // steady_clock tick counts (0 = never). Written from whichever thread calculates the stereo projection.
+    std::atomic<int64_t> m_localplayer_bootstrap_last_frame{0};
+    std::atomic<int64_t> m_localplayer_bootstrap_stable_since{0};
+    std::atomic<bool> m_logged_localplayer_bootstrap_deferral{false};
     bool m_wants_texture_recreation{false};
     bool m_has_view_extension_hook{false};
     bool m_has_game_viewport_client_draw_hook{false};
