@@ -3169,6 +3169,112 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
     g_hook->m_localplayer_get_viewpoint_hook.call<void>(localplayer, view_info, pass);
 }
 
+namespace {
+// UE5's FSceneViewFamily owns four back to back ISceneViewFamilyExtention pointers:
+// ScreenPercentageInterface, TemporalUpscalerInterface, PrimarySpatialUpscalerInterface and SecondarySpatialUpscalerInterface.
+// ~FSceneViewFamily deletes them in that order (mov rcx, [this+X]; test rcx, rcx; jz; mov rax, [rcx]; mov edx, 1; call [rax]),
+// so walking the family's deleting destructor both locates them and tells us the family owns them.
+void collect_view_family_deletes(uintptr_t fn, int depth, std::vector<int32_t>& deleted) {
+    std::optional<int32_t> rcx_disp{};
+
+    for (auto ip = fn; ip < fn + 0x400;) {
+        const auto ix = utility::decode_one((uint8_t*)ip);
+
+        if (!ix) {
+            return;
+        }
+
+        const auto& op0 = ix->Operands[0];
+        const auto& op1 = ix->Operands[1];
+        const auto writes_rcx = ix->OperandsCount >= 1 && op0.Type == ND_OP_REG && op0.Access.Write &&
+                                op0.Info.Register.Type == ND_REG_GPR && op0.Info.Register.Reg == NDR_RCX;
+
+        if (writes_rcx && ix->Instruction == ND_INS_MOV && op1.Type == ND_OP_MEM && op1.Info.Memory.HasBase && op1.Info.Memory.HasDisp &&
+            !op1.Info.Memory.HasIndex && !op1.Info.Memory.IsRipRel)
+        {
+            rcx_disp = (int32_t)op1.Info.Memory.Disp;
+        } else if (writes_rcx) {
+            rcx_disp.reset();
+        } else if (ix->Instruction == ND_INS_CALLNI && op0.Type == ND_OP_MEM && op0.Info.Memory.HasBase && op0.Info.Memory.Base == NDR_RAX &&
+                   !op0.Info.Memory.HasDisp && !op0.Info.Memory.HasIndex)
+        {
+            if (rcx_disp) {
+                deleted.push_back(*rcx_disp);
+            }
+
+            rcx_disp.reset();
+        } else if (ix->Instruction == ND_INS_CALLNR) {
+            if (depth < 2) {
+                collect_view_family_deletes(utility::calculate_absolute(ip + 1), depth + 1, deleted);
+            }
+
+            rcx_disp.reset();
+        } else if (ix->Instruction == ND_INS_JMPNR && ix->Length == 5) {
+            // Tail call into the base destructor
+            if (depth < 2) {
+                collect_view_family_deletes(utility::calculate_absolute(ip + 1), depth + 1, deleted);
+            }
+
+            return;
+        } else if (ix->Instruction == ND_INS_RETN || ix->Instruction == ND_INS_INT3) {
+            return;
+        }
+
+        ip += ix->Length;
+    }
+}
+
+std::optional<uint32_t> find_view_family_interface_block(const sdk::FSceneViewFamily* family) {
+    static std::optional<uint32_t> s_block{};
+    static bool s_attempted{false};
+
+    if (s_attempted) {
+        return s_block;
+    }
+
+    s_attempted = true;
+
+    try {
+        const auto vtable = *(uintptr_t**)family;
+
+        if (vtable == nullptr || IsBadReadPtr(vtable, sizeof(void*)) || !utility::get_module_within((void*)vtable[0]).has_value()) {
+            SPDLOG_WARN("[NativeStereoFix] FSceneViewFamily has no usable vtable, upscaler interfaces stay shared between both views");
+            return std::nullopt;
+        }
+
+        std::vector<int32_t> deleted{};
+        collect_view_family_deletes(vtable[0], 0, deleted);
+
+        for (size_t i = 0; i + 3 < deleted.size(); ++i) {
+            const auto x = deleted[i];
+
+            if (x >= 0x30 && x < 0x400 && deleted[i + 1] == x + 8 && deleted[i + 2] == x + 0x10 && deleted[i + 3] == x + 0x18) {
+                s_block = (uint32_t)x;
+                break;
+            }
+        }
+    } catch (...) {
+        s_block = std::nullopt;
+    }
+
+    if (!s_block) {
+        SPDLOG_WARN("[NativeStereoFix] Could not locate the FSceneViewFamily upscaler interfaces, they stay shared between both views");
+        return std::nullopt;
+    }
+
+    SPDLOG_INFO("[NativeStereoFix] FSceneViewFamily interfaces: screen percentage +0x{:x}, upscalers +0x{:x}/+0x{:x}/+0x{:x}",
+        *s_block, *s_block + 8, *s_block + 0x10, *s_block + 0x18);
+
+    return s_block;
+}
+
+// Same as "delete Interface;" in ~FSceneViewFamily (slot 0 is the scalar deleting destructor)
+void delete_view_family_extension(void* obj) {
+    using DeletingDtorFn = void* (*)(void*, uint32_t);
+    (*(DeletingDtorFn**)obj)[0](obj, 1);
+}
+}
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     ZoneScopedN("BeginRenderViewFamilyReal");
 
@@ -3277,6 +3383,20 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         view_family.views.data[1]->constructor((sdk::FSceneViewInitOptions*)init_options_copy2.data());*/
     }
 
+    // The temporal/spatial upscaler interfaces of the family (not the screen percentage interface at +0).
+    const auto interface_block = wants_swap && vr->is_native_stereo_fix_separate_upscalers_enabled() ? find_view_family_interface_block(view_family) : std::nullopt;
+    const auto upscaler_slot = [&](size_t i) -> void*& {
+        return *(void**)((uintptr_t)view_family + *interface_block + sizeof(void*) * (i + 1));
+    };
+
+    std::array<void*, 3> upscalers_before_first_submission{};
+
+    if (interface_block) {
+        for (size_t i = 0; i < upscalers_before_first_submission.size(); ++i) {
+            upscalers_before_first_submission[i] = upscaler_slot(i);
+        }
+    }
+
     g_hook->m_render_module_begin_render_viewfamily_hook.unsafe_call<void>(render_module, canvas, view_family_candidate);
 
     if (wants_swap) {
@@ -3297,12 +3417,69 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         
         std::swap(views[0], views[1]);
 
+        // Upscalers that view extensions created during the first submission are forked by its FSceneRenderer
+        // but left in the family. Submitting the same family again would fork the same objects, and upscalers that
+        // keep per-frame data behind a shared pointer then hand the second renderer resources from the first
+        // renderer's graph (e.g. FSR1 reusing the first view's FRDGTexture -> freed texture on the RHI thread).
+        // Detach them so the extensions create a separate set for the second view.
+        std::array<void*, 3> upscalers_first_submission{};
+        std::array<bool, 3> detached_upscalers{};
+
+        if (interface_block) {
+            for (size_t i = 0; i < upscalers_first_submission.size(); ++i) {
+                auto& slot = upscaler_slot(i);
+                upscalers_first_submission[i] = slot;
+
+                if (slot == nullptr) {
+                    continue;
+                }
+
+                if (upscalers_before_first_submission[i] != nullptr) {
+                    SPDLOG_WARN_ONCE("[NativeStereoFix] Upscaler interface +0x{:x} was set before BeginRenderingViewFamilies, both views share it",
+                        *interface_block + sizeof(void*) * (i + 1));
+                    continue;
+                }
+
+                const auto vtable = !IsBadReadPtr(slot, sizeof(void*)) ? *(void**)slot : nullptr;
+
+                if (vtable == nullptr || !utility::get_module_within(vtable).has_value()) {
+                    SPDLOG_WARN_ONCE("[NativeStereoFix] Upscaler interface +0x{:x} does not look like an object, leaving it alone",
+                        *interface_block + sizeof(void*) * (i + 1));
+                    continue;
+                }
+
+                slot = nullptr;
+                detached_upscalers[i] = true;
+            }
+        }
+
         // Call it again
         g_hook->m_render_module_begin_render_viewfamily_hook.unsafe_call<void>(render_module, canvas, view_family_candidate);
 
         std::swap(views[0], views[1]);
 
         view_family->set_render_target(original_target);
+
+        for (size_t i = 0; i < detached_upscalers.size(); ++i) {
+            if (!detached_upscalers[i]) {
+                continue;
+            }
+
+            auto& slot = upscaler_slot(i);
+
+            if (slot == nullptr) {
+                // Not recreated for the second view, give it back to the family which deletes it.
+                SPDLOG_WARN_ONCE("[NativeStereoFix] Upscaler interface +0x{:x} was not recreated for the second view",
+                    *interface_block + sizeof(void*) * (i + 1));
+                slot = upscalers_first_submission[i];
+            } else if (slot != upscalers_first_submission[i]) {
+                // The family now owns the second view's upscaler. The first renderer holds its own fork of the first one,
+                // so delete it here like ~FSceneViewFamily would have.
+                SPDLOG_INFO_ONCE("[NativeStereoFix] Gave the second view its own upscaler interface +0x{:x} (vtable {:x})",
+                    *interface_block + sizeof(void*) * (i + 1), (uintptr_t)*(void**)slot);
+                delete_view_family_extension(upscalers_first_submission[i]);
+            }
+        }
     }
 
     views.count = prev_count;

@@ -2431,6 +2431,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         if (ImGui::TreeNode("Native Stereo Fix")) {
             m_native_stereo_fix->draw("Enabled");
             m_native_stereo_fix_same_pass->draw("Use Same Stereo Pass");
+            m_native_stereo_fix_separate_upscalers->draw("Separate Upscalers Per Eye");
             ImGui::TreePop();
         }
 
