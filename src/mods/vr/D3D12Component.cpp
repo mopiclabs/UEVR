@@ -32,6 +32,7 @@
 
 #include "D3D12Component.hpp"
 #include "GalacticRacerRenderTargets.hpp"
+#include "../../utility/D3DDeviceIdentity.hpp"
 
 //#define AFR_DEPTH_TEMP_DISABLED
 
@@ -2836,7 +2837,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             scene_capture_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         const bool desc_valid =
             scene_capture_rt != nullptr &&
-            scene_capture_device.Get() == device &&
+            utility::is_same_d3d12_device(scene_capture_device.Get(), device) &&
             scene_capture_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
             bgra_compatible &&
             scene_capture_desc.Width == static_cast<uint64_t>(vr->get_hmd_width()) &&
