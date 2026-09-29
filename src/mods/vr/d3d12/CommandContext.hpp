@@ -14,7 +14,9 @@ struct CommandContext {
 
     bool setup(const wchar_t* name = L"CommandContext object");
     void reset();
-    void wait(uint32_t ms);
+    // Waits up to ms for previously executed work, then recycles the allocator/list.
+    // Returns false (and leaves the allocator/list untouched) if the GPU is still using them.
+    bool wait(uint32_t ms);
     void copy(ID3D12Resource* src, ID3D12Resource* dst, 
         D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT,
         D3D12_RESOURCE_STATES dst_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);

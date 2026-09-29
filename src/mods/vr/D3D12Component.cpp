@@ -1012,7 +1012,12 @@ void D3D12Component::clear_backbuffer() {
     }
 
     // Clear the backbuffer
-    backbuffer_ctx.commands.wait(0);
+    // Never block the present thread here, but don't recycle the command allocator while the
+    // previous clear of this backbuffer is still executing either. Skipping one clear is harmless.
+    if (!backbuffer_ctx.commands.wait(0)) {
+        return;
+    }
+
     const float clear_color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
     backbuffer_ctx.commands.clear_rtv(backbuffer_ctx.texture.Get(), backbuffer_ctx.get_rtv(), clear_color, D3D12_RESOURCE_STATE_PRESENT);
     backbuffer_ctx.commands.execute();
@@ -1038,6 +1043,14 @@ void D3D12Component::on_reset(VR* vr) {
     m_force_reset = true;
 
     auto runtime = vr->get_runtime();
+
+    // The OpenXR copy contexts can still be reading from the textures released below
+    // (m_game_tex, m_game_ui_tex, m_2d_screen_tex, m_scene_capture_tex...), so retire them first.
+    // setup() calls this on every failed attempt, i.e. every frame while the engine has no
+    // stereo render target yet, which is exactly what happens when injecting at game launch.
+    if (runtime->is_openxr() && runtime->loaded) {
+        m_openxr.wait_for_all_copies();
+    }
 
     for (auto& ctx : m_openvr.left_eye_tex) {
         ctx.reset();
@@ -1073,8 +1086,6 @@ void D3D12Component::on_reset(VR* vr) {
     m_graphics_memory.reset();
 
     if (runtime->is_openxr() && runtime->loaded) {
-        m_openxr.wait_for_all_copies();
-
         auto& rt_pool = vr->get_render_target_pool_hook();
         ComPtr<ID3D12Resource> scene_depth_tex{rt_pool->get_texture<ID3D12Resource>(L"SceneDepthZ")};
 
@@ -1431,7 +1442,8 @@ std::optional<std::string> D3D12Component::OpenXR::create_swapchains() {
                         const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                         texture_ctx->commands.clear_rtv(ctx.textures[index].texture, texture_ctx->get_rtv(), clear_color, D3D12_RESOURCE_STATE_RENDER_TARGET);
                         texture_ctx->commands.execute();
-                        texture_ctx->commands.wait(100);
+                        // The RTV heap is released right below, so this clear has to be retired first.
+                        texture_ctx->commands.wait(INFINITE);
                     } else {
                         spdlog::error("[VR] Failed to create RTV for swapchain image {}.", index);
                     }

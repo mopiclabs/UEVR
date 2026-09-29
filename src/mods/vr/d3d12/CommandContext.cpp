@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include <spdlog/spdlog.h>
 #include <utility/String.hpp>
 
@@ -10,6 +12,11 @@ namespace d3d12 {
 bool CommandContext::setup(const wchar_t* name) {
     std::scoped_lock _{this->mtx};
 
+    // Don't release an allocator/list the GPU may still be executing.
+    if (this->waiting_for_fence && !this->wait(2000)) {
+        spdlog::error("[VR] Rebuilding command context {} while GPU work is still pending", utility::narrow(name));
+    }
+
     this->internal_name = name;
 
     auto& hook = g_framework->get_d3d12_hook();
@@ -18,6 +25,14 @@ bool CommandContext::setup(const wchar_t* name) {
     this->cmd_allocator.Reset();
     this->cmd_list.Reset();
     this->fence.Reset();
+    this->fence_value = 0;
+    this->waiting_for_fence = false;
+    this->has_commands = false;
+
+    if (this->fence_event != nullptr) {
+        CloseHandle(this->fence_event);
+        this->fence_event = nullptr;
+    }
 
     if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&this->cmd_allocator)))) {
         spdlog::error("[VR] Failed to create command allocator for {}", utility::narrow(name));
@@ -47,34 +62,95 @@ bool CommandContext::setup(const wchar_t* name) {
 
 void CommandContext::reset() {
     std::scoped_lock _{this->mtx};
-    this->wait(2000);
+
+    if (this->waiting_for_fence && !this->wait(2000)) {
+        spdlog::error("[VR] Releasing command context {} while GPU work is still pending", utility::narrow(this->internal_name));
+    }
+
     //this->on_post_present(VR::get().get());
 
     this->cmd_allocator.Reset();
     this->cmd_list.Reset();
     this->fence.Reset();
     this->fence_value = 0;
-    CloseHandle(this->fence_event);
-    this->fence_event = 0;
+
+    if (this->fence_event != nullptr) {
+        CloseHandle(this->fence_event);
+        this->fence_event = nullptr;
+    }
+
     this->waiting_for_fence = false;
+    this->has_commands = false;
 }
 
-void CommandContext::wait(uint32_t ms) {
+bool CommandContext::wait(uint32_t ms) {
     std::scoped_lock _{this->mtx};
 
-	if (this->fence_event && this->waiting_for_fence) {
-        WaitForSingleObject(this->fence_event, ms);
-        ResetEvent(this->fence_event);
-        this->waiting_for_fence = false;
-        if (FAILED(this->cmd_allocator->Reset())) {
-            spdlog::error("[VR] Failed to reset command allocator for {}", utility::narrow(this->internal_name));
+    if (!this->waiting_for_fence) {
+        return true;
+    }
+
+    if (this->fence_event == nullptr || this->fence == nullptr || this->cmd_allocator == nullptr || this->cmd_list == nullptr) {
+        return false;
+    }
+
+    // Decide completion from the fence value, not from the event: a wait that timed out used to
+    // recycle the allocator anyway (e.g. the wait(0) in D3D12Component::clear_backbuffer), and the
+    // late signal then made the next wait on this (auto-reset) event return before the new work
+    // had finished, so allocators kept getting reset while the GPU was still executing them.
+    if (this->fence->GetCompletedValue() < this->fence_value) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto timeout = std::chrono::milliseconds{ms};
+
+        while (this->fence->GetCompletedValue() < this->fence_value) {
+            DWORD wait_ms = INFINITE;
+
+            if (ms != INFINITE) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+
+                if (elapsed >= timeout) {
+                    break;
+                }
+
+                wait_ms = (DWORD)(timeout - elapsed).count();
+            }
+
+            // Drop any stale signal (e.g. a late one from an earlier value) and (re)arm the event for
+            // the value we actually need. If the fence completes in between, SetEventOnCompletion signals immediately.
+            ResetEvent(this->fence_event);
+
+            if (FAILED(this->fence->SetEventOnCompletion(this->fence_value, this->fence_event))) {
+                if (ms != INFINITE) {
+                    break;
+                }
+
+                Sleep(1); // can't arm the event, poll instead
+                continue;
+            }
+
+            if (WaitForSingleObject(this->fence_event, wait_ms) == WAIT_FAILED) {
+                break;
+            }
         }
 
-        if (FAILED(this->cmd_list->Reset(this->cmd_allocator.Get(), nullptr))) {
-            spdlog::error("[VR] Failed to reset command list for {}", utility::narrow(this->internal_name));
+        if (this->fence->GetCompletedValue() < this->fence_value) {
+            return false; // still in flight, the allocator/list must not be touched yet
         }
-        this->has_commands = false;
     }
+
+    ResetEvent(this->fence_event);
+    this->waiting_for_fence = false;
+
+    if (FAILED(this->cmd_allocator->Reset())) {
+        spdlog::error("[VR] Failed to reset command allocator for {}", utility::narrow(this->internal_name));
+    }
+
+    if (FAILED(this->cmd_list->Reset(this->cmd_allocator.Get(), nullptr))) {
+        spdlog::error("[VR] Failed to reset command list for {}", utility::narrow(this->internal_name));
+    }
+
+    this->has_commands = false;
+    return true;
 }
 
 void CommandContext::copy(ID3D12Resource* src, ID3D12Resource* dst, D3D12_RESOURCE_STATES src_state, D3D12_RESOURCE_STATES dst_state) {
