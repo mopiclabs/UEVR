@@ -2101,9 +2101,14 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         };
     };
 
+    bool fov_updated = (
+        memcmp(&this->views[0].fov, &this->last_fovs[0], sizeof(XrFovf)) != 0
+        || memcmp(&this->views[1].fov, &this->last_fovs[1], sizeof(XrFovf)) != 0
+    ); // XrFovf is a POD type, so we compare it byte-by-byte
+
     // if we've not yet derived an eye projection matrix, or we've changed the projection, derive it here
     // Hacky way to check for an uninitialised eye matrix - is there something better, is this necessary?
-    if (this->should_recalculate_eye_projections || this->last_eye_matrix_nearz != nearz || this->projections[0][2][3] == 0) {
+    if (this->should_recalculate_eye_projections || this->last_eye_matrix_nearz != nearz || this->projections[0][2][3] == 0 || fov_updated) {
         // deriving the texture bounds when modifying projections requires left and right raw projections so get them all before we start:
         std::unique_lock __{this->eyes_mtx};
         const auto& left_fov = this->views[0].fov;
@@ -2135,6 +2140,9 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
                 view_bounds[1][3] = 1.0f;
             }
 
+            // don't re-evaluate (and warn about) the same FOVs every frame
+            this->last_fovs[0] = this->views[0].fov;
+            this->last_fovs[1] = this->views[1].fov;
             this->should_update_eye_matrices = false;
             return VRRuntime::Error::SUCCESS;
         }
@@ -2144,6 +2152,11 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         this->has_valid_projection_data = true;
         this->should_recalculate_eye_projections = false;
         this->last_eye_matrix_nearz = nearz;
+
+        if (fov_updated) {
+            this->last_fovs[0] = this->views[0].fov;
+            this->last_fovs[1] = this->views[1].fov;
+        }
     }
     // don't allow the eye matrices to be derived again until after the next frame sync
     this->should_update_eye_matrices = false;
