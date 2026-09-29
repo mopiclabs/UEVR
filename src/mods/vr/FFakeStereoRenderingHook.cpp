@@ -3151,11 +3151,9 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
     SPDLOG_INFO_ONCE("Called LocalPlayerSetupViewPoint for the first time");
 
     if (!g_hook->m_fixed_localplayer_view_count) {
-        g_hook->note_localplayer_bootstrap_frame();
-
         static bool attempted = false;
 
-        if (!attempted && g_hook->is_localplayer_bootstrap_safe()) {
+        if (!attempted) {
             attempted = true;
 
             if (localplayer != nullptr && !IsBadReadPtr(localplayer, sizeof(void*))) try {
@@ -5117,12 +5115,9 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
     //if (!vr->is_using_afr() || vr->is_ghosting_fix_enabled() || !g_hook->m_get_desired_number_of_views_hook) {
     if (!vr->should_skip_post_init_properties()) {
         if (!g_hook->m_fixed_localplayer_view_count) {
-            g_hook->note_localplayer_bootstrap_frame();
-
-            // Only install the post hook (which performs the bootstrap on this very return) once it's safe.
-            // This also makes sure the hooked return site is the steady-state caller (GetProjectionData)
-            // and not some one-off call made while the game was still booting.
-            if (!g_hook->m_calculate_stereo_projection_matrix_post_hook && g_hook->is_localplayer_bootstrap_safe()) {
+            // The post hook runs the bootstrap on this very return, before the second view's
+            // CalcSceneViewInitOptions and before any stereo view family is rendered.
+            if (!g_hook->m_calculate_stereo_projection_matrix_post_hook) {
                 const auto return_address = (uintptr_t)_ReturnAddress();
                 SPDLOG_INFO("Inserting midhook after CalculateStereoProjectionMatrix... @ {:x}", return_address);
 
@@ -5518,10 +5513,6 @@ void FFakeStereoRenderingHook::post_calculate_stereo_projection_matrix(safetyhoo
         return;
     }
 
-    if (!g_hook->is_localplayer_bootstrap_safe()) {
-        return; // try again on a later frame
-    }
-
     auto vfunc = utility::find_virtual_function_start(g_hook->m_calculate_stereo_projection_matrix_post_hook.target_address());
 
     if (!vfunc) {
@@ -5661,10 +5652,6 @@ void FFakeStereoRenderingHook::pre_get_projection_data(safetyhook::Context& ctx)
         return;
     }
 
-    if (!g_hook->is_localplayer_bootstrap_safe()) {
-        return; // try again on a later frame
-    }
-
     const auto localplayer = ctx.rcx;
     SPDLOG_INFO("Local player: {:x}", localplayer);
 
@@ -5675,67 +5662,6 @@ void FFakeStereoRenderingHook::pre_get_projection_data(safetyhook::Context& ctx)
     }
 
     g_hook->post_init_properties(localplayer);
-}
-
-namespace {
-// A gap longer than this between two stereo projection calculations means the game thread stalled
-// (map load, blocking asset load, shader/PSO compilation...). The engine isn't in a steady state.
-constexpr auto LOCALPLAYER_BOOTSTRAP_MAX_FRAME_GAP = std::chrono::milliseconds(250);
-
-// How long frames must have been produced without such a gap before the bootstrap is allowed to run.
-// When injecting in-game this only postpones the second eye's view state by a few seconds.
-constexpr auto LOCALPLAYER_BOOTSTRAP_STABLE_DURATION = std::chrono::seconds(5);
-
-int64_t steady_ticks_now() {
-    return std::chrono::steady_clock::now().time_since_epoch().count();
-}
-
-template<typename T>
-int64_t to_steady_ticks(T duration) {
-    return std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration).count();
-}
-
-int64_t steady_ticks_to_ms(int64_t ticks) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::duration{ticks}).count();
-}
-}
-
-void FFakeStereoRenderingHook::note_localplayer_bootstrap_frame() {
-    const auto now = steady_ticks_now();
-    const auto last = m_localplayer_bootstrap_last_frame.exchange(now);
-
-    if (last == 0 || now - last > to_steady_ticks(LOCALPLAYER_BOOTSTRAP_MAX_FRAME_GAP)) {
-        if (last != 0) {
-            // (computed outside the macro, it declares its own `now`/`last`)
-            const auto gap_ms = steady_ticks_to_ms(now - last);
-            SPDLOG_INFO_EVERY_N_SEC(1, "[PostInitProperties] {} ms frame gap while the LocalPlayer bootstrap is pending (loading?), restarting stability window", gap_ms);
-        }
-
-        m_localplayer_bootstrap_stable_since.store(now);
-    }
-}
-
-bool FFakeStereoRenderingHook::is_localplayer_bootstrap_safe() {
-    const auto now = steady_ticks_now();
-    const auto last = m_localplayer_bootstrap_last_frame.load();
-    const auto stable_since = m_localplayer_bootstrap_stable_since.load();
-
-    // No cadence information yet or the game thread is stalling right now.
-    if (last == 0 || stable_since == 0 || now - last > to_steady_ticks(LOCALPLAYER_BOOTSTRAP_MAX_FRAME_GAP)) {
-        return false;
-    }
-
-    if (now - stable_since < to_steady_ticks(LOCALPLAYER_BOOTSTRAP_STABLE_DURATION)) {
-        if (!m_logged_localplayer_bootstrap_deferral.exchange(true)) {
-            SPDLOG_INFO("[PostInitProperties] Deferring LocalPlayer bootstrap until frames have been stable for {} ms (early injection safety)",
-                std::chrono::duration_cast<std::chrono::milliseconds>(LOCALPLAYER_BOOTSTRAP_STABLE_DURATION).count());
-        }
-
-        return false;
-    }
-
-    SPDLOG_INFO_ONCE("[PostInitProperties] Frames stable for {} ms, running LocalPlayer bootstrap", steady_ticks_to_ms(now - stable_since));
-    return true;
 }
 
 void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
