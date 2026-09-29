@@ -107,6 +107,7 @@
 #include "../../utility/BuildIdentity.hpp"
 
 #include "FFakeStereoRenderingHook.hpp"
+#include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
 #include "BreathedgeInventoryPolicy.hpp"
@@ -5440,6 +5441,19 @@ bool is_ue_5_0_to_5_3_runtime() {
             str_version.starts_with("5.1") ||
             str_version.starts_with("5.2") ||
             str_version.starts_with("5.3");
+    }
+
+    if (const auto file_major = HIWORD(disk_version.dwFileVersionMS); file_major != 4 && file_major != 5) {
+        // Shipping games often have neither a "++UE5+Release-5.x" branch string nor an engine file version
+        // (the exe's version resource is the game's own version, e.g. 1.0).
+        // UE5.4 inserted CameraToViewTarget into FSceneViewProjectionData, which moves ViewFamily from
+        // 0x140 to 0x158, so the runtime-discovered FSceneViewInitOptions layout tells the two apart.
+        const auto layout = sdk::FSceneViewInitOptionsBase::get_layout_snapshot();
+        if (layout != nullptr && layout->view_family.has_value()) {
+            SPDLOG_INFO_ONCE("[Version] Engine version unknown, FSceneViewInitOptions ViewFamily at 0x{:x} -> UE5.0-5.3 layout: {}",
+                *layout->view_family, *layout->view_family == 0x140);
+            return *layout->view_family == 0x140;
+        }
     }
 
     return disk_version.dwFileVersionMS >= 0x50000 && disk_version.dwFileVersionMS < 0x50004;
@@ -23538,6 +23552,112 @@ void FFakeStereoRenderingHook::localplayer_setup_viewpoint(void* localplayer, vo
     g_hook->m_localplayer_get_viewpoint_hook.call<void>(localplayer, view_info, pass);
 }
 
+namespace native_stereo_upscalers {
+// UE5's FSceneViewFamily owns four back to back ISceneViewFamilyExtention pointers:
+// ScreenPercentageInterface, TemporalUpscalerInterface, PrimarySpatialUpscalerInterface and SecondarySpatialUpscalerInterface.
+// ~FSceneViewFamily deletes them in that order (mov rcx, [this+X]; test rcx, rcx; jz; mov rax, [rcx]; mov edx, 1; call [rax]),
+// so walking the family's deleting destructor both locates them and tells us the family owns them.
+void collect_view_family_deletes(uintptr_t fn, int depth, std::vector<int32_t>& deleted) {
+    std::optional<int32_t> rcx_disp{};
+
+    for (auto ip = fn; ip < fn + 0x400;) {
+        const auto ix = utility::decode_one((uint8_t*)ip);
+
+        if (!ix) {
+            return;
+        }
+
+        const auto& op0 = ix->Operands[0];
+        const auto& op1 = ix->Operands[1];
+        const auto writes_rcx = ix->OperandsCount >= 1 && op0.Type == ND_OP_REG && op0.Access.Write &&
+                                op0.Info.Register.Type == ND_REG_GPR && op0.Info.Register.Reg == NDR_RCX;
+
+        if (writes_rcx && ix->Instruction == ND_INS_MOV && op1.Type == ND_OP_MEM && op1.Info.Memory.HasBase && op1.Info.Memory.HasDisp &&
+            !op1.Info.Memory.HasIndex && !op1.Info.Memory.IsRipRel)
+        {
+            rcx_disp = (int32_t)op1.Info.Memory.Disp;
+        } else if (writes_rcx) {
+            rcx_disp.reset();
+        } else if (ix->Instruction == ND_INS_CALLNI && op0.Type == ND_OP_MEM && op0.Info.Memory.HasBase && op0.Info.Memory.Base == NDR_RAX &&
+                   !op0.Info.Memory.HasDisp && !op0.Info.Memory.HasIndex)
+        {
+            if (rcx_disp) {
+                deleted.push_back(*rcx_disp);
+            }
+
+            rcx_disp.reset();
+        } else if (ix->Instruction == ND_INS_CALLNR) {
+            if (depth < 2) {
+                collect_view_family_deletes(utility::calculate_absolute(ip + 1), depth + 1, deleted);
+            }
+
+            rcx_disp.reset();
+        } else if (ix->Instruction == ND_INS_JMPNR && ix->Length == 5) {
+            // Tail call into the base destructor
+            if (depth < 2) {
+                collect_view_family_deletes(utility::calculate_absolute(ip + 1), depth + 1, deleted);
+            }
+
+            return;
+        } else if (ix->Instruction == ND_INS_RETN || ix->Instruction == ND_INS_INT3) {
+            return;
+        }
+
+        ip += ix->Length;
+    }
+}
+
+std::optional<uint32_t> find_view_family_interface_block(const sdk::FSceneViewFamily* family) {
+    static std::optional<uint32_t> s_block{};
+    static bool s_attempted{false};
+
+    if (s_attempted) {
+        return s_block;
+    }
+
+    s_attempted = true;
+
+    try {
+        const auto vtable = *(uintptr_t**)family;
+
+        if (vtable == nullptr || IsBadReadPtr(vtable, sizeof(void*)) || !utility::get_module_within((void*)vtable[0]).has_value()) {
+            SPDLOG_WARN("[NativeStereoFix] FSceneViewFamily has no usable vtable, upscaler interfaces stay shared between both views");
+            return std::nullopt;
+        }
+
+        std::vector<int32_t> deleted{};
+        collect_view_family_deletes(vtable[0], 0, deleted);
+
+        for (size_t i = 0; i + 3 < deleted.size(); ++i) {
+            const auto x = deleted[i];
+
+            if (x >= 0x30 && x < 0x400 && deleted[i + 1] == x + 8 && deleted[i + 2] == x + 0x10 && deleted[i + 3] == x + 0x18) {
+                s_block = (uint32_t)x;
+                break;
+            }
+        }
+    } catch (...) {
+        s_block = std::nullopt;
+    }
+
+    if (!s_block) {
+        SPDLOG_WARN("[NativeStereoFix] Could not locate the FSceneViewFamily upscaler interfaces, they stay shared between both views");
+        return std::nullopt;
+    }
+
+    SPDLOG_INFO("[NativeStereoFix] FSceneViewFamily interfaces: screen percentage +0x{:x}, upscalers +0x{:x}/+0x{:x}/+0x{:x}",
+        *s_block, *s_block + 8, *s_block + 0x10, *s_block + 0x18);
+
+    return s_block;
+}
+
+// Same as "delete Interface;" in ~FSceneViewFamily (slot 0 is the scalar deleting destructor)
+void delete_view_family_extension(void* obj) {
+    using DeletingDtorFn = void* (*)(void*, uint32_t);
+    (*(DeletingDtorFn**)obj)[0](obj, 1);
+}
+}
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     ZoneScopedN("BeginRenderViewFamilyReal");
     g_hook->m_render_module_begin_render_viewfamily_observed.store(true, std::memory_order_release);
@@ -24245,6 +24365,11 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                     {
                         pair_valid = false;
                         pair_reject_reason = "projection or view rectangle is invalid";
+                        SPDLOG_WARNING_EVERY_N_SEC(2, "[NativeStereoFix] Rejected view {} projection_valid={} rect=[{},{},{},{}] constrained=[{},{},{},{}] pass={}",
+                            view_index, item.projection_valid,
+                            item.view_rect.bounds[0], item.view_rect.bounds[1], item.view_rect.bounds[2], item.view_rect.bounds[3],
+                            item.constrained_view_rect.bounds[0], item.constrained_view_rect.bounds[1], item.constrained_view_rect.bounds[2], item.constrained_view_rect.bounds[3],
+                            (int)item.original_stereo_pass);
                         break;
                     }
 
@@ -25265,6 +25390,21 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         SPDLOG_INFO_ONCE(
             "[Hellblade][NativeStereoFix] Preserving the validated two-view renderer topology for both target transactions");
     }
+
+    // The temporal/spatial upscaler interfaces of the family (not the screen percentage interface at +0).
+    const auto upscaler_block = native_stereo_upscalers::find_view_family_interface_block(view_family);
+    const auto upscaler_slot = [&](size_t i) -> void*& {
+        return *(void**)((uintptr_t)view_family + *upscaler_block + sizeof(void*) * (i + 1));
+    };
+
+    std::array<void*, 3> upscalers_before_first_submission{};
+
+    if (upscaler_block) {
+        for (size_t i = 0; i < upscalers_before_first_submission.size(); ++i) {
+            upscalers_before_first_submission[i] = upscaler_slot(i);
+        }
+    }
+
     call_original();
 
     uint32_t daysgone_first_frame{};
@@ -25324,6 +25464,65 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         scene->decrement_frame_count();
     }
 
+    // Upscalers that view extensions created during the first submission are forked by its FSceneRenderer
+    // but left in the family. Submitting the same family again would fork the same objects, and upscalers that
+    // keep per-frame data behind a shared pointer then hand the second renderer resources from the first
+    // renderer's graph (e.g. FSR1 reusing the first view's FRDGTexture). Detach them so the extensions create
+    // a separate set for the second view.
+    std::array<void*, 3> upscalers_first_submission{};
+    std::array<bool, 3> detached_upscalers{};
+
+    if (upscaler_block) {
+        for (size_t i = 0; i < upscalers_first_submission.size(); ++i) {
+            auto& slot = upscaler_slot(i);
+            upscalers_first_submission[i] = slot;
+
+            if (slot == nullptr) {
+                continue;
+            }
+
+            if (upscalers_before_first_submission[i] != nullptr) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix] Upscaler interface +0x{:x} was set before BeginRenderingViewFamilies, both views share it",
+                    *upscaler_block + sizeof(void*) * (i + 1));
+                continue;
+            }
+
+            const auto vtable = !IsBadReadPtr(slot, sizeof(void*)) ? *(void**)slot : nullptr;
+
+            if (vtable == nullptr || !utility::get_module_within(vtable).has_value()) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix] Upscaler interface +0x{:x} does not look like an object, leaving it alone",
+                    *upscaler_block + sizeof(void*) * (i + 1));
+                continue;
+            }
+
+            slot = nullptr;
+            detached_upscalers[i] = true;
+        }
+    }
+
+    // Runs on every exit path after the second submission (or its early rejection).
+    utility::ScopeGuard restore_upscalers{[&]() {
+        for (size_t i = 0; i < detached_upscalers.size(); ++i) {
+            if (!detached_upscalers[i]) {
+                continue;
+            }
+
+            auto& slot = upscaler_slot(i);
+
+            if (slot == nullptr) {
+                // Not recreated for the second view, give it back to the family which deletes it.
+                SPDLOG_WARN_ONCE("[NativeStereoFix] Upscaler interface +0x{:x} was not recreated for the second view",
+                    *upscaler_block + sizeof(void*) * (i + 1));
+                slot = upscalers_first_submission[i];
+            } else if (slot != upscalers_first_submission[i]) {
+                // The family now owns the second view's upscaler. The first renderer holds its own fork of the first one,
+                // so delete it here like ~FSceneViewFamily would have.
+                SPDLOG_INFO_ONCE("[NativeStereoFix] Gave the second view its own upscaler interface +0x{:x} (vtable {:x})",
+                    *upscaler_block + sizeof(void*) * (i + 1), (uintptr_t)*(void**)slot);
+                native_stereo_upscalers::delete_view_family_extension(upscalers_first_submission[i]);
+            }
+        }
+    }};
     utility::ScopeGuard clear_daysgone_frame_override{[&]() {
         if (use_daysgone_same_frame_render) {
             clear_daysgone_native_frame_override();
@@ -38157,6 +38356,7 @@ bool VRRenderTargetManager_Base::publish_scene_capture_target_snapshot(
     const auto expected_width = static_cast<uint32_t>(VR::get()->get_hmd_width());
     const auto expected_height = static_cast<uint32_t>(VR::get()->get_hmd_height());
     bool resource_valid = false;
+    uint64_t got_w = 0; uint32_t got_h = 0, got_mips = 0, got_array = 0, got_samples = 0, got_fmt = 0; bool got_device = false;
 
     if (g_framework->get_renderer_type() == Framework::RendererType::D3D11) {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture{};
@@ -38176,6 +38376,8 @@ bool VRRenderTargetManager_Base::publish_scene_capture_target_snapshot(
                 expected_device != nullptr && resource_device.Get() == expected_device &&
                 bgra_compatible && desc.Width == expected_width && desc.Height == expected_height &&
                 desc.MipLevels == 1 && desc.ArraySize == 1 && desc.SampleDesc.Count == 1;
+            got_w = desc.Width; got_h = desc.Height; got_mips = desc.MipLevels; got_array = desc.ArraySize; got_samples = desc.SampleDesc.Count; got_fmt = (uint32_t)desc.Format;
+            got_device = expected_device != nullptr && resource_device.Get() == expected_device;
         }
     } else if (g_framework->get_renderer_type() == Framework::RendererType::D3D12) {
         Microsoft::WRL::ComPtr<ID3D12Resource> texture{};
@@ -38192,17 +38394,28 @@ bool VRRenderTargetManager_Base::publish_scene_capture_target_snapshot(
                 desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
                 desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
             resource_valid =
-                expected_device != nullptr && resource_device.Get() == expected_device &&
+                utility::is_same_d3d12_device(resource_device.Get(), expected_device) &&
                 desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && bgra_compatible &&
                 desc.Width == expected_width && desc.Height == expected_height &&
                 desc.MipLevels == 1 && desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1;
+            got_w = desc.Width; got_h = desc.Height; got_mips = desc.MipLevels; got_array = desc.DepthOrArraySize; got_samples = desc.SampleDesc.Count; got_fmt = (uint32_t)desc.Format;
+            got_device = expected_device != nullptr && resource_device.Get() == expected_device;
+            if (!got_device) {
+                Microsoft::WRL::ComPtr<IUnknown> id_resource{}, id_expected{};
+                Microsoft::WRL::ComPtr<ID3D12Device> resource_device_base{};
+                if (resource_device != nullptr) { resource_device->QueryInterface(IID_PPV_ARGS(&id_resource)); resource_device->QueryInterface(IID_PPV_ARGS(&resource_device_base)); }
+                if (expected_device != nullptr) { ((IUnknown*)expected_device)->QueryInterface(IID_PPV_ARGS(&id_expected)); }
+                SPDLOG_WARNING_EVERY_N_SEC(2, "[NativeStereoFix] Scene-capture device differs from the swapchain device: resource(Device4)={:x} resource(Device)={:x} hook={:x} identity resource={:x} hook={:x} identity_equal={}",
+                    (uintptr_t)resource_device.Get(), (uintptr_t)resource_device_base.Get(), (uintptr_t)expected_device, (uintptr_t)id_resource.Get(), (uintptr_t)id_expected.Get(), id_resource != nullptr && id_resource.Get() == id_expected.Get());
+            }
         }
     }
 
     if (!resource_valid) {
         SPDLOG_WARNING_EVERY_N_SEC(
             2,
-            "[NativeStereoFix] Refusing to publish a scene-capture resource that does not match the active RHI/device/eye extent");
+            "[NativeStereoFix] Refusing to publish a scene-capture resource that does not match the active RHI/device/eye extent (got {}x{} fmt={} mips={} array={} samples={} device_match={}, expected {}x{})",
+            got_w, got_h, got_fmt, got_mips, got_array, got_samples, got_device, expected_width, expected_height);
         return false;
     }
 
