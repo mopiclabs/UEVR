@@ -3674,6 +3674,32 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         }
     };
 
+    // Same copy with the last validated right-eye capture, for a frame whose packet was missing or refused.
+    // The engine never renders the right half of the backbuffer under the Native Stereo Fix, so copying the
+    // backbuffer instead would show an unrendered (black) right eye for that frame.
+    auto pre_render_cached = [
+        left_source = m_game_tex.texture,
+        right_source = m_scene_capture_tex.texture,
+        left_width = m_backbuffer_size[0] / 2,
+        left_height = m_backbuffer_size[1],
+        right_width = m_scene_capture_width,
+        right_height = m_scene_capture_height](d3d12::CommandContext& commands, ID3D12Resource* render_target) {
+        if (render_target == nullptr || left_source == nullptr || right_source == nullptr) {
+            return;
+        }
+
+        D3D12_BOX left_src_box{ .left = 0, .top = 0, .front = 0, .right = left_width, .bottom = left_height, .back = 1 };
+        D3D12_BOX right_src_box{ .left = 0, .top = 0, .front = 0, .right = right_width, .bottom = right_height, .back = 1 };
+
+        commands.copy_region_stereo(
+            left_source.Get(), right_source.Get(), render_target,
+            &left_src_box, &right_src_box,
+            0, 0, 0, left_width, 0, 0,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_RENDER_TARGET
+        );
+    };
+
     // For copying the real backbuffer if we need to
     if (m_game_tex.texture.Get() != nullptr && backbuffer == real_backbuffer) {
         const auto idx = swapchain->GetCurrentBackBufferIndex() % m_game_tex_commands.size();
@@ -5020,6 +5046,17 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     const auto use_native_array_submit =
                         vr->is_native_stereo_fix_texture_array_submit_enabled() &&
                         vr->m_openxr->swapchains.contains(native_stereo_array_swapchain);
+                    const bool reuse_last_native_capture =
+                        native_stereo_packet == nullptr &&
+                        vr->is_native_stereo_fix_enabled() &&
+                        // only while the fix is operating and just this frame's packet is missing/refused; its
+                        // fallback frames (non-Active states) render the right half natively
+                        native_stereo_hook != nullptr && native_stereo_hook->is_native_stereo_fix_active() &&
+                        !uevr::nascar::is_target() &&
+                        m_scene_capture_tex.texture.Get() != nullptr &&
+                        m_game_tex.texture.Get() != nullptr &&
+                        m_last_native_capture_submit.time_since_epoch().count() != 0 &&
+                        std::chrono::steady_clock::now() - m_last_native_capture_submit < std::chrono::milliseconds(500);
 
                     if (vr->is_using_mono()) {
                         bool recorded = false;
@@ -5132,6 +5169,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                             std::nullopt,
                             D3D12_RESOURCE_STATE_RENDER_TARGET,
                             nullptr);
+                    } else if (reuse_last_native_capture && !shf_using_mono_expansion && !dune_using_hmd_mono_expansion) {
+                        SPDLOG_INFO_EVERY_N_SEC(5, "[NativeStereoFix][D3D12] No right-eye packet this frame, reusing the last right-eye capture");
+                        m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, pre_render_cached, std::nullopt, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
                     } else if (native_stereo_packet == nullptr ||
                                m_scene_capture_tex.texture.Get() == nullptr ||
                                shf_using_mono_expansion ||
@@ -5139,6 +5179,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, backbuffer.Get(), scene_source_state, nullptr);
                     } else {
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, pre_render, std::nullopt, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
+                        m_last_native_capture_submit = std::chrono::steady_clock::now();
                     }
 
                     if (scene_depth_tex != nullptr && !native_stereo_array_submit_active) {

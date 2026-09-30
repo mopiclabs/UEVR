@@ -266,6 +266,8 @@ private:
     bool m_ue58_dedicated_ui_spectator_valid{};
     d3d12::TextureContext m_scene_capture_tex{};
     uint64_t m_scene_capture_generation{};
+    // Last time a validated right-eye capture was submitted (Native Stereo Fix).
+    std::chrono::steady_clock::time_point m_last_native_capture_submit{};
     uint32_t m_scene_capture_width{};
     uint32_t m_scene_capture_height{};
     d3d12::TextureContext m_shf_mono_scene_tex{};
