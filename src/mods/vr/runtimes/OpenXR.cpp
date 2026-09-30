@@ -133,15 +133,18 @@ bool is_projection_component_valid(float value) {
 
 bool is_eye_projection_valid(const Vector4f& projection) {
     constexpr auto epsilon = 1.0e-5f;
+    constexpr auto max_tan = 1.0e3f;
 
-    return is_projection_component_valid(projection[0]) &&
-           is_projection_component_valid(projection[1]) &&
-           is_projection_component_valid(projection[2]) &&
-           is_projection_component_valid(projection[3]) &&
-           projection[0] < -epsilon &&
-           projection[1] > epsilon &&
-           projection[2] > epsilon &&
-           projection[3] < -epsilon;
+    // Only require a non-degenerate frustum. Off-axis runtimes (Mopic's display follows the viewer's eyes)
+    // can report frusta that don't contain the view axis, e.g. both vertical edges below it.
+    for (auto i = 0; i < 4; ++i) {
+        if (!is_projection_component_valid(projection[i]) || std::abs(projection[i]) > max_tan) {
+            return false;
+        }
+    }
+
+    return projection[0] < projection[1] - epsilon && // left < right
+           projection[3] < projection[2] - epsilon;   // down < up
 }
 
 bool is_stalker2_openxr_frame_loop_guarded() {
@@ -2034,6 +2037,9 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
     // every few seconds. The first derivation and near-z changes are always logged.
     static std::chrono::steady_clock::time_point s_last_derivation_log{};
     bool log_derivation = true;
+    // The render target scale follows the projections, but a FOV-only change (every frame on Mopic's runtime)
+    // must not resize the eye render targets each frame.
+    bool update_eye_adjustments = true;
 
     auto get_mat = [&](int eye) {
         const auto& vr = VR::get();
@@ -2066,13 +2072,29 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             tan_half_fov[2] = this->raw_projections[eye][2];
             tan_half_fov[3] = this->raw_projections[eye][3];
         }
-        view_bounds[eye][0] = 0.5f - 0.5f * this->raw_projections[eye][0] / tan_half_fov[0];
-        view_bounds[eye][1] = 0.5f + 0.5f * this->raw_projections[eye][1] / tan_half_fov[1];
-        view_bounds[eye][2] = 0.5f - 0.5f * this->raw_projections[eye][2] / tan_half_fov[2];
-        view_bounds[eye][3] = 0.5f + 0.5f * this->raw_projections[eye][3] / tan_half_fov[3];
+        // Where the eye's raw frustum lies inside the rendered (override) frustum, as a linear mapping of the
+        // tangents. Equals the old 0.5 -/+ 0.5 * raw / override form for axis-containing frusta, and stays exact
+        // for off-axis ones (Mopic's display) and the mirror/matched overrides.
+        {
+            const auto& raw = this->raw_projections[eye];
+            const auto width = tan_half_fov[1] - tan_half_fov[0];
+            const auto height = tan_half_fov[2] - tan_half_fov[3];
+
+            if (width > 1.0e-6f && height > 1.0e-6f) {
+                view_bounds[eye][0] = std::clamp((raw[0] - tan_half_fov[0]) / width, 0.0f, 1.0f);
+                view_bounds[eye][1] = std::clamp((raw[1] - tan_half_fov[0]) / width, 0.0f, 1.0f);
+                view_bounds[eye][2] = std::clamp((tan_half_fov[2] - raw[2]) / height, 0.0f, 1.0f);
+                view_bounds[eye][3] = std::clamp((tan_half_fov[2] - raw[3]) / height, 0.0f, 1.0f);
+            } else {
+                view_bounds[eye][0] = 0.0f;
+                view_bounds[eye][1] = 1.0f;
+                view_bounds[eye][2] = 0.0f;
+                view_bounds[eye][3] = 1.0f;
+            }
+        }
 
         // if we've derived the right eye, we have up to date view bounds for both so adjust the render target if necessary
-        if (eye == 1) {
+        if (eye == 1 && update_eye_adjustments) {
             if (vr->should_grow_rectangle_for_projection_cropping()) {
                 eye_width_adjustment = 1 / std::max(view_bounds[0][1] - view_bounds[0][0], view_bounds[1][1] - view_bounds[1][0]);
                 eye_height_adjustment = 1 / std::max(view_bounds[0][3] - view_bounds[0][2], view_bounds[1][3] - view_bounds[1][2]);
@@ -2110,9 +2132,13 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         };
     };
 
+    // Read both FOVs once so the change check, the derivation and last_fovs all use the same values.
+    // (Not under pose_mtx: VR::update_hmd_state already holds it when it calls this.)
+    const std::array<XrFovf, 2> current_fovs{ this->views[0].fov, this->views[1].fov };
+
     bool fov_updated = (
-        memcmp(&this->views[0].fov, &this->last_fovs[0], sizeof(XrFovf)) != 0
-        || memcmp(&this->views[1].fov, &this->last_fovs[1], sizeof(XrFovf)) != 0
+        memcmp(&current_fovs[0], &this->last_fovs[0], sizeof(XrFovf)) != 0
+        || memcmp(&current_fovs[1], &this->last_fovs[1], sizeof(XrFovf)) != 0
     ); // XrFovf is a POD type, so we compare it byte-by-byte
 
     // if we've not yet derived an eye projection matrix, or we've changed the projection, derive it here
@@ -2120,19 +2146,19 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
     if (this->should_recalculate_eye_projections || this->last_eye_matrix_nearz != nearz || this->projections[0][2][3] == 0 || fov_updated) {
         // deriving the texture bounds when modifying projections requires left and right raw projections so get them all before we start:
         std::unique_lock __{this->eyes_mtx};
-        const auto& left_fov = this->views[0].fov;
+        const auto& left_fov = current_fovs[0];
         this->raw_projections[0][0] = tan(left_fov.angleLeft);
         this->raw_projections[0][1] = tan(left_fov.angleRight);
         this->raw_projections[0][2] = tan(left_fov.angleUp);
         this->raw_projections[0][3] = tan(left_fov.angleDown);
-        const auto& right_fov = this->views[1].fov;
+        const auto& right_fov = current_fovs[1];
         this->raw_projections[1][0] = tan(right_fov.angleLeft);
         this->raw_projections[1][1] = tan(right_fov.angleRight);
         this->raw_projections[1][2] = tan(right_fov.angleUp);
         this->raw_projections[1][3] = tan(right_fov.angleDown);
 
         if (!is_eye_projection_valid(this->raw_projections[0]) || !is_eye_projection_valid(this->raw_projections[1])) {
-            spdlog::warn(
+            SPDLOG_WARNING_EVERY_N_SEC(5,
                 "[OpenXR] Refusing to recalculate eye projections from invalid FOVs. Left=({}, {}, {}, {}) Right=({}, {}, {}, {})",
                 this->raw_projections[0][0], this->raw_projections[0][1], this->raw_projections[0][2], this->raw_projections[0][3],
                 this->raw_projections[1][0], this->raw_projections[1][1], this->raw_projections[1][2], this->raw_projections[1][3]
@@ -2150,15 +2176,17 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             }
 
             // don't re-evaluate (and warn about) the same FOVs every frame
-            this->last_fovs[0] = this->views[0].fov;
-            this->last_fovs[1] = this->views[1].fov;
+            this->last_fovs[0] = current_fovs[0];
+            this->last_fovs[1] = current_fovs[1];
             this->should_update_eye_matrices = false;
             return VRRuntime::Error::SUCCESS;
         }
 
         const auto now = std::chrono::steady_clock::now();
-        log_derivation = !fov_updated || this->should_recalculate_eye_projections || this->last_eye_matrix_nearz != nearz ||
-                         now - s_last_derivation_log >= std::chrono::seconds(5);
+        const bool fov_only_update = fov_updated && !this->should_recalculate_eye_projections && this->last_eye_matrix_nearz == nearz &&
+                                     this->projections[0][2][3] != 0;
+        update_eye_adjustments = !fov_only_update;
+        log_derivation = !fov_only_update || now - s_last_derivation_log >= std::chrono::seconds(5);
 
         if (log_derivation) {
             s_last_derivation_log = now;
@@ -2171,8 +2199,8 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         this->last_eye_matrix_nearz = nearz;
 
         if (fov_updated) {
-            this->last_fovs[0] = this->views[0].fov;
-            this->last_fovs[1] = this->views[1].fov;
+            this->last_fovs[0] = current_fovs[0];
+            this->last_fovs[1] = current_fovs[1];
         }
     }
     // don't allow the eye matrices to be derived again until after the next frame sync
