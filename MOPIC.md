@@ -26,6 +26,7 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | D3D12: Reuse the last right-eye capture when a packet is refused | While the fix is Active, a frame whose packet is stale/missing reuses the capture from the last 500 ms instead of the unrendered backbuffer half. | Sonic Racing CrossWorlds refuses packets ("delta=2") around level changes → right eye flashed black. | `reusing the last right-eye capture` only around transitions. |
 | OpenXR: Accept off-axis frusta and keep FOV-only updates cheap | FOV validity only requires a non-degenerate frustum; exact view_bounds mapping; single FOV read; no render-target resize on FOV-only updates. | Mopic's off-axis frustum can leave the view axis (eye past the panel edge), which froze the realtime FOV. | No `Refusing to recalculate eye projections` while moving in front of the display. |
 | VR: Compare devices by identity in the scene-capture reallocation path | Same device comparison as the publish path. | Avoids rebuilding the capture on every reallocation on proxy-device setups. | — |
+| Framework: Don't tear the framework down while the game exits | `DllMain(DLL_PROCESS_DETACH)` with a non-null `reserved` (process terminating) releases `g_framework` instead of letting the CRT destroy it. | The static destructors released D3D12 resources into the GPU driver after ExitProcess had killed its threads: TEKKEN 8 stayed in `~TextureContext` → dxgi → Intel driver forever after a menu quit (upstream has the same DllMain). | Menu-exit test (`-Recipe`) passes with no `EXIT_HANG`; the process is gone a few seconds after the quit. |
 
 ## Updating to a new joeyhodge release
 
@@ -68,6 +69,18 @@ tests. Mopic Hub provides eye tracking.
 powershell -ExecutionPolicy Bypass -File patches\early-injection\run-early-injection-test.ps1 -Game Tekken8Demo -Runs 3 -GracefulExit -Label <label> -Dll <path to UEVRBackend.dll>
 ```
 
+To test real gameplay and the game's own quit path, `patches\early-injection\tools\gamepilot.py` drives the game
+by looking at the screen (the Mopic display) and sending keys. A recorded recipe replays it unattended:
+
+```
+... -Game Tekken8Demo -Recipe Tekken8Demo -Runs 3 -Label menu      # title > PvC match > main menu > Options > Quit
+... -Game <Game> -WaitForExit -Seconds 1800 -Label discover          # someone (Claude Code) drives and quits it
+```
+
+Verdicts add `MENU_FAIL` (the pilot couldn't follow the recipe, UEVR was fine) and `EXIT_HANG` (the game started
+exiting but its process was still there 30 s later; `exit-hang.dmp` has the stacks). `tools\README.md` explains
+recipes and how to record one for a new game.
+
 Useful options: `-GracefulExit` (close the window like a normal quit and catch exit crashes),
 `-Set "Key=Value;..."` (config overrides for one run), `-UserScript "cmd;..."` (console commands),
 `-InjectDelay <s>` (late-injection control), `-Seconds <s>`, `-Game Custom -ProcessName <exe> -SteamInstallDir <dir>`.
@@ -87,6 +100,10 @@ Results on 2026-09-30 (early injection, graceful exit, this branch):
 
 Brightness of both eyes and realtime FOV were checked by eye on the Mopic display (2026-09-30). There is no
 automatic per-eye luminance check yet.
+
+Before the exit fix the harness couldn't see exit hangs: .NET's `HasExited` turns true as soon as the exit code is
+set, and the harness killed the leftover process afterwards. The "graceful exit" PASS results above predate the
+`EXIT_HANG` check; re-run them with `-GracefulExit` or a recipe.
 
 ## Known gaps
 
