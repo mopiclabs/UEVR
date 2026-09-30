@@ -27028,10 +27028,17 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
     }
 
     const bool medium_requires_game_allocator = medium_is_current_game();
-    const bool use_game_allocator =
+    // FMalloc::malloc() returns null when its Malloc slot wasn't found, so the game allocator is only usable with it.
+    const bool game_allocator_usable = sdk::FMalloc::get() != nullptr && sdk::FMalloc::get_malloc_index().has_value();
+    const bool wants_game_allocator =
         m_use_fmalloc_scene_view_extensions->value() || medium_requires_game_allocator;
+    const bool use_game_allocator = wants_game_allocator && game_allocator_usable;
 
-    if (medium_requires_game_allocator && sdk::FMalloc::get() == nullptr) {
+    if (wants_game_allocator && !game_allocator_usable) {
+        SPDLOG_WARN("[VR] Game FMalloc is unavailable, allocating the SceneViewExtensions array with UEVR's allocator");
+    }
+
+    if (medium_requires_game_allocator && !game_allocator_usable) {
         SPDLOG_ERROR("[Medium][UE4.25Plus] FMalloc is unavailable; refusing unsafe SceneViewExtensions allocation");
         return false;
     }
@@ -27940,7 +27947,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
         } else {
             if (auto fmalloc = sdk::FMalloc::get(); fmalloc != nullptr) {
                 exts.data = (TWeakPtr<ISceneViewExtension>*)fmalloc->malloc(new_capacity * sizeof(TWeakPtr<ISceneViewExtension>));
-                for (auto i = 0; i < new_capacity; ++i) {
+                if (exts.data == nullptr) {
+                    SPDLOG_ERROR("FMalloc::Malloc failed, falling back to default allocation method...");
+                    exts.data = new TWeakPtr<ISceneViewExtension>[new_capacity]{};
+                } else for (auto i = 0; i < new_capacity; ++i) {
                     new (&exts.data[i]) TWeakPtr<ISceneViewExtension>();
                 }
             } else {
@@ -27971,7 +27981,10 @@ bool FFakeStereoRenderingHook::setup_view_extensions() try {
             } else {
                 if (auto fmalloc = sdk::FMalloc::get(); fmalloc != nullptr) {
                     new_exts = (TWeakPtr<ISceneViewExtension>*)fmalloc->malloc(new_capacity * sizeof(TWeakPtr<ISceneViewExtension>));
-                    for (auto i = 0; i < new_capacity; ++i) {
+                    if (new_exts == nullptr) {
+                        SPDLOG_ERROR("FMalloc::Malloc failed, falling back to default allocation method...");
+                        new_exts = new TWeakPtr<ISceneViewExtension>[new_capacity];
+                    } else for (auto i = 0; i < new_capacity; ++i) {
                         new (&new_exts[i]) TWeakPtr<ISceneViewExtension>();
                     }
                 } else {

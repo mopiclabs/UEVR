@@ -137,6 +137,36 @@ bool migrate_ui_invert_alpha(utility::Config& cfg) {
     return false;
 }
 
+// Mopic config migrations, applied once to an existing config.txt. The version is stored in
+// Mopic_ConfigVersion (a VR option, so config saves keep it).
+constexpr const char* MOPIC_CONFIG_VERSION_KEY = "Mopic_ConfigVersion";
+constexpr int32_t MOPIC_CONFIG_VERSION = 1;
+
+bool migrate_mopic_defaults(utility::Config& cfg) {
+    int32_t version = 0;
+
+    try {
+        if (auto value = cfg.get<int32_t>(MOPIC_CONFIG_VERSION_KEY)) {
+            version = *value;
+        }
+    } catch (...) {
+    }
+
+    if (version >= MOPIC_CONFIG_VERSION) {
+        return false;
+    }
+
+    // 1: UEVR's own allocation of the engine's SceneViewExtensions array makes some games hit an
+    //    FMallocBinned2 fatal error ("realloc an unrecognized block") when they exit, e.g. Sonic Racing
+    //    CrossWorlds. Every existing config stored the old default (false), so switch it once.
+    if (version < 1) {
+        cfg.set<bool>("VR_UseFMallocSceneViewExtensions", true);
+    }
+
+    cfg.set<int32_t>(MOPIC_CONFIG_VERSION_KEY, MOPIC_CONFIG_VERSION);
+    return true;
+}
+
 } // namespace
 
 Mods::Mods() {
@@ -189,13 +219,18 @@ void Mods::reload_config(bool set_defaults) const {
     utility::Config cfg{ config_path.string() };
 
     const auto migrated_invert_alpha = !set_defaults && migrate_ui_invert_alpha(cfg);
+    const auto migrated_mopic_defaults = !set_defaults && migrate_mopic_defaults(cfg);
 
     for (auto& mod : m_mods) {
         spdlog::info("{:s}::on_config_load()", mod->get_name().data());
         mod->on_config_load(cfg, set_defaults);
     }
 
-    if (migrated_invert_alpha) {
+    if (migrated_mopic_defaults) {
+        spdlog::info("Migrated config to Mopic defaults version {}", MOPIC_CONFIG_VERSION);
+    }
+
+    if (migrated_invert_alpha || migrated_mopic_defaults) {
         if (!cfg.save(config_path.string())) {
             spdlog::warn("Failed to persist migrated UI_InvertAlpha value");
         } else {

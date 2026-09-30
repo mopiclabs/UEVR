@@ -1812,6 +1812,8 @@ private:
 
     const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), false) };
     const ModToggle::Ptr m_ghosting_fix_bootstrap_view_states{ ModToggle::create(generate_name("GhostingFixBootstrapViewStates"), false) };
+    // Version of the Mopic config defaults this config.txt has been migrated to (see Mods::reload_config).
+    const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 1, true) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), true) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
@@ -2284,6 +2286,7 @@ public:
             *m_custom_z_near_enabled,
             *m_ghosting_fix,
             *m_ghosting_fix_bootstrap_view_states,
+            *m_mopic_config_version,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,
             *m_native_stereo_fix_preserve_secondary_pass,
