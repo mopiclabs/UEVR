@@ -38551,7 +38551,7 @@ VRRenderTargetManager_Base::get_preservable_scene_capture_for_same_size_realloca
         desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
         desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 
-    if (expected_device == nullptr || resource_device.Get() != expected_device ||
+    if (!utility::is_same_d3d12_device(resource_device.Get(), expected_device) ||
         desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || !bgra_compatible ||
         desc.Width != width || desc.Height != height ||
         desc.MipLevels != 1 || desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1)
