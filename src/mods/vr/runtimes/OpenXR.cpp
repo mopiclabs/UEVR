@@ -2030,6 +2030,11 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         return VRRuntime::Error::SUCCESS;
     }
 
+    // FOV-driven re-derivations can happen every frame (Mopic's runtime follows the viewer), so only log them
+    // every few seconds. The first derivation and near-z changes are always logged.
+    static std::chrono::steady_clock::time_point s_last_derivation_log{};
+    bool log_derivation = true;
+
     auto get_mat = [&](int eye) {
         const auto& vr = VR::get();
         std::array<float, 4> tan_half_fov{};
@@ -2075,7 +2080,9 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
                 eye_width_adjustment = 1;
                 eye_height_adjustment = 1;
             }
-            SPDLOG_INFO("Eye texture proportion scale: {} by {}", eye_width_adjustment, eye_height_adjustment);
+            if (log_derivation) {
+                SPDLOG_INFO("Eye texture proportion scale: {} by {}", eye_width_adjustment, eye_height_adjustment);
+            }
         }
 
         const auto left =   tan_half_fov[0];
@@ -2084,10 +2091,12 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         const auto bottom = tan_half_fov[3];
 
         // signs: at this point we expect left[0] and bottom[3] to be negative
-        SPDLOG_INFO("Original FOV for {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", this->raw_projections[eye][0], this->raw_projections[eye][1],
-                                                                                            this->raw_projections[eye][2], this->raw_projections[eye][3]);
-        SPDLOG_INFO("Derived FOV for {} eye:  {}, {}, {}, {}", eye == 0 ? "left" : "right", left, right, top, bottom);
-        SPDLOG_INFO("Derived texture bounds {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", view_bounds[eye][0], view_bounds[eye][1], view_bounds[eye][2], view_bounds[eye][3]);
+        if (log_derivation) {
+            SPDLOG_INFO("Original FOV for {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", this->raw_projections[eye][0], this->raw_projections[eye][1],
+                                                                                                this->raw_projections[eye][2], this->raw_projections[eye][3]);
+            SPDLOG_INFO("Derived FOV for {} eye:  {}, {}, {}, {}", eye == 0 ? "left" : "right", left, right, top, bottom);
+            SPDLOG_INFO("Derived texture bounds {} eye: {}, {}, {}, {}", eye == 0 ? "left" : "right", view_bounds[eye][0], view_bounds[eye][1], view_bounds[eye][2], view_bounds[eye][3]);
+        }
         float sum_rl = (right + left);
         float sum_tb = (top + bottom);
         float inv_rl = (1.0f / (right - left));
@@ -2145,6 +2154,14 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
             this->last_fovs[1] = this->views[1].fov;
             this->should_update_eye_matrices = false;
             return VRRuntime::Error::SUCCESS;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        log_derivation = !fov_updated || this->should_recalculate_eye_projections || this->last_eye_matrix_nearz != nearz ||
+                         now - s_last_derivation_log >= std::chrono::seconds(5);
+
+        if (log_derivation) {
+            s_last_derivation_log = now;
         }
 
         this->projections[0] = get_mat(0);
