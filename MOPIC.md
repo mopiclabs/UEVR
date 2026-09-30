@@ -107,6 +107,14 @@ set, and the harness killed the leftover process afterwards. The "graceful exit"
 
 ## Known gaps
 
+- TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 9 full
+  recipe runs with UEVR hung (the game never reaches ExitProcess), 0 of 10 without UEVR (`-NoInject`). In the dump
+  the GameThread is in a "stop worker and join" (`SetEvent` + `WaitForSingleObject`, exe+0x5e09670) and the worker
+  (an unnamed thread, loop at exe+0x5e09270) keeps asking its object whether the work is done (vtable+0x10) and
+  sleeping 100 ms instead of exiting. UEVR code isn't on any stack. The harness reports `EXIT_HANG` and writes
+  `exit-hang.dmp` with the memory the stacks point at; on the next occurrence
+  `tools\analysis\workerobj.py exit-hang.dmp <exe> 5e09369` should name the worker's class (vtable/RTTI).
+
 - Wukong (UE 5.0): the fix stays in "learning an exact primary/secondary eye pair" (no candidate family is
   found, nothing is logged); the praydog-based line did render the second view there. Needs a closer look.
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
