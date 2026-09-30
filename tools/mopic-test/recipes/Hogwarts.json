@@ -3,7 +3,7 @@
   "process": "HogwartsLegacy",
   "source": "mopic",
   "max_width": 1280,
-  "notes": "Menus are mouse driven (no keyboard focus in the character list). The game window sits on the Mopic display. Route: title (any key) > click the ARAM HAN character (loads its newest save) > walk > Esc (field guide) > 설정 > 게임 종료 > Space (예). Never 게임 저장 / 인게임 스토어. Quitting doesn't save. The process takes over a minute to end after the quit (76 s on 2026-10-01).",
+  "notes": "Menus are mouse driven (no keyboard focus in the character list). The game window sits on the Mopic display. Route: title (any key) > click the ARAM HAN character (loads its newest save) > walk > Esc (field guide) > 설정 > 게임 종료 > Space (예). Never 게임 저장 / 인게임 스토어. Quitting doesn't save. The process ends about 30 s after the quit, with or without UEVR (the first starts after recording took over a minute).",
   "checkpoints": {
     "title": {"image": "title.png", "region": [490, 590, 300, 34], "threshold": 0.8},
     "char_select": {"image": "char_select.png", "region": [62, 502, 356, 36], "threshold": 0.8},
