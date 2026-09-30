@@ -185,7 +185,8 @@ can be stale. Check the top system function before concluding a thread is blocke
   recipe's `config` keeps it closed). Only Grand Prix cup 1 and some characters are unlocked; a locked one opens a
   Steam store dialog (the recipe picks Sonic; close such a dialog with 닫기). Time Trial doesn't start in the demo.
 - Hogwarts Legacy: mouse-driven menus. Title > click the ARAM HAN character (loads its newest save; never the in-game
-  store) > walk > Esc (field guide) > 설정 > 게임 종료 > Space. The process needs over a minute to end after the quit.
+  store) > walk > Esc (field guide) > 설정 > 게임 종료 > Space. The process ends about 30 s after the quit (the same
+  without UEVR; right after an update it can take over a minute).
   It ignores WM_CLOSE, so `-GracefulExit` reports EXIT_HANG for it: use the recipe.
 - Black Myth: Wukong: mouse-driven menus that highlight under the mouse (the recipe hovers first). The first start
   after an update compiles shaders for about a minute. Title > 게임 계속하기 (never 새 게임) > shrine > walk (never E

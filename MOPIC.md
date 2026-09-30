@@ -26,7 +26,7 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | D3D12: Reuse the last right-eye capture when a packet is refused | While the fix is Active, a frame whose packet is stale/missing reuses the capture from the last 500 ms instead of the unrendered backbuffer half. | Sonic Racing CrossWorlds refuses packets ("delta=2") around level changes → right eye flashed black. | `reusing the last right-eye capture` only around transitions. |
 | OpenXR: Accept off-axis frusta and keep FOV-only updates cheap | FOV validity only requires a non-degenerate frustum; exact view_bounds mapping; single FOV read; no render-target resize on FOV-only updates. | Mopic's off-axis frustum can leave the view axis (eye past the panel edge), which froze the realtime FOV. | No `Refusing to recalculate eye projections` while moving in front of the display. |
 | VR: Compare devices by identity in the scene-capture reallocation path | Same device comparison as the publish path. | Avoids rebuilding the capture on every reallocation on proxy-device setups. | — |
-| Framework: Don't tear the framework down while the game exits | `DllMain(DLL_PROCESS_DETACH)` with a non-null `reserved` (process terminating) releases `g_framework` instead of letting the CRT destroy it. | The static destructors released D3D12 resources into the GPU driver after ExitProcess had killed its threads: TEKKEN 8 stayed in `~TextureContext` → dxgi → Intel driver forever after a menu quit (upstream has the same DllMain). | Menu-exit test (`-Recipe`) passes with no `EXIT_HANG`; the process is gone a few seconds after the quit. |
+| Framework: Don't tear the framework down while the game exits | `DllMain(DLL_PROCESS_DETACH)` with a non-null `reserved` (process terminating) releases `g_framework` instead of letting the CRT destroy it. | The static destructors released D3D12 resources into the GPU driver after ExitProcess had killed its threads: TEKKEN 8 stayed in `~TextureContext` → dxgi → Intel driver forever after a menu quit (upstream has the same DllMain). | Menu-exit test (`-Recipe`) passes with no `EXIT_HANG` noted "stuck in shutdown"; the process is gone a few seconds after the quit (an `EXIT_HANG` noted "never called ExitProcess" is the known gap below). |
 
 ## Updating to a new joeyhodge release
 
@@ -60,61 +60,65 @@ Output: `build-jh\bin\uevr\UEVRBackend.dll` (+ `.pdb`). Mopic Hub loads it from
 
 ## Verification
 
-The early-injection harness (`patches\early-injection\run-early-injection-test.ps1` in the working copy of
-the main repo, not committed) starts `UEVRInjector.exe --attach=<game>`, launches the game through Steam and
-classifies each run (PASS / CRASH / EXIT_CRASH / NO_VR). Keep Mopic Hub and monado-service running during
-tests. Mopic Hub provides eye tracking.
+`tools\mopic-test\` has the test harness (`run-test.ps1`), the game pilot (`gamepilot.py`), recorded recipes and
+the hang-dump scripts; its README has the details and setup. The harness starts `UEVRInjector.exe
+--attach=<game>`, launches the game through Steam (injection at launch, like Mopic Hub's auto-inject) and classifies
+each run. Keep Mopic Hub (eye tracking) and monado-service running during tests.
 
 ```
-powershell -ExecutionPolicy Bypass -File patches\early-injection\run-early-injection-test.ps1 -Game Tekken8Demo -Runs 3 -GracefulExit -Label <label> -Dll <path to UEVRBackend.dll>
+powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game Tekken8Demo -Recipe Tekken8Demo -Runs 3 -Dll build-jh\bin\uevr\UEVRBackend.dll -Label <label>
+... -Game Tekken8Demo -Recipe Tekken8Demo -NoInject -Runs 3 -Label vanilla     # the same without UEVR
+... -Game <Game> -WaitForExit -Seconds 1800 -Label discover                     # someone (Claude Code) drives and quits it
+... -Game <Game> -GracefulExit -Label close                                      # no recipe: close the window at the end
 ```
 
-To test real gameplay and the game's own quit path, `patches\early-injection\tools\gamepilot.py` drives the game
-by looking at the screen (the Mopic display) and sending keys. A recorded recipe replays it unattended:
+A recipe goes through real gameplay and quits through the game's own menu (TEKKEN 8: title > PvC match > main
+menu > Options > Quit), checking every screen on the way. Verdicts: PASS, CRASH, EXIT_CRASH (crash while quitting),
+EXIT_HANG (the game started exiting but its process was still there 30 s later, or it never got to ExitProcess:
+still running a minute after the menu quit or 45 s after WM_CLOSE; `exit-hang.dmp` has the stacks),
+MENU_FAIL (the pilot couldn't follow the recipe, UEVR was fine), NO_VR (runtime not ready, not a valid test).
 
-```
-... -Game Tekken8Demo -Recipe Tekken8Demo -Runs 3 -Label menu      # title > PvC match > main menu > Options > Quit
-... -Game <Game> -WaitForExit -Seconds 1800 -Label discover          # someone (Claude Code) drives and quits it
-```
-
-Verdicts add `MENU_FAIL` (the pilot couldn't follow the recipe, UEVR was fine) and `EXIT_HANG` (the game started
-exiting but its process was still there 30 s later; `exit-hang.dmp` has the stacks). `tools\README.md` explains
-recipes and how to record one for a new game.
-
-Useful options: `-GracefulExit` (close the window like a normal quit and catch exit crashes),
-`-Set "Key=Value;..."` (config overrides for one run), `-UserScript "cmd;..."` (console commands),
+Other options: `-Set "Key=Value;..."` (config overrides for one run), `-UserScript "cmd;..."` (console commands),
 `-InjectDelay <s>` (late-injection control), `-Seconds <s>`, `-Game Custom -ProcessName <exe> -SteamInstallDir <dir>`.
 
-Results on 2026-09-30 (early injection, graceful exit, this branch):
+Results on 2026-10-01 (`run-matrix.ps1`, a build of 439006ab = the code of e968b141, early injection, every run through
+gameplay and the game's own quit path, 3 runs each):
 
-| Title | UE | Result |
-| --- | --- | --- |
-| TEKKEN 8 Demo | 5.2.1 | PASS; Native Stereo Fix active, FSR1 upscaler separated |
-| Clair Obscur: Expedition 33 | 5.4.4 | PASS; fix active, temporal upscaler separated |
-| Sonic Racing CrossWorlds Demo | 5.4.3 | PASS; fix active, cached right eye on refused packets; exit crash fixed |
-| Hozy | 5.6.1 | PASS with the fix on; fix active |
-| Stray | 4.27 | PASS; fix active |
-| Hogwarts Legacy | 4.27 | PASS; fix active (the game ignores WM_CLOSE, the harness ends it) |
-| Black Myth: Wukong | 5.0 | PASS; the fix never activates, watchdog falls back to plain native stereo after 20 s |
-| Assetto Corsa Competizione | 4.26 | no stereo rendering within 100 s at the title screen; not conclusive |
+| Title | UE | Route | Result |
+| --- | --- | --- | --- |
+| TEKKEN 8 Demo | 5.2.1 | PvC match, Options > Quit | 3/3 PASS; Native Stereo Fix active, FSR1 upscaler separated |
+| Clair Obscur: Expedition 33 | 5.4.4 | Continue, walk, pause > quit | 3/3 PASS (after a recipe fix; 3 MENU_FAIL before it, pilot side) |
+| Sonic Racing CrossWorlds Demo | 5.4.3 | Grand Prix race, pause > main menu > quit | 5/6 PASS (the MENU_FAIL was input timing in the recipe, fixed, then 3/3) |
+| Hozy | 5.6.1 | a room, pause > quit | 3/3 PASS; the game's UI doesn't show on the Mopic display (the recipe reads the window) |
+| Stray | 4.27 | slot 1, walk, pause > main menu > quit | 3/3 PASS |
+| Hogwarts Legacy | 4.27 | a save, walk, field guide > quit | 3/3 PASS; exits ~30 s after the quit, same as without UEVR |
+| Black Myth: Wukong | 5.0 | Continue, shrine, settings > quit | 3/3 PASS; Native Stereo Fix doesn't activate (watchdog falls back) |
+| Assetto Corsa Competizione | 4.26 | practice session in the car, quit | 3/3 PASS for stability; nothing is shown on the Mopic display (see Known gaps) |
 
-Brightness of both eyes and realtime FOV were checked by eye on the Mopic display (2026-09-30). There is no
-automatic per-eye luminance check yet.
+No run crashed or hung while quitting, and every exit code was 0. Brightness of both eyes and realtime FOV were
+checked by eye on the Mopic display (2026-09-30); there is no automatic per-eye luminance check yet.
 
-Before the exit fix the harness couldn't see exit hangs: .NET's `HasExited` turns true as soon as the exit code is
-set, and the harness killed the leftover process afterwards. The "graceful exit" PASS results above predate the
-`EXIT_HANG` check; re-run them with `-GracefulExit` or a recipe.
+Before the exit fix the harness couldn't see exit hangs (.NET's `HasExited` turns true as soon as the exit code is
+set, and the harness killed the leftover process afterwards), so the earlier 2026-09-30 graceful-exit results
+could have hidden them. The table above replaces them.
 
 ## Known gaps
 
-- TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 9 full
+- TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 12 full
   recipe runs with UEVR hung (the game never reaches ExitProcess), 0 of 10 without UEVR (`-NoInject`). In the dump
   the GameThread is in a "stop worker and join" (`SetEvent` + `WaitForSingleObject`, exe+0x5e09670) and the worker
   (an unnamed thread, loop at exe+0x5e09270) keeps asking its object whether the work is done (vtable+0x10) and
   sleeping 100 ms instead of exiting. UEVR code isn't on any stack. The harness reports `EXIT_HANG` and writes
   `exit-hang.dmp` with the memory the stacks point at; on the next occurrence
-  `tools\analysis\workerobj.py exit-hang.dmp <exe> 5e09369` should name the worker's class (vtable/RTTI).
-
+  `workerobj.py runs\<run>\exit-hang.dmp <game.exe> 5e09369` should name the worker's class (vtable/RTTI; see
+  "Reading an EXIT_HANG dump" in `tools\mopic-test\README.md`).
+- Assetto Corsa Competizione (D3D11): nothing reaches the Mopic display. UEVR's D3D11 component can't get the
+  back buffer ("Failed to get back buffer (D3D11)" / "Failed to setup D3D11Component" every frame), while
+  UEVR does render the stereo pair into the game's own window in a session. The game runs and quits cleanly.
+- Hozy (UE 5.6): the game's UI (menus, HUD) doesn't show on the Mopic display, only the 3D scene; TEKKEN 8
+  (5.2), Expedition 33 (5.4) and the others show theirs.
+- The tests play briefly on the player's saves; games that autosave (Expedition 33) then start somewhere else
+  next time. Saves were backed up before recording (`tools\mopic-test\runs\save-backups\`).
 - Wukong (UE 5.0): the fix stays in "learning an exact primary/secondary eye pair" (no candidate family is
   found, nothing is logged); the praydog-based line did render the second view there. Needs a closer look.
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).

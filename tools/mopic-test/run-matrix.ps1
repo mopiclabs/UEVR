@@ -14,6 +14,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# "-Games A,B" through powershell -File arrives as one string
+$Games = @($Games | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Harness = Join-Path $ScriptDir "run-test.ps1"
 $RunsRoot = Join-Path $ScriptDir "runs"
@@ -55,5 +57,6 @@ $rows | ConvertTo-Json -Depth 4 | Set-Content -Path ([System.IO.Path]::ChangeExt
 Write-Host ""
 $md | ForEach-Object { Write-Host $_ }
 Write-Host "`nWritten: $mdPath"
+if ($rows.Count -eq 0) { Write-Warning "no runs were recorded"; exit 1 }
 if (@($rows | Where-Object { $_.verdict -ne "PASS" }).Count -gt 0) { exit 1 }
 exit 0
