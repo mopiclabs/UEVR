@@ -2275,6 +2275,11 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         }
     }
     if (!stalker_exact && stalker_requested) { m_stalker2_pair_cache.invalidate(); m_stalker2_established_epoch = 0; }
+    // Mopic watchdog (db72e036): only on the general path; the Stalker 2 exact-transaction path stays independent.
+    if (ffsr != nullptr && !stalker_exact) {
+        ffsr->update_native_stereo_fix_watchdog();
+    }
+
     auto native_stereo_packet = ffsr != nullptr
         ? stalker_exact ? ffsr->get_stalker2_native_packet(stalker_frame, &native_frame_ticket)
             : ffsr->get_native_stereo_frame_packet_for_submit(frame_count, frame_diag::Backend::d3d12, &native_frame_ticket)
