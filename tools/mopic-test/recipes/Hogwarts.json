@@ -1,0 +1,40 @@
+{
+  "game": "Hogwarts Legacy",
+  "process": "HogwartsLegacy",
+  "source": "mopic",
+  "max_width": 1280,
+  "notes": "Menus are mouse driven (no keyboard focus in the character list). The game window sits on the Mopic display. Route: title (any key) > click the ARAM HAN character (loads its newest save) > walk > Esc (field guide) > 설정 > 게임 종료 > Space (예). Never 게임 저장 / 인게임 스토어. Quitting doesn't save. The process takes over a minute to end after the quit (76 s on 2026-10-01).",
+  "checkpoints": {
+    "title": {"image": "title.png", "region": [490, 590, 300, 34], "threshold": 0.8},
+    "char_select": {"image": "char_select.png", "region": [62, 502, 356, 36], "threshold": 0.8},
+    "slot_aram": {"image": "slot_aram.png", "region": [58, 128, 368, 78], "threshold": 0.8},
+    "loading": {"image": "loading.png", "region": [36, 588, 96, 26], "threshold": 0.8},
+    "in_game": {"image": "in_game.png", "region": [994, 562, 262, 66], "threshold": 0.8},
+    "field_guide": {"image": "field_guide.png", "region": [1040, 686, 214, 22], "threshold": 0.8},
+    "settings_menu": {"image": "settings_menu.png", "region": [166, 350, 454, 36], "threshold": 0.8},
+    "quit_confirm": {"image": "quit_confirm.png", "region": [550, 300, 180, 28], "threshold": 0.8}
+  },
+  "steps": [
+    {"phase": "boot"},
+    {"wait_for": ["title", "char_select"], "timeout": 300},
+    {"key": "enter", "if": "title"},
+    {"wait_for": "char_select", "timeout": 60},
+    {"phase": "enter"},
+    {"wait_for": "slot_aram", "timeout": 10},
+    {"click": [240, 165]},
+    {"wait_for": "loading", "timeout": 60},
+    {"wait_for": "in_game", "timeout": 240},
+    {"phase": "play"},
+    {"play": 30, "keys": "w a s d w w", "every": 0.8, "hold": 700},
+    {"key": "esc"},
+    {"wait_for": "field_guide", "timeout": 30, "press": "esc", "every": 6},
+    {"phase": "leave"},
+    {"click": [842, 545]},
+    {"wait_for": "settings_menu", "timeout": 15},
+    {"click": [392, 367]},
+    {"wait_for": "quit_confirm", "timeout": 15},
+    {"phase": "exit"},
+    {"key": "space"},
+    {"expect_exit": 150}
+  ]
+}

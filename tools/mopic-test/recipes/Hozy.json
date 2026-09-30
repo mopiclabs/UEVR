@@ -1,0 +1,36 @@
+{
+  "game": "Hozy",
+  "process": "CozyGame-Win64-Shipping",
+  "source": "window",
+  "max_width": 1280,
+  "notes": "Mouse driven. Read from the desktop window: with UEVR the game's UI (menus, HUD) does not show on the Mopic display (2026-10-01), only the 3D scene. Route: main menu > Resume > island overview (slowly rotating; click the yellow house) > Attic > Continue (never Restart: it resets the room) > idle in the room > Esc > Quit > Yes. No clicks in the room itself (they would move the player's items).",
+  "checkpoints": {
+    "main_menu": {"image": "main_menu.png", "region": [40, 70, 452, 152], "threshold": 0.8},
+    "house_continue": {"image": "house_continue.png", "region": [830, 546, 194, 62], "threshold": 0.8},
+    "in_room": {"image": "in_room.png", "region": [1184, 24, 68, 68], "threshold": 0.8},
+    "pause_menu": {"image": "pause_menu.png", "region": [80, 408, 154, 60], "threshold": 0.8},
+    "quit_confirm": {"image": "quit_confirm.png", "region": [524, 344, 228, 44], "threshold": 0.8}
+  },
+  "steps": [
+    {"phase": "boot"},
+    {"wait_for": "main_menu", "timeout": 180},
+    {"wait": 2},
+    {"phase": "enter"},
+    {"click": [135, 316]},
+    {"note": "island overview: click the house until its screen shows"},
+    {"wait": 6},
+    {"wait_for": "house_continue", "timeout": 60, "click": [585, 400], "every": 5},
+    {"click": [926, 577]},
+    {"wait_for": "in_room", "timeout": 60},
+    {"phase": "play"},
+    {"wait": 45},
+    {"key": "esc"},
+    {"wait_for": "pause_menu", "timeout": 30, "press": "esc", "every": 5},
+    {"phase": "leave"},
+    {"click": [145, 582]},
+    {"wait_for": "quit_confirm", "timeout": 15},
+    {"phase": "exit"},
+    {"click": [680, 425]},
+    {"expect_exit": 60}
+  ]
+}
