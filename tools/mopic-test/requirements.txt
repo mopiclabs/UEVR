@@ -1,0 +1,7 @@
+pillow>=10
+mss>=10.2
+numpy>=1.24
+# dump analysis (analysis\*.py)
+minidump
+pefile
+capstone
