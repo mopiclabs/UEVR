@@ -8042,7 +8042,7 @@ void VR::update_subnautica2_native_water_compatibility(sdk::UGameEngine* engine)
         is_hmd_active() &&
         m_compatibility_subnautica2_native_water->value() &&
         m_rendering_method->value() == RenderingMethod::NATIVE_STEREO &&
-        !m_native_stereo_fix->value();
+        !is_native_stereo_fix_enabled(); // effective state (also covers a watchdog auto-disable)
 
     if (!active) {
         restore_subnautica2_native_water_cvars();
@@ -8296,7 +8296,7 @@ void VR::update_1666amsterdam_native_postprocess_compatibility(sdk::UGameEngine*
         is_hmd_active() &&
         m_compatibility_1666amsterdam_native_postprocess->value() &&
         m_rendering_method->value() == RenderingMethod::NATIVE_STEREO &&
-        !m_native_stereo_fix->value();
+        !is_native_stereo_fix_enabled(); // effective state (also covers a watchdog auto-disable)
 
     if (!active) {
         restore_1666amsterdam_native_postprocess_cvars();

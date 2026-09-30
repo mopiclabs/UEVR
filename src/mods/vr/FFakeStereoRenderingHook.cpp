@@ -23659,6 +23659,8 @@ void delete_view_family_extension(void* obj) {
 }
 
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
+    g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
+
     ZoneScopedN("BeginRenderViewFamilyReal");
     g_hook->m_render_module_begin_render_viewfamily_observed.store(true, std::memory_order_release);
     const auto profile_engine_render = should_profile_engine_render_timing();
@@ -26098,6 +26100,52 @@ const char* FFakeStereoRenderingHook::get_ghosting_fix_status_text() {
     case GhostingFixState::Off:
     default:
         return "off";
+    }
+}
+
+void FFakeStereoRenderingHook::update_native_stereo_fix_watchdog() {
+    using namespace std::chrono;
+    constexpr auto max_inactive_time = seconds(20);
+    constexpr auto family_recency = milliseconds(500);
+
+    const auto now = steady_clock::now();
+    const auto dt = m_native_stereo_fix_watchdog_last.time_since_epoch().count() != 0 ? now - m_native_stereo_fix_watchdog_last : steady_clock::duration{};
+    m_native_stereo_fix_watchdog_last = now;
+
+    auto& vr = VR::get();
+
+    if (m_native_stereo_fix_auto_disabled.load(std::memory_order_acquire) || !vr->is_native_stereo_fix_enabled() || !vr->is_hmd_active()) {
+        m_native_stereo_fix_inactive_time = {};
+        return;
+    }
+
+    // Only count presents that can actually submit a frame; while the runtime says not to render, no packet can
+    // be consumed and the state can't reach Active.
+    if (vr->m_openxr != nullptr && vr->get_runtime() == vr->m_openxr.get() && vr->m_openxr->frame_state.shouldRender != XR_TRUE) {
+        return;
+    }
+
+    const auto state = m_native_stereo_fix_state.load(std::memory_order_acquire);
+
+    if (state == NativeStereoFixState::Active || state == NativeStereoFixState::Off) {
+        m_native_stereo_fix_inactive_time = {};
+        return;
+    }
+
+    // Only count time while the game is actually rendering 3D view families, so loading screens and menus
+    // without a 3D scene don't turn the fix off.
+    const auto last_family = steady_clock::time_point{steady_clock::duration{m_native_stereo_last_family_ticks.load(std::memory_order_acquire)}};
+
+    if (last_family.time_since_epoch().count() == 0 || now - last_family > family_recency || dt > seconds(1)) {
+        return;
+    }
+
+    m_native_stereo_fix_inactive_time += dt;
+
+    if (m_native_stereo_fix_inactive_time >= max_inactive_time) {
+        m_native_stereo_fix_auto_disabled.store(true, std::memory_order_release);
+        SPDLOG_WARN("[NativeStereoFix] Not active after {} s of 3D rendering (state={}), turning it off for this session and rendering plain native stereo",
+            duration_cast<seconds>(max_inactive_time).count(), get_native_stereo_fix_status_text());
     }
 }
 

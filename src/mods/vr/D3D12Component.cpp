@@ -2969,6 +2969,10 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     const auto frame_count = vr->is_using_mono() ? vr->m_frame_count : vr->m_render_frame_count;
     namespace frame_diag = uevr::native_frame;
     frame_diag::Ticket native_frame_ticket{};
+    if (ffsr != nullptr) {
+        ffsr->update_native_stereo_fix_watchdog();
+    }
+
     auto native_stereo_packet = ffsr != nullptr && !vr->is_using_mono()
         ? ffsr->get_native_stereo_frame_packet_for_submit(frame_count, frame_diag::Backend::d3d12, &native_frame_ticket)
         : nullptr;

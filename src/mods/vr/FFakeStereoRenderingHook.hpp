@@ -834,6 +834,16 @@ public:
 
     bool is_nascar_native_ready() const { return m_nascar_native_ready.load(std::memory_order_acquire); }
 
+    // Turns the Native Stereo Fix off for the session when it keeps failing to activate while the game renders
+    // 3D view families, so the title falls back to plain native stereo instead of an unrendered right eye.
+    void update_native_stereo_fix_watchdog();
+    bool is_native_stereo_fix_auto_disabled() const {
+        return m_native_stereo_fix_auto_disabled.load(std::memory_order_acquire);
+    }
+    bool is_native_stereo_fix_active() const {
+        return m_native_stereo_fix_state.load(std::memory_order_acquire) == NativeStereoFixState::Active;
+    }
+
     std::shared_ptr<const NativeStereoFramePacket> get_native_stereo_frame_packet_for_submit(
         int32_t render_frame, uevr::native_frame::Backend backend = uevr::native_frame::Backend::unknown,
         uevr::native_frame::Ticket* diagnostic_ticket = nullptr) const;
@@ -1441,6 +1451,10 @@ private:
     } m_sceneview_data;
 
     std::atomic<NativeStereoFixState> m_native_stereo_fix_state{NativeStereoFixState::Off};
+    std::atomic_bool m_native_stereo_fix_auto_disabled{};
+    std::atomic<int64_t> m_native_stereo_last_family_ticks{}; // steady_clock ticks of the last BeginRenderingViewFamilies seen
+    std::chrono::steady_clock::duration m_native_stereo_fix_inactive_time{}; // present thread only
+    std::chrono::steady_clock::time_point m_native_stereo_fix_watchdog_last{}; // present thread only
     std::atomic<std::shared_ptr<const NativeStereoFramePacket>> m_native_stereo_frame_packet{};
     std::atomic<uint64_t> m_native_stereo_packet_serial{};
     std::atomic<uint64_t> m_native_stereo_consumed_serial{};

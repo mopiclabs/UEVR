@@ -689,6 +689,10 @@ vr::EVRCompositorError D3D11Component::on_frame(VR* vr) {
     const auto& ffsr = VR::get()->m_fake_stereo_hook;
     namespace frame_diag = uevr::native_frame;
     frame_diag::Ticket native_frame_ticket{};
+    if (ffsr != nullptr) {
+        ffsr->update_native_stereo_fix_watchdog();
+    }
+
     auto native_stereo_packet = ffsr != nullptr && !vr->is_using_mono()
         ? ffsr->get_native_stereo_frame_packet_for_submit(vr->m_render_frame_count, frame_diag::Backend::d3d11, &native_frame_ticket)
         : nullptr;
