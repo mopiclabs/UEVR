@@ -24,6 +24,9 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | VR: Allocate the SceneViewExtensions array with the game's FMalloc by default | `VR_UseFMallocSceneViewExtensions` defaults to on; a one-time config migration (`Mopic_ConfigVersion` 1) turns it on in existing configs; only used when FMalloc and its Malloc slot were found. | Games reallocate UEVR's array with FMallocBinned2 on exit and hit a fatal error (Sonic Racing CrossWorlds: "Attempt to realloc an unrecognized block"). | Graceful exit (`-GracefulExit`) passes; log.txt shows `Migrated config to Mopic defaults version 1` once per old config. |
 | VR: Turn the Native Stereo Fix off for the session when it can't activate | Watchdog: 20 s outside Active while 3D view families are rendered and the runtime asks for frames → the fix is turned off for the session (plain native stereo). | This line's fix fails closed (unrendered right eye); with the fix on by default that would black out titles where it can't activate. | Titles where the fix works never log `Not active after 20 s`. |
 | VR: Show in the menu when the watchdog turned the Native Stereo Fix off | The Native Fix status reads "off for this session: not active after 20 s (plain native stereo)" instead of joeyhodge's generic "skipped: title/runtime guard". | The generic text looked like a deliberate per-title block (reported on Wukong). | Only shown after `Not active after 20 s` in log.txt. |
+| UESDK: Run a worker's jobs without holding its lock (submodule) | `ThreadWorker::execute` takes the queued jobs out under the lock and runs them without it; unfinished work goes back in front of jobs enqueued meanwhile. | A game-thread job enqueuing to the render-thread worker while a render-thread job enqueued to the game-thread worker deadlocked both threads at startup (Dead as Disco froze, 1 in 3 runs with 21 s late injection like Mopic Hub). | No FREEZE verdict; `freeze.dmp` stacks never show two threads in `ThreadWorker::enqueue`. |
+| UESDK: Wait for a texture's render resource instead of rescanning its offset (submodule) | `UTexture::update_render_resource_offset_texture2d` returns "not ready" when the resource at the known/cached offset is still null. | A texture probed right after its creation reset the global offset and a rescan picked another member (0x180 for 0x130), so the next resource read called a null vtable slot (crash at `begin_render_viewfamily_real`). | `Found UTexture::PrivateResource offset` keeps one value per session. |
+| VR: Keep the synced redraw and the dedicated UI publish ordered without the worker lock | The synced-AFR redraw no longer queues another redraw from its own nested draw; destroy/cancel and the game-thread publish of the dedicated UI texture share a mutex. | Both relied on the old worker lock (a nested job was dropped / `enqueue` blocked while the game thread ran its jobs). | — |
 | VR: Resolve the renderer entry from the view-extension callback's caller | When the singular-wrapper search finds nothing (UE4 before 4.25, UE5.0), the caller of UEVR's BeginRenderViewFamily callback is the `BeginRenderingViewFamily` entry if the callback's return address follows `CALL [reg+slot*8]` for that slot, whatever its unwind segment's size. Diagnostics: the values behind "unexpected FSceneViewFamily vtable", and why no family could hold the eye pair. | Black Myth: Wukong's entry has chained unwind info and its part up to the callback is 0x193 bytes, under the stack fallback's 0x200 minimum, so `FViewport::Draw` 7 frames up was hooked; every call failed validation and the fix never activated. praydog's line hooks the caller directly. | Wukong: `Resolved the callback's caller as the BeginRenderingViewFamily entry target=14d6bcd70` and `[NativeStereoFix] state=active`. Titles resolved through the wrapper or the UE4.25–4.27 path log the same lines as before. |
 | D3D12: Reuse the last right-eye capture when a packet is refused | While the fix is Active, a frame whose packet is stale/missing reuses the capture from the last 500 ms instead of the unrendered backbuffer half. | Sonic Racing CrossWorlds refuses packets ("delta=2") around level changes → right eye flashed black. | `reusing the last right-eye capture` only around transitions. |
 | OpenXR: Accept off-axis frusta and keep FOV-only updates cheap | FOV validity only requires a non-degenerate frustum; exact view_bounds mapping; single FOV read; no render-target resize on FOV-only updates. | Mopic's off-axis frustum can leave the view axis (eye past the panel edge), which froze the realtime FOV. | No `Refusing to recalculate eye projections` while moving in front of the display. |
@@ -45,6 +48,9 @@ git submodule update --init --recursive
 - The `joeyhodge` remote has `tagOpt = --no-tags`, so joeyhodge's ~150 release tags don't flood the tag
   namespace. Fetch the release you need into `refs/tags/joeyhodge/` as above.
 - If joeyhodge reworks one of the patched areas, re-apply the Mopic change by hand and keep the same check.
+- Two Mopic patches live in the UESDK submodule (rows marked "submodule"), on the submodule branch `mopic/uesdk`.
+  The superproject points at that commit, so it has to be pushed to a Mopic-owned UESDK remote before this branch is
+  pushed. On an update, rebase `mopic/uesdk` onto joeyhodge's new UESDK commit and point the submodule at the result.
 
 ## Building
 
@@ -75,7 +81,8 @@ powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game Tek
 ```
 
 A recipe goes through real gameplay and quits through the game's own menu (TEKKEN 8: title > PvC match > main
-menu > Options > Quit), checking every screen on the way. Verdicts: PASS, CRASH, EXIT_CRASH (crash while quitting),
+menu > Options > Quit), checking every screen on the way. Verdicts: PASS, CRASH, FREEZE (the game window stopped
+answering for 30 s while running; `freeze.dmp` has the stacks), EXIT_CRASH (crash while quitting),
 EXIT_HANG (the game started exiting but its process was still there 30 s later, or it never got to ExitProcess:
 still running a minute after the menu quit or 45 s after WM_CLOSE; `exit-hang.dmp` has the stacks),
 MENU_FAIL (the pilot couldn't follow the recipe, UEVR was fine), NO_VR (runtime not ready, not a valid test).
@@ -96,10 +103,16 @@ gameplay and the game's own quit path, 3 runs each):
 | Hogwarts Legacy | 4.27 | a save, walk, field guide > quit | 3/3 PASS; exits ~30 s after the quit, same as without UEVR |
 | Black Myth: Wukong | 5.0 | Continue, shrine, settings > quit | 3/3 PASS; Native Stereo Fix active since the renderer-entry fix (re-run below) |
 | Assetto Corsa Competizione | 4.26 | practice session in the car, quit | 3/3 PASS for stability; nothing is shown on the Mopic display (see Known gaps) |
+| Dead as Disco Demo | 5.7 (custom) | Free Play song, Esc > Stage Select > Exit Game | 3/3 PASS with the worker fixes (21 s late injection); Native Stereo Fix can't activate (see Known gaps) |
 
 After "VR: Resolve the renderer entry from the view-extension callback's caller": Wukong 3/3 PASS with
 `[NativeStereoFix] state=active` from the title screen to the quit (before it, the watchdog fell back to plain native
 stereo after 20 s), TEKKEN 8 1/1 PASS with the same wrapper-resolved entry and the fix active as before.
+
+After the UESDK worker and texture-offset fixes (2026-10-01, one run per recipe, all nine): 9/9 PASS. Before them,
+Dead as Disco froze at startup in 1 of 3 runs with 21 s late injection (FREEZE, the game-thread/render-thread worker
+deadlock) and the shipped praydog-line build crashed it on UE 5.7 (`Ran out of memory allocating 2153813446656
+bytes` from its UE4-style texture-create call).
 
 No run crashed or hung while quitting, and every exit code was 0. Brightness of both eyes and realtime FOV were
 checked by eye on the Mopic display (2026-09-30); there is no automatic per-eye luminance check yet.
@@ -125,6 +138,10 @@ could have hidden them. The table above replaces them.
   (5.2), Expedition 33 (5.4) and the others show theirs.
 - The tests play briefly on the player's saves; games that autosave (Expedition 33) then start somewhere else
   next time. Saves were backed up before recording (`tools\mopic-test\runs\save-backups\`).
+- Dead as Disco (UE 5.7 custom branch): Native Stereo Fix can't activate. JH's UE5.7 path needs the engine's
+  `FSceneViewFamily` copy constructor and proves it by byte patterns of stock 5.7 (`sizeof` 0x198, owned interfaces at
+  +0x160..0x178); this build's family is 0x188 bytes with members elsewhere, so it is refused and the watchdog falls
+  back to plain native stereo after 20 s. The right eye then is the engine's own second view (reported darker).
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
 - joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, DIBR, alpha passes).
   Only the scene-capture paths use `is_same_d3d12_device`; the others may fail the same way on Mopic setups
