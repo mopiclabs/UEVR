@@ -2906,6 +2906,28 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         }
     }
 
+    // The Native Fix copies the left eye from the engine's double-wide target and puts the capture beside it, both
+    // sized by the eye. m_backbuffer_size can't size them: setup() may have run against an earlier, smaller target
+    // (Dead as Disco: the 1280x800 Slate texture), so the copy put the right eye at x=640.
+    const auto native_eye_width = static_cast<uint32_t>(vr->get_hmd_width());
+    const auto native_eye_height = static_cast<uint32_t>(vr->get_hmd_height());
+    const auto native_left_desc = m_game_tex.texture != nullptr ? m_game_tex.texture->GetDesc() : D3D12_RESOURCE_DESC{};
+    const bool native_left_source_fits =
+        native_eye_width != 0 && native_eye_height != 0 &&
+        native_left_desc.Width >= 2ull * native_eye_width && native_left_desc.Height >= native_eye_height;
+
+    // Not on the Stalker 2 exact-transaction path, which sizes its pair copy itself (stalker::pair_sources).
+    if (scene_capture_packet_ready && !native_left_source_fits && !stalker_exact) {
+        SPDLOG_WARNING_EVERY_N_SEC(
+            2,
+            "[NativeStereoFix][D3D12] Left-eye source {}x{} is smaller than two {}x{} eyes, copying the whole target instead",
+            native_left_desc.Width,
+            native_left_desc.Height,
+            native_eye_width,
+            native_eye_height);
+        scene_capture_packet_ready = false;
+    }
+
     if (native_stereo_packet != nullptr && !scene_capture_packet_ready && native_stereo_hook != nullptr) {
         if (stalker_exact) {
             native_stereo_hook->reject_stalker2_native_packet(native_stereo_packet,
@@ -2914,7 +2936,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         } else {
             native_stereo_hook->reject_native_stereo_frame_packet(
                 native_stereo_packet->serial,
-                "D3D12 rejected the capture resource or its descriptors");
+                native_left_source_fits
+                    ? "D3D12 rejected the capture resource or its descriptors"
+                    : "D3D12 left-eye source is smaller than the double-wide eye pair");
         }
     }
 
@@ -2964,12 +2988,15 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     auto pre_render = [
         left_source = m_game_tex.texture,
         right_source = m_scene_capture_tex.texture,
-        left_width = m_backbuffer_size[0] / 2,
-        left_height = m_backbuffer_size[1],
+        left_width = native_eye_width,
+        left_height = native_eye_height,
         right_width = m_scene_capture_width,
         right_height = m_scene_capture_height,
         nascar25_native_copy_states,
         stalker_exact,
+        // The Stalker 2 exact pair keeps upstream's backbuffer-based size (validated by stalker::pair_sources).
+        stalker_width = m_backbuffer_size[0] / 2,
+        stalker_height = m_backbuffer_size[1],
         &stalker_composed,
         native_stereo_packet,
         native_frame_ticket,
@@ -3000,7 +3027,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             ComPtr<ID3D12Device> device;
             if (FAILED(render_target->GetDevice(IID_PPV_ARGS(&device)))) { return; }
             stalker_composed = uevr::stalker2_native::record_pair(commands.cmd_list.Get(), device.Get(),
-                left_source.Get(), right_source.Get(), render_target, left_width, left_height);
+                left_source.Get(), right_source.Get(), render_target, stalker_width, stalker_height);
             if (!stalker_composed) { return; }
             commands.has_commands = true;
         } else if (nascar25_native_copy_states) {
@@ -3148,8 +3175,8 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     auto pre_render_cached = [
         left_source = m_game_tex.texture,
         right_source = m_scene_capture_tex.texture,
-        left_width = m_backbuffer_size[0] / 2,
-        left_height = m_backbuffer_size[1],
+        left_width = native_eye_width,
+        left_height = native_eye_height,
         right_width = m_scene_capture_width,
         right_height = m_scene_capture_height](d3d12::CommandContext& commands, ID3D12Resource* render_target) {
         if (render_target == nullptr || left_source == nullptr || right_source == nullptr) {
@@ -4373,6 +4400,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         !uevr::nascar::is_target() &&
                         m_scene_capture_tex.texture.Get() != nullptr &&
                         m_game_tex.texture.Get() != nullptr &&
+                        native_left_source_fits &&
                         m_last_native_capture_submit.time_since_epoch().count() != 0 &&
                         std::chrono::steady_clock::now() - m_last_native_capture_submit < std::chrono::milliseconds(500);
 
