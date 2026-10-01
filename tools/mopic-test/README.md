@@ -39,10 +39,38 @@ powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game <pr
 | `-GracefulExit` | no recipe: close the window at the end of `-Seconds` and watch the shutdown |
 | `-Set "K=V;..."`, `-UserScript "cmd;..."` | config.txt overrides / console commands for this run only (restored) |
 | `-InjectDelay <s>` | late injection (inject this many seconds after the game started) |
+| `-SaveFile <path> [-SaveAs <name>]` | before each run, copy this save over the file the recipe's `save_slot` names (`-SaveAs`: another file name in that folder), stamped with the current time so Steam Cloud keeps it. The file there before goes to `<run>\save-before\`, the file after the run (also after a crash or a hang) to `<run>\save-after\`; source, sha256 and target are in result.json / summary.txt. Nothing in the save folder is deleted. A relative path is tried from the current folder, then from `tools\mopic-test`. A failed install makes that run `HARNESS_ERROR` without launching the game. |
+| `-SaveSlot <file>` | with `-SaveFile`: the file it replaces, with `save_slot`'s placeholders (`"{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"`), instead of the recipe's `save_slot`; also works without a recipe (discovery with `-WaitForExit`) |
+| `-RecipeVars "k=v;k2=v2"` | values for the recipe's `vars` (`${k}` in its steps; gamepilot `run --var k=v`). A name the recipe doesn't declare, or a declared var without a default that isn't given, stops the harness before the first run. Values can't contain `;`. |
 | `-Runs <n>`, `-Label <text>`, `-KeepGame`, `-Screenshot` | |
 
 `run-matrix.ps1 -Runs 3 [-Dll <path>] [-Games A,B] [-NoInject]` runs every recipe (or the given games) through the
 harness and writes one table to `runs\matrix-<time>-uevr.md` / `-vanilla.md` (+ `.json`).
+
+`run-ladder.ps1 -Game Wukong [-Tier 1] [-Only a,b] [-From name] [-Runs 1] [-EngineDir <dir>] [-Label ladder] [-StopOn HARNESS_ERROR,NO_VR] [-DryRun]`
+runs a save ladder: one harness run per rung of `ladders\<Game>.json`, each from its own save, and writes
+`runs\ladder-<time>-<Game>.md` (+ `.json`, rewritten after every rung: verdict, harness and game exit codes,
+`[NativeStereoFix] state=active` count in log.txt, save-after size, screens reached; `.log`: everything the harness
+printed). Before the first launch it checks every selected rung: its save (and its `sha256`, when the rung has
+one), its recipe (exists, has a `save_slot`, declares the rung's vars, gets every var it has no default for). It
+stops after a rung that ended `HARNESS_ERROR` or `NO_VR` (the runs after it wouldn't be valid tests; `-StopOn`
+sets the list). A rung whose harness wrote no result.json is a `HARNESS_ERROR` row with the harness's error
+message. Other rung fields (notes, descriptions) are ignored.
+
+```
+{"game": "Wukong", "recipe": "Wukong-save",
+ "rungs": [{"name": "ch1-guangzhi", "save": "saves\\wukong\\x.sav", "vars": {"play_s": 180}, "tier": 1}]}
+```
+
+`game` is the harness preset, `save` is relative to `tools\mopic-test`, a rung may set its own `recipe`, `tier`
+defaults to 1 and `-Tier N` runs the rungs with tier <= N. A rung's `vars` become `-RecipeVars` (lists and
+objects as JSON; a `null` var is left out, so the recipe's default applies). Run folders are
+`<time>-<game>-<Label>-<rung>-r<n>`.
+
+After changing run-test.ps1, run-ladder.ps1 or gamepilot.py, run `selftest\selftest.ps1` (about 7 minutes, no game:
+a stand-in process compiled from `selftest\fakegame.cs` plays the game; it compares runs without `-SaveFile`
+against the committed run-test.ps1 and never touches a real save folder). Work folders go to
+`runs\selftest\work-<time>\`.
 
 Verdicts:
 
@@ -68,14 +96,14 @@ for the process handle so exits stuck in shutdown are caught (that's how UEVR's 
 ```
 .venv\Scripts\python gamepilot.py <process> status                        # locked? window? foreground?
 .venv\Scripts\python gamepilot.py <process> shot [--source mopic|window] [--out PATH] [--max-width 1280]
-.venv\Scripts\python gamepilot.py <process> key <name> [--times N] [--hold MS] [--gap MS]    # enter, esc, down, j, alt+f4, ...
+.venv\Scripts\python gamepilot.py <process> key <name> [--times N] [--hold MS] [--gap MS]    # enter, esc, down, j, alt+f4, shift+w, lmb, look:600,0, wheel:-5, ...
 .venv\Scripts\python gamepilot.py <process> keys "down down enter"
 .venv\Scripts\python gamepilot.py <process> click <x> <y>                  # in the last screenshot's pixels
 .venv\Scripts\python gamepilot.py <process> move <x> <y> / type "text" / focus
 .venv\Scripts\python gamepilot.py -         checkpoint save <recipe.json> <name> <x> <y> <w> <h> [--from PNG] [--mode highlight] [--threshold 0.8] [--source mopic]
 .venv\Scripts\python gamepilot.py <process> checkpoint test <recipe.json> <name|all> [--from PNG] [--source window]
 .venv\Scripts\python gamepilot.py -         matrix <recipe.json> <screenshots/globs...>
-.venv\Scripts\python gamepilot.py <process> run <recipe.json> [--steps 9-12] [--source window] [--out DIR] [--status FILE]
+.venv\Scripts\python gamepilot.py <process> run <recipe.json> [--steps 9-12] [--source window] [--out DIR] [--status FILE] [--var k=v ...] [--dry-run]
 .venv\Scripts\python gamepilot.py <process> dump <out.dmp>
 ```
 
@@ -84,6 +112,11 @@ for the process handle so exits stuck in shutdown are caught (that's how UEVR's 
 - While Windows shows the lock screen, input and capture don't reach the desktop: the screen and input commands
   exit with code 3 and `{"error":"locked"}`, and `run` stops with `error_kind` "locked". Ask the user to unlock;
   auto-lock stays on.
+- Key names: letters, digits, `enter`, `esc`, `space`, `tab`, arrows, `f1`-`f12`, `shift`/`ctrl`/`alt`, chords
+  (`alt+f4`, `shift+w`: the modifier is held while the key is held), `lmb` / `rmb` (a click where the mouse is),
+  `look:dx,dy` (relative mouse motion spread over the hold time: a camera turn in games that read raw mouse
+  input; `look:900,0` with hold 700 is about a quarter turn in Wukong) and `wheel:N` (N wheel notches where the
+  mouse is, negative = down: scrolls a list). They work in `key`, `keys` and `play` alike.
 - Keys are scan codes through SendInput, so DirectInput / Raw Input games see them. The game window is brought to
   the foreground first. If that fails, a recipe's key / keys / click / move steps fail (`error_kind` "focus");
   waiting and seeking steps skip that input (pilot.log warns) and then fail on their checkpoint. Nothing is typed
@@ -108,6 +141,20 @@ for the process handle so exits stuck in shutdown are caught (that's how UEVR's 
 - `images`: take the checkpoint images from another recipe's folder (`Tekken8Demo-quit.json` uses `Tekken8Demo`,
   a quick boot-and-quit check without a match).
 - `window_timeout`: seconds to wait for the game window before the first step (default 180).
+- `save_slot`: `{"dir": "{gamedir}\\b1\\Saved\\SaveGames\\{sid64}", "file": "ArchiveSaveFile.9.sav"}`, where
+  `-SaveFile` installs its save. Placeholders: `{sid64}` (the logged-in Steam user's SteamID64, from
+  `HKCU\Software\Valve\Steam\ActiveProcess` ActiveUser), `{accountid}` (ActiveUser itself), `{gamedir}` (the
+  preset's install folder), `{localappdata}`, `{appdata}`, `{documents}`. The folder has to exist already.
+  `-SaveFile` without a `save_slot` (or `-SaveSlot`) is an error.
+- `vars`: `{"play_s": 120, "boss": null}`, the names the steps may use as `${name}`, with their defaults (`null`:
+  no default, it must be given). `--var name=value` (`-RecipeVars`) sets one; the value is read as JSON when it
+  parses (`180`, `[110, 305]`, `true`, `["hud", "loading"]`), else as text. A step string that is only `${name}`
+  takes the value's type (`{"play": "${play_s}"}` is a number, `{"click": "${pos}"}` a list), except in key and
+  text fields (`key`, `keys`, `press`, `idle_press`, `note`, `shot`, `phase`), which get the text; inside a
+  longer string it is text. Only declared names are replaced: a recipe without `vars` is used exactly as
+  written (a literal `${...}` in it stays), and `--var` of an undeclared name, or a step to run that uses a var
+  without a value, fails the run before the first step (`error_kind` "recipe"). `run --dry-run` prints the
+  steps after substitution.
 - The harness refuses a recipe without an `expect_exit` step.
 
 Steps run in order (one per line in the file). `"if": "<checkpoint>"` on any step runs it only if that screen is
@@ -116,10 +163,11 @@ showing right now.
 | Step | Does |
 | --- | --- |
 | `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead; only after a failed check. |
+| `{"wait_gone": "x", "timeout": 180, "for": 3}` | wait until checkpoint x (or any of a list) has not shown for `for` seconds in a row: a loading screen going away, so gameplay starts right when the player can move |
 | `{"seek": "x", "press": "down", "max": 8}` | press until x shows (menu cursors don't always start on the same item; menus usually wrap around, so `max` should cover one lap) |
 | `{"key": "enter", "times": 1}` / `{"keys": "up enter"}` / `{"click": [x, y]}` / `{"move": [x, y]}` / `{"wait": 2}` | input (`move` hovers: menus that highlight under the mouse) / pause |
 | `{"play_until": "x", "while": "hud", "keys": "u i j k a d", "timeout": 600}` | random gameplay keys until x shows; with `while` only while the HUD checkpoint is visible, so they don't act as menu input on result screens |
-| `{"play": 60, "keys": "...", "every": 0.6, "hold": 500}` | random gameplay keys for a fixed time (`lmb` / `rmb` click where the mouse is) |
+| `{"play": 60, "keys": "...", "every": 0.6, "hold": 500}` | random gameplay keys for a fixed time (`lmb` / `rmb` click where the mouse is, `look:dx,dy` turns the camera); one `hold` for all its keys, so movement, camera and attacks go in separate `play` steps |
 | `{"phase": "exit"}` | from here the game quitting is expected (the harness counts the exit as a menu quit) |
 | `{"expect_exit": 60}` | wait for the process to end; still running afterwards = `EXIT_HANG` |
 | `{"shot": "name"}` / `{"note": "..."}` | save a screenshot / comment |
@@ -195,6 +243,25 @@ can be stale. Check the top system function before concluding a thread is blocke
   there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인. A config saved by this line can have
   `FrameworkConfig_RememberMenuState=false`, which opens the UEVR menu over the title screen and swallows the keys;
   the recipe's `config` keeps it closed.
+  Save ladder (`recipes\Wukong-save.json`, `ladders\Wukong.json`): the rung's save goes to slot 9
+  (`ArchiveSaveFile.9.sav`). 게임 계속하기 loads the journey whose save date (inside the file, not the file time)
+  is newest, so it never picks an old community save; the route is 게임 로딩 > the list (newest first; the
+  community saves are older than every journey of the user, so slot 9 is the last entry: wheel to the end, hover,
+  E) > 확인. A cleared save then asks 새 라운드 (NG+): 취소 loads it as it is, 확인 would start NG+. R in the list
+  deletes a save. The pause menu's tab count grows with progress (5 early, 6 with 근기), so the route presses D
+  until the 설정 tab instead of clicking it. The quit question gets a second line ("unsaved progress is lost")
+  when the game hasn't saved lately. The loading screen (20-60 s) animates its bottom ornament (icon and swirls
+  fade out, sometimes all of it for 5 s and more), so the band behind the tip title (`loading_band`, the same on
+  every tip; it also shows on the respawn loading after a death) is the loading checkpoint: the recipe waits until
+  neither has shown for 5 s (`wait_gone`) and plays from there; a fixed wait either idles in a fight (Ch1 spawns next to wolves) or starts on a black
+  screen. Keys: WASD, Shift sprint, Space dodge, Ctrl jump, LMB/RMB attacks, V staff
+  spin, 1-4 spells, mouse camera; avoid E (shrine), Q (items), R (gourd), P (photo mode), M (map). After a run the
+  game has re-saved slot 9 with today's date, which makes it the journey 게임 계속하기 loads (the plain `Wukong`
+  recipe then plays the community save instead of the user's slot 2) until the next ladder run puts an old save
+  back. Shrine travel (`recipes\Wukong-shrine.json`, a sketch: its default path, Ch1 앞산, passed once through the harness; other rows untested): from the
+  post-game save, E at the Zodiac Village shrine > 축지 > region > area > shrine > E (a click only selects);
+  `region_y` / `area_y` / `shrine_y` are the rows to click, listed in its notes. In the shrine menu only 축지 and
+  나가기 are safe (rest, skills, crafting, shops and rematches change the save).
 - Dead as Disco Demo (UE 5.7, custom engine branch): mouse-driven menus, read from the desktop window (the Mopic
   display doubles the UI text). The very first start asks about Streamer Safe Mode (click OFF); a fresh install shows
   NEW GAME instead of CONTINUE. Route: CONTINUE > stage hub > Enter > FREE PLAY > first song > click again to play >
