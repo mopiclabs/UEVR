@@ -4,6 +4,7 @@
   "source": "mopic",
   "max_width": 1280,
   "notes": "Menus are mouse driven (hover highlights). The first start compiles shaders for about a minute (black screen). Route: title (any key) > 게임 계속하기 (continue; never 새 게임) > loading > shrine > walk (never E at the shrine) > Esc > 설정 tab > 게임 종료 > 바탕 화면으로 > 확인.",
+  "config": {"FrameworkConfig_RememberMenuState": "true", "FrameworkConfig_MenuOpen": "false"},
   "checkpoints": {
     "title": {"image": "title.png", "region": [120, 300, 246, 76], "threshold": 0.8},
     "main_menu": {"image": "main_menu.png", "region": [56, 290, 120, 180], "threshold": 0.8},
