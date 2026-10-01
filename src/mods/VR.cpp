@@ -14887,6 +14887,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                         ? blocked_color
                         : skipped_color;
                 draw_status_badge("Native Fix status:", status, color);
+            } else if (m_fake_stereo_hook->is_native_stereo_fix_auto_disabled()) {
+                draw_status_badge("Native Fix status:", "off for this session: not active after 20 s (plain native stereo)", blocked_color);
             } else {
                 draw_status_badge("Native Fix status:", "skipped: title/runtime guard", blocked_color);
             }
