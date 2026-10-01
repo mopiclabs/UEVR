@@ -200,4 +200,7 @@ can be stale. Check the top system function before concluding a thread is blocke
   NEW GAME instead of CONTINUE. Route: CONTINUE > stage hub > Enter > FREE PLAY > first song > click again to play >
   attack with the mouse > Esc ends the song (RESULT) > Stage Select > Esc > EXIT GAME > EXIT GAME on the wishlist
   screen (no confirmation). Never GET THE GAME!, GIVE FEEDBACK or SIGN UP (store/browser). A played song posts its
-  score to the Steam account's leaderboard. `play` steps can click with `lmb` / `rmb`.
+  score to the Steam account's leaderboard. `play` steps can click with `lmb` / `rmb`. With Native Stereo Fix
+  active the desktop window shows the 3D scene behind the menus (without it, black), so the checkpoints sit on opaque
+  UI; the gameplay HUD pulses with the beat and loses hearts, so the RESULT screen after Esc is the gameplay proof.
+  To look at each eye, restart monado-service with `MOPIC_MODE=sbs` (the display then shows left | right).
