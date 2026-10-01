@@ -20011,7 +20011,10 @@ void FFakeStereoRenderingHook::game_viewport_client_draw_hook(sdk::UGameViewport
     // This is how synchronized AFR works. it forces a world draw
     // on the start of the next engine tick, before the world ticks again.
     // that will allow both views and the world to be drawn in sync with no artifacts.
-    if (!uevr::nascar::is_target() && in_engine_tick && vr->is_using_synchronized_afr() && g_frame_count % 2 == 0) {
+    // The redraw comes back through this hook; it must not queue another redraw (the game-thread worker used to
+    // drop jobs queued from its own jobs, now they run on the next tick and the redraws would chain).
+    static bool in_synced_redraw = false;
+    if (!uevr::nascar::is_target() && in_engine_tick && !in_synced_redraw && vr->is_using_synchronized_afr() && g_frame_count % 2 == 0) {
         const auto queued_lifecycle_generation =
             g_hook->m_synced_draw_lifecycle_generation.load(std::memory_order_acquire);
         const auto queued_viewport_vtable = g_hook->m_last_viewport_vtable;
@@ -20042,7 +20045,11 @@ void FFakeStereoRenderingHook::game_viewport_client_draw_hook(sdk::UGameViewport
             // Ghost Fix validates its UObject ownership in the scene-view remap path.
             // It must not veto the synchronized second draw and defer one eye to a later game tick.
             const auto viewport_draw = (void (*)(void*, bool))g_hook->m_viewport_draw_hook.target();
-            viewport_draw(viewport, true);
+            in_synced_redraw = true;
+            {
+                utility::ScopeGuard _{[]() { in_synced_redraw = false; }};
+                viewport_draw(viewport, true);
+            }
 
             const auto method = current_vr->get_synced_sequential_method();
 
@@ -39044,6 +39051,8 @@ bool VRRenderTargetManager_Base::observe_nascar_scene_target(uintptr_t viewport)
 }
 
 void VRRenderTargetManager_Base::destroy_dedicated_ui_target() {
+    std::scoped_lock publish_lock{dedicated_ui_publish_mutex};
+
     if (uevr::nascar::is_target()) {
         nascar_ui_target_snapshot.store(nullptr, std::memory_order_release);
     }
@@ -39096,6 +39105,8 @@ void VRRenderTargetManager_Base::destroy_dedicated_ui_target() {
 }
 
 void VRRenderTargetManager_Base::cancel_dedicated_ui_creation_preserving_target(const char* reason) {
+    std::scoped_lock publish_lock{dedicated_ui_publish_mutex};
+
     if (ue58_ui_initialization_enabled.load(std::memory_order_acquire)) {
         ue58_ui_initialization.cancel("engine-owned target promoted", []() {});
         return;
@@ -39975,6 +39986,8 @@ bool VRRenderTargetManager_Base::create_dedicated_ui_texture() {
                             this->stalker2_dedicated_ui_creation_failed.store(false, std::memory_order_release);
 
                             GameThreadWorker::get().enqueue([this, tgt, generation]() -> void {
+                                std::scoped_lock publish_lock{this->dedicated_ui_publish_mutex};
+
                                 if (!this->is_dedicated_ui_generation_current(generation)) {
                                     return;
                                 }
@@ -40104,6 +40117,8 @@ bool VRRenderTargetManager_Base::create_dedicated_ui_texture() {
                         this->get_fallback_ui_target_ref() = nullptr;
 
                         GameThreadWorker::get().enqueue([this, tgt, generation]() -> void {
+                            std::scoped_lock publish_lock{this->dedicated_ui_publish_mutex};
+
                             if (!this->is_dedicated_ui_generation_current(generation)) {
                                 return;
                             }

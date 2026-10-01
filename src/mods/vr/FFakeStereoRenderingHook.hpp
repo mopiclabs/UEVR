@@ -482,6 +482,9 @@ protected:
     std::atomic<uint64_t> scene_capture_retry_after_ms{};
     sdk::UObjectReference<sdk::UTexture> dedicated_ui_texture{nullptr};
     sdk::UTexture* in_flight_dedicated_ui_texture{nullptr};
+    // Orders the game-thread publish of a new dedicated UI texture against a destroy/cancel from the render thread
+    // (enqueue() used to block while the game thread ran its jobs, which kept them apart).
+    std::recursive_mutex dedicated_ui_publish_mutex{};
     std::unique_ptr<FTexture2DRHIRef> owned_dedicated_ui_target{};
     std::mutex everspace2_dedicated_ui_lifetime_mutex{};
     std::vector<FRHITexture2D*> everspace2_retained_dedicated_ui_targets{};
