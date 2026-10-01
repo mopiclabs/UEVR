@@ -190,4 +190,6 @@ can be stale. Check the top system function before concluding a thread is blocke
   It ignores WM_CLOSE, so `-GracefulExit` reports EXIT_HANG for it: use the recipe.
 - Black Myth: Wukong: mouse-driven menus that highlight under the mouse (the recipe hovers first). The first start
   after an update compiles shaders for about a minute. Title > 게임 계속하기 (never 새 게임) > shrine > walk (never E
-  there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인.
+  there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인. A config saved by this line can have
+  `FrameworkConfig_RememberMenuState=false`, which opens the UEVR menu over the title screen and swallows the keys;
+  the recipe's `config` keeps it closed.
