@@ -27,6 +27,8 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | UESDK: Run a worker's jobs without holding its lock (submodule) | `ThreadWorker::execute` takes the queued jobs out under the lock and runs them without it; unfinished work goes back in front of jobs enqueued meanwhile. | A game-thread job enqueuing to the render-thread worker while a render-thread job enqueued to the game-thread worker deadlocked both threads at startup (Dead as Disco froze, 1 in 3 runs with 21 s late injection like Mopic Hub). | No FREEZE verdict; `freeze.dmp` stacks never show two threads in `ThreadWorker::enqueue`. |
 | UESDK: Wait for a texture's render resource instead of rescanning its offset (submodule) | `UTexture::update_render_resource_offset_texture2d` returns "not ready" when the resource at the known/cached offset is still null. | A texture probed right after its creation reset the global offset and a rescan picked another member (0x180 for 0x130), so the next resource read called a null vtable slot (crash at `begin_render_viewfamily_real`). | `Found UTexture::PrivateResource offset` keeps one value per session. |
 | VR: Keep the synced redraw and the dedicated UI publish ordered without the worker lock | The synced-AFR redraw no longer queues another redraw from its own nested draw; destroy/cancel and the game-thread publish of the dedicated UI texture share a mutex. | Both relied on the old worker lock (a nested job was dropped / `enqueue` blocked while the game thread ran its jobs). | — |
+| VR: Recognize Dead as Disco's UE5.7 FSceneViewFamily copy | Title-gated (`PagodaSteamDemo-Win64-Shipping.exe`, file version 5.7.4.0, DX12) fallback in `resolve_ue57_fsceneviewfamily_functions` with this exe's copy-constructor bytes (`DeadAsDiscoNativeFix.hpp`); the vtable and destructor still go through the generic UE5.7 checks. Compatibility tests cover the gate, single-byte changes, the StateTree lookalike and a fixture of the real bytes. | Its layout is stock UE5.7, but the copy constructor holds the source in rbx (`48 8B DA`, not `48 8B FA`), so the generic signature only found an unrelated StateTree copy, the linked-family fix failed closed and UE5.7 left the right eye's 3D black. | log: `[DeadAsDisco][UE5.7][NativeStereoFix] Validated the stock-layout family copy`, `copy constructor RVA 0x3d5d8e0`, `state=active`. |
+| D3D12: Size the Native Stereo Fix copies by the eye | The double-wide copy of the left eye and the capture (`pre_render`, `pre_render_cached`) takes its boxes and the right-eye offset from the HMD eye size, not `m_backbuffer_size`; a packet whose left source is smaller than two eyes is refused so the frame copies the whole target. | `m_backbuffer_size` is only set in `setup()`, which on Dead as Disco ran against the 1280x800 Slate texture before the VR-sized target arrived: the left eye's top-left 640x800 went to (0,0) and the right eye to x=640 (SBS showed a displaced picture, right/left brightness 0.2). | SBS (`MOPIC_MODE=sbs`) shows a full eye in each half; no `Left-eye source ... is smaller than two` warning; titles with a 3840-wide setup (TEKKEN 8, Wukong) copy the same boxes as before. |
 | VR: Resolve the renderer entry from the view-extension callback's caller | When the singular-wrapper search finds nothing (UE4 before 4.25, UE5.0), the caller of UEVR's BeginRenderViewFamily callback is the `BeginRenderingViewFamily` entry if the callback's return address follows `CALL [reg+slot*8]` for that slot, whatever its unwind segment's size. Diagnostics: the values behind "unexpected FSceneViewFamily vtable", and why no family could hold the eye pair. | Black Myth: Wukong's entry has chained unwind info and its part up to the callback is 0x193 bytes, under the stack fallback's 0x200 minimum, so `FViewport::Draw` 7 frames up was hooked; every call failed validation and the fix never activated. praydog's line hooks the caller directly. | Wukong: `Resolved the callback's caller as the BeginRenderingViewFamily entry target=14d6bcd70` and `[NativeStereoFix] state=active`. Titles resolved through the wrapper or the UE4.25–4.27 path log the same lines as before. |
 | D3D12: Reuse the last right-eye capture when a packet is refused | While the fix is Active, a frame whose packet is stale/missing reuses the capture from the last 500 ms instead of the unrendered backbuffer half. | Sonic Racing CrossWorlds refuses packets ("delta=2") around level changes → right eye flashed black. | `reusing the last right-eye capture` only around transitions. |
 | OpenXR: Accept off-axis frusta and keep FOV-only updates cheap | FOV validity only requires a non-degenerate frustum; exact view_bounds mapping; single FOV read; no render-target resize on FOV-only updates. | Mopic's off-axis frustum can leave the view axis (eye past the panel edge), which froze the realtime FOV. | No `Refusing to recalculate eye projections` while moving in front of the display. |
@@ -107,7 +109,7 @@ gameplay and the game's own quit path, 3 runs each):
 | Hogwarts Legacy | 4.27 | a save, walk, field guide > quit | 3/3 PASS; exits ~30 s after the quit, same as without UEVR |
 | Black Myth: Wukong | 5.0 | Continue, shrine, settings > quit | 3/3 PASS; Native Stereo Fix active since the renderer-entry fix (re-run below) |
 | Assetto Corsa Competizione | 4.26 | practice session in the car, quit | 3/3 PASS for stability; nothing is shown on the Mopic display (see Known gaps) |
-| Dead as Disco Demo | 5.7 (custom) | Free Play song, Esc > Stage Select > Exit Game | 3/3 PASS with the worker fixes (21 s late injection); Native Stereo Fix can't activate (see Known gaps) |
+| Dead as Disco Demo | 5.7 (custom) | Free Play song, Esc > Stage Select > Exit Game | 3/3 PASS with the worker fixes (21 s late injection); Native Stereo Fix active since its family-copy recognizer (re-run below) |
 
 After "VR: Resolve the renderer entry from the view-extension callback's caller": Wukong 3/3 PASS with
 `[NativeStereoFix] state=active` from the title screen to the quit (before it, the watchdog fell back to plain native
@@ -118,8 +120,21 @@ Dead as Disco froze at startup in 1 of 3 runs with 21 s late injection (FREEZE, 
 deadlock) and the shipped praydog-line build crashed it on UE 5.7 (`Ran out of memory allocating 2153813446656
 bytes` from its UE4-style texture-create call).
 
+After "VR: Recognize Dead as Disco's UE5.7 FSceneViewFamily copy" and "D3D12: Size the Native Stereo Fix copies by
+the eye" (2026-10-01, a build of d2e8cf66): Dead as Disco 4/4 PASS with `[NativeStereoFix] state=active` and no
+watchdog fallback (one early injection, three at 24 s). With monado `MOPIC_MODE=sbs`, the scene area of the two
+halves measured 58.6/58.2, 65.3/64.5 and 91.0/89.9 (left/right, 0-255) at three points of a song, against 65-76
+vs 0.2-0.4 before. Full matrix, one run each: 8/9 PASS, every exit code 0, the fix active on
+TEKKEN 8, Stray, Hogwarts Legacy, Wukong and Dead as Disco. Sonic stopped at its main-menu checkpoint (score 0.75)
+in the matrix, in a re-run, and the same way with a morning build from before these changes. Since monado-service
+was restarted (21:51) every capture of the Mopic display (Sonic, Stray, Expedition 33) shows the two views
+overlaid, where the 14:xx captures showed one view; Sonic's checkpoint sits on its 3D background, so it no longer
+matches. If the overlaid capture is the display's normal 3D state, the Mopic-display recipes need re-recording.
+
 No run crashed or hung while quitting, and every exit code was 0. Brightness of both eyes and realtime FOV were
-checked by eye on the Mopic display (2026-09-30); there is no automatic per-eye luminance check yet.
+checked by eye on the Mopic display (2026-09-30). Per-eye brightness can be measured with monado-service restarted
+under `MOPIC_MODE=sbs` (see the Dead as Disco re-run), but most recipes read the woven Mopic display and fail in that
+mode, so there is no automatic per-eye check yet.
 
 Before the exit fix the harness couldn't see exit hangs (.NET's `HasExited` turns true as soon as the exit code is
 set, and the harness killed the leftover process afterwards), so the earlier 2026-09-30 graceful-exit results
@@ -142,13 +157,18 @@ could have hidden them. The table above replaces them.
   (5.2), Expedition 33 (5.4) and the others show theirs.
 - The tests play briefly on the player's saves; games that autosave (Expedition 33) then start somewhere else
   next time. Saves were backed up before recording (`tools\mopic-test\runs\save-backups\`).
-- Dead as Disco (UE 5.7 custom branch): Native Stereo Fix can't activate. JH's UE5.7 path needs the engine's
-  `FSceneViewFamily` copy constructor and proves it by byte patterns of stock 5.7 (`sizeof` 0x198, owned interfaces at
-  +0x160..0x178); this build's family is 0x188 bytes with members elsewhere, so it is refused and the watchdog falls
-  back to plain native stereo after 20 s. The engine then leaves the right eye's 3D scene black and only the UI is
-  composited over it (reported as "the right eye is darker"; with monado `MOPIC_MODE=sbs` the scene area measured
-  65-76 left vs 0.2-0.4 right, 0-255). Supporting it needs this build's FSceneViewFamily/FSceneView offsets (JH
-  hard-codes stock 5.7: family 0x198, bAdditionalViewFamily +0xB0, owned interfaces +0x160, view StereoPass +0xDD0).
+- Generic UE5.7 Native Stereo Fix depends on finding FSceneViewFamily's copy constructor by exact bytes. A UE5.7
+  build whose compiler allocates registers differently fails closed; with the watchdog that means plain native
+  stereo, where UE5.7 leaves the right eye's 3D scene black (Dead as Disco before its profile: with monado
+  `MOPIC_MODE=sbs` the scene area measured 65-76 left vs 0.2-0.4 right, 0-255). Such a title needs its own
+  recognizer like Halloween's and Dead as Disco's.
+- D3D12 `m_backbuffer_size` stays at the first target `setup()` saw when the game only later hands UEVR its
+  VR-sized target (Dead as Disco: the 1280x800 Slate texture). The Native Stereo Fix copies no longer use it, but its
+  other users (AFR copy boxes, 2D-screen rects, mono) would be wrong on such a title; the root fix is to run `setup()`
+  again when the borrowed target becomes 2x the eye size.
+- With monado `MOPIC_MODE=sbs`, each eye appears about 3.7% magnified around its projection centre, before and after
+  the Dead as Disco fixes. Likely the FOV submitted at `xrEndFrame` differs from the one the display composites
+  with (eye-tracked FOV changes every frame); not yet checked.
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
 - joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, DIBR, alpha passes).
   Only the scene-capture paths use `is_same_d3d12_device`; the others may fail the same way on Mopic setups
