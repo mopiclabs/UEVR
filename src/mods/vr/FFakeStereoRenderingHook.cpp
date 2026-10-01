@@ -10328,7 +10328,8 @@ bool has_begin_rendering_viewfamily_wrapper_shape(const RuntimeFunctionRange& wr
 
 std::optional<uintptr_t> resolve_begin_rendering_viewfamilies_from_stack(
     uintptr_t direct_callback_return = 0,
-    uintptr_t excluded_viewport_draw = 0)
+    uintptr_t excluded_viewport_draw = 0,
+    uint8_t begin_render_viewfamily_slot_offset = 0)
 {
     {
         namespace k = uevr::ktjl::renderer;
@@ -10532,6 +10533,30 @@ std::optional<uintptr_t> resolve_begin_rendering_viewfamilies_from_stack(
             ? UE425_MIN_RENDERER_SIZE
             : DEFAULT_MIN_RENDERER_SIZE;
         constexpr size_t max_renderer_size = 0x4000;
+
+        // The callback's own caller is that entry when the callback was reached through the BeginRenderViewFamily
+        // slot. The size filter below can't be used for it when unwind info splits the function into chained parts:
+        // the part up to the callback can be smaller than the minimum (Black Myth: Wukong: 0x193 bytes), which then
+        // picked an unrelated frame further up (FViewport::Draw).
+        if (!source_validated_ue4 && direct_callback_return != 0 && begin_render_viewfamily_slot_offset != 0 &&
+            indirect_virtual_call_returns_to(direct_callback_return, begin_render_viewfamily_slot_offset))
+        {
+            const auto direct = get_canonical_runtime_function_range(direct_callback_return);
+            const auto direct_segment = get_runtime_function_range(direct_callback_return);
+
+            if (direct && direct_segment && direct_segment->begin != direct->begin &&
+                direct->image_base == game_module && direct->begin != excluded_viewport_draw &&
+                direct->size() <= max_renderer_size)
+            {
+                SPDLOG_INFO(
+                    "[ViewFamilySelector] Resolved the callback's caller as the BeginRenderingViewFamily entry "
+                    "target={:x} size={:x} return={:x}",
+                    direct->begin,
+                    direct->size(),
+                    direct_callback_return);
+                return direct->begin;
+            }
+        }
 
         for (uint32_t i = 1; i < depth && i <= max_renderer_stack_index; ++i) {
             const auto candidate_segment = source_validated_ue4
@@ -23831,6 +23856,35 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                 if (expected_vtable == 0 ||
                     (actual_vtable != expected_vtable && !accepted_dune_renderer_family))
                 {
+                    // Only evaluated when the line is written.
+                    const auto describe_family = [&]() {
+                        const auto with_module = [](uintptr_t address) {
+                            const auto module = utility::get_module_within(reinterpret_cast<void*>(address)).value_or(nullptr);
+                            return module != nullptr
+                                ? fmt::format("{:x}(+{:x})", address, address - reinterpret_cast<uintptr_t>(module))
+                                : fmt::format("{:x}(no module)", address);
+                        };
+                        const bool family_readable = is_readable_process_range((uintptr_t)family, 0x100);
+                        auto* const views = family_readable ? family->get_views() : nullptr;
+                        const bool views_readable =
+                            views != nullptr && is_readable_process_range((uintptr_t)views, sizeof(*views));
+                        return fmt::format(
+                            "arg={:x} arg_word={} tarrayview={} array_count={} family={:x} vtable={} learned={} "
+                            "offsets={} views={}/{} rt={:x} scene={:x}",
+                            (uintptr_t)view_family_candidate,
+                            with_module(first_word),
+                            uses_tarrayview,
+                            view_family_array.count,
+                            (uintptr_t)family,
+                            with_module(actual_vtable),
+                            with_module(expected_vtable),
+                            sdk::FSceneViewFamily::has_offsets(),
+                            views_readable ? views->count : -1,
+                            views_readable ? views->capacity : -1,
+                            family_readable ? (uintptr_t)family->get_render_target() : 0,
+                            family_readable ? (uintptr_t)family->get_scene_interface() : 0);
+                    };
+                    SPDLOG_WARNING_EVERY_N_SEC(2, "[ViewFamilySelector] Family vtable mismatch: {}", describe_family());
                     reject_candidate("unexpected FSceneViewFamily vtable");
                     return;
                 }
@@ -24300,12 +24354,51 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
         sdk::FSceneViewFamily* selected_family{};
         size_t selected_family_count{};
+        // Why the families of this call were skipped before the pair check; described only if none qualifies.
+        enum class FamilySkip : uint8_t { Null, NoViewport, OtherTarget, NoScene, Views };
+        struct FamilySkipRecord {
+            const sdk::FSceneViewFamily* family{};
+            FamilySkip reason{};
+            uintptr_t value{}; // the family's render target (OtherTarget) or views array (Views)
+        };
+        FixedCapacityList<FamilySkipRecord, 4> family_skips{};
+        const auto describe_family_skips = [&]() {
+            std::string text{};
+            for (const auto& skip : family_skips) {
+                std::string reason{};
+                switch (skip.reason) {
+                case FamilySkip::Null: reason = "null family"; break;
+                case FamilySkip::NoViewport: reason = "no expected viewport yet"; break;
+                case FamilySkip::OtherTarget:
+                    reason = fmt::format("render target {:x} is not the viewport {:x}", skip.value, (uintptr_t)expected_viewport);
+                    break;
+                case FamilySkip::NoScene: reason = "no scene interface"; break;
+                case FamilySkip::Views: {
+                    const auto views = reinterpret_cast<const sdk::TArray<sdk::FSceneView*>*>(skip.value);
+                    reason = views == nullptr || !is_readable_process_range(skip.value, sizeof(*views))
+                        ? std::string{"views array unreadable"}
+                        : views->count != 2 ? fmt::format("{} views", views->count) : std::string{"views failed validation"};
+                    break;
+                }
+                }
+                text += fmt::format("{}{:x}: {}", text.empty() ? "" : "; ", (uintptr_t)skip.family, reason);
+            }
+            return text;
+        };
 
         for (const auto family : view_families) {
             if (family == nullptr || expected_viewport == nullptr ||
                 family->get_render_target() != expected_viewport ||
                 family->get_scene_interface() == nullptr)
             {
+                family_skips.try_push_back(FamilySkipRecord{
+                    .family = family,
+                    .reason = family == nullptr ? FamilySkip::Null :
+                        expected_viewport == nullptr ? FamilySkip::NoViewport :
+                        family->get_render_target() != expected_viewport ? FamilySkip::OtherTarget :
+                        FamilySkip::NoScene,
+                    .value = family != nullptr ? (uintptr_t)family->get_render_target() : 0,
+                });
                 continue;
             }
 
@@ -24319,6 +24412,11 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                 candidate_views->data[0] == nullptr || candidate_views->data[1] == nullptr ||
                 candidate_views->data[0] == candidate_views->data[1])
             {
+                family_skips.try_push_back(FamilySkipRecord{
+                    .family = family,
+                    .reason = FamilySkip::Views,
+                    .value = (uintptr_t)candidate_views,
+                });
                 continue;
             }
 
@@ -24609,6 +24707,10 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         }
 
         if (selected_family_count != 1 || selected_family == nullptr) {
+            if (selected_family_count == 0 && !family_skips.empty()) {
+                SPDLOG_INFO_EVERY_N_SEC(2, "[NativeStereoFix] No view family can hold the eye pair ({} in this call): {}",
+                    view_families.size(), describe_family_skips());
+            }
             g_hook->invalidate_native_stereo_frame_packet(
                 selected_family_count == 0
                     ? NativeStereoFixState::LearningEyePair
@@ -25994,6 +26096,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
                          hifi_rush_native_fix_renderer_is_current_game() ||
                          sifu_native_fix_renderer_is_current_game())
                             ? g_hook->m_gameviewportclient_draw_hook.target_address()
+                            : 0,
+                        SceneViewExtensionAnalyzer::begin_render_viewfamily_index < 0x10
+                            ? static_cast<uint8_t>(SceneViewExtensionAnalyzer::begin_render_viewfamily_index * sizeof(void*))
                             : 0);
             if (!candidate) {
                 SPDLOG_WARN(
