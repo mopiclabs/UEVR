@@ -132,7 +132,10 @@ process): the hub only sent its "no face" sample (both eyes converged, IPD 0, an
 acquisition gate drops (IPD > 20 mm, `mopic_display.c:1375`), so it kept the default rig (IPD 63 mm, anim 1) and
 every capture of the Mopic display showed two views. The other Mopic-display recipes still matched because their UI
 sits at `UI_Distance` 2.0 = the zero-parallax plane; Sonic's UI is at 1.673 m, so its menu doubles by about 16 px
-(at 1280 wide) and the references recorded in the merged state score 0.75-0.83.
+(at 1280 wide) and the references recorded in the merged state score 0.75-0.83. That UI_Distance (with UI_Size 0.723
+and `VR_NativeStereoFix=false`) was a leftover config from 2025-09-25. It was deleted on 2026-10-02, so Sonic runs on
+UEVR's defaults (UI 2.0 m / 2.0, Native Stereo Fix on): a 90 s smoke run passed with the fix active and no watchdog
+fallback. The Sonic recipe's references show the old small UI and have to be re-recorded.
 
 No run crashed or hung while quitting, and every exit code was 0. Brightness of both eyes and realtime FOV were
 checked by eye on the Mopic display (2026-09-30). Per-eye brightness can be measured with monado-service restarted
@@ -175,8 +178,10 @@ could have hidden them. The table above replaces them.
 - The Mopic display has three capture states, and recipes with `"source": "mopic"` screenshot the woven output:
   merged (monado has tracked a viewer since it started, and the viewer left: one view), tracked (two views following
   the viewer), and never acquired (monado started with nobody at the monitor: two views from a fixed 63 mm rig, until
-  a face is seen once). The references were recorded merged. Only Sonic depends on it (UI off the zero-parallax
-  plane); compare a Mopic-display MENU_FAIL against a run in the same state before calling it a regression.
+  a face is seen once). The references were recorded merged. With UEVR's default UI_Distance (2.0 m, the
+  zero-parallax plane) the UI itself is single in every state, but a checkpoint whose region lets the 3D scene show
+  through still differs; compare a Mopic-display MENU_FAIL against a run in the same state before calling it a
+  regression.
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
 - joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, DIBR, alpha passes).
   Only the scene-capture paths use `is_same_d3d12_device`; the others may fail the same way on Mopic setups
