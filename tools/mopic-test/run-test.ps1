@@ -47,7 +47,7 @@
 # its focus during the run. Any running UEVRInjector.exe and the game itself are closed at the start and end of
 # every run. -Dll leaves the given DLL deployed in the engine folder.
 param(
-    [ValidateSet("Tekken8Demo", "Expedition33", "Wukong", "Hogwarts", "Stray", "Hozy", "ACC", "SonicDemo", "Custom")]
+    [ValidateSet("Tekken8Demo", "Expedition33", "Wukong", "Hogwarts", "Stray", "Hozy", "ACC", "SonicDemo", "DeadAsDisco", "Custom")]
     [string]$Game = "Tekken8Demo",
     [string]$ProcessName = "",        # Custom: process name without .exe
     [string]$SteamInstallDir = "",    # Custom: steamapps\common\<this>, used to find the app id
@@ -57,6 +57,7 @@ param(
     [string]$Set = "",                # extra config.txt keys for this run only, "Key=Value;Key2=Value2" (restored afterwards)
     [string]$UserScript = "",         # console commands for UEVR's user_script.txt for this run only, "r.Foo 0;r.Bar 1" (restored afterwards)
     [int]$Seconds = 120,              # observation window after injection
+    [int]$HangSeconds = 30,           # FREEZE when the game window doesn't answer messages for this long
     [int]$LaunchTimeout = 240,        # max seconds from launch until UEVR is running in the game
     [int]$Runs = 1,
     [int]$InjectDelay = 0,            # >0: launch the game first and only start the injector this many seconds after the game process appears (late-injection control)
@@ -77,6 +78,7 @@ $Presets = @{
     Tekken8Demo  = @{ Process = "Polaris-Win64-Shipping";  InstallDir = "TEKKEN 8 Demo" }
     Expedition33 = @{ Process = "SandFall-Win64-Shipping"; InstallDir = "Expedition 33" }
     Wukong       = @{ Process = "b1-Win64-Shipping";       InstallDir = "BlackMythWukong" }
+    DeadAsDisco  = @{ Process = "PagodaSteamDemo-Win64-Shipping"; InstallDir = "Dead as Disco Demo" }
     Hogwarts     = @{ Process = "HogwartsLegacy";          InstallDir = "Hogwarts Legacy" }
     Stray        = @{ Process = "Stray-Win64-Shipping";    InstallDir = "Stray" }
     Hozy         = @{ Process = "CozyGame-Win64-Shipping"; InstallDir = "Hozy" }
@@ -393,6 +395,7 @@ for ($run = 1; $run -le $Runs; $run++) {
     $processAgeMs = $null
     $exitCrash = $false
     $exitHang = $false
+    $frozen = $false
     $closeSent = $false
     $exitPhase = $false
     $selfExit = $false
@@ -465,11 +468,23 @@ for ($run = 1; $run -le $Runs; $run++) {
             Write-Host "Pilot started (pid $($pilotProc.Id)), status: $pilotStatusPath"
         }
         $end = (Get-Date).AddSeconds($Seconds)
+        $unresponsiveSince = $null
         while ((Get-Date) -lt $end) {
             if ($gameProc.HasExited) { $exitTime = Get-Date; break }
             if ((Get-MTime $DumpPath) -gt $dumpBefore) { $notes += "crash.dmp written"; break }
             if ($pilotProc -and $pilotProc.HasExited) { break }
+            # A deadlocked game keeps its process alive; its window stops answering messages (UE's game thread
+            # pumps them). Loading screens can stall it briefly, hence the grace period.
+            $responding = $true
+            try { $gameProc.Refresh(); $responding = ($gameProc.MainWindowHandle -eq [IntPtr]::Zero) -or $gameProc.Responding } catch { }
+            if ($responding) { $unresponsiveSince = $null }
+            elseif (-not $unresponsiveSince) { $unresponsiveSince = Get-Date }
+            elseif (((Get-Date) - $unresponsiveSince).TotalSeconds -ge $HangSeconds) { $frozen = $true; break }
             Start-Sleep -Seconds 1
+        }
+        if ($frozen) {
+            $dumpNote = $(if (Save-HangDump (Join-Path $runDir "freeze.dmp")) { "stacks in freeze.dmp" } else { "no dump" })
+            $notes += "game window not responding for $HangSeconds s, $dumpNote"
         }
         if ($Screenshot -and -not $gameProc.HasExited) { Save-Screenshot (Join-Path $runDir "screenshot.png") }
 
@@ -503,7 +518,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         } else {
             $crashed = $gameProc.HasExited -or $dumped
         }
-        if ($GracefulExit -and -not $crashed -and -not $gameProc.HasExited) {
+        if ($GracefulExit -and -not $crashed -and -not $frozen -and -not $gameProc.HasExited) {
             Write-Host "Closing the game window (graceful exit)"
             $closeRequested = $false
             try { $closeRequested = $gameProc.CloseMainWindow() } catch { }
@@ -542,7 +557,7 @@ for ($run = 1; $run -le $Runs; $run++) {
                 }
             } catch { }
         }
-        if ($crashed) { $verdict = "CRASH" } elseif ($exitCrash) { $verdict = "EXIT_CRASH" } elseif ($exitHang) { $verdict = "EXIT_HANG" } else { $verdict = "PASS" }
+        if ($crashed) { $verdict = "CRASH" } elseif ($frozen) { $verdict = "FREEZE" } elseif ($exitCrash) { $verdict = "EXIT_CRASH" } elseif ($exitHang) { $verdict = "EXIT_HANG" } else { $verdict = "PASS" }
         # Quitting through the menu and the game exiting cleanly is the recipe's goal, even if the pilot didn't get
         # to record it before it was stopped
         $pilotDone = $pilot -and ($pilot.state -eq "done" -or ($selfExit -and $pilot.exit_expected -and -not $pilot.error))

@@ -246,7 +246,13 @@ def send_keys_raw(events, hold_ms=60):
 
 
 def press(name, hold_ms=80):
-    """name, or a chord like 'alt+f4' / 'shift+tab'."""
+    """name, or a chord like 'alt+f4' / 'shift+tab'; 'lmb' / 'rmb' click where the mouse is."""
+    if name.lower() in ("lmb", "rmb"):
+        down, up = MOUSE_BUTTONS["left" if name.lower() == "lmb" else "right"]
+        _send([INPUT(INPUT_MOUSE, _INPUTUNION(mi=MOUSEINPUT(0, 0, 0, down, 0, 0)))])
+        time.sleep(hold_ms / 1000.0)
+        _send([INPUT(INPUT_MOUSE, _INPUTUNION(mi=MOUSEINPUT(0, 0, 0, up, 0, 0)))])
+        return
     parts = [p.strip().lower() for p in name.split("+")]
     for p in parts:
         if p not in SCAN:
