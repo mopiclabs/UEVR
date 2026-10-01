@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 
@@ -183,6 +184,7 @@ def focus(hwnd):
 INPUT_MOUSE, INPUT_KEYBOARD = 0, 1
 KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE = 0x1, 0x2, 0x8
 MOUSEEVENTF_MOVE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_VIRTUALDESK = 0x1, 0x8000, 0x4000
+MOUSEEVENTF_WHEEL = 0x0800
 MOUSE_BUTTONS = {"left": (0x2, 0x4), "right": (0x8, 0x10), "middle": (0x20, 0x40)}
 
 ULONG_PTR = ctypes.c_size_t
@@ -245,8 +247,36 @@ def send_keys_raw(events, hold_ms=60):
             time.sleep(hold_ms / 1000.0)
 
 
+def mouse_look(dx, dy, ms):
+    """Relative mouse motion of (dx, dy) mickeys spread over `ms` (camera turns: games read these as raw input)."""
+    n = max(1, int(ms) // 10)
+    for i in range(n):
+        sx, sy = dx * (i + 1) // n - dx * i // n, dy * (i + 1) // n - dy * i // n
+        _send([INPUT(INPUT_MOUSE, _INPUTUNION(mi=MOUSEINPUT(sx, sy, 0, MOUSEEVENTF_MOVE, 0, 0)))])
+        time.sleep(max(0, int(ms)) / 1000.0 / n)
+
+
 def press(name, hold_ms=80):
-    """name, or a chord like 'alt+f4' / 'shift+tab'; 'lmb' / 'rmb' click where the mouse is."""
+    """name, or a chord like 'alt+f4' / 'shift+tab'; 'lmb' / 'rmb' click where the mouse is; 'look:dx,dy' moves
+    the mouse by that much (relative, spread over the hold time: a camera turn); 'wheel:N' turns the mouse wheel N
+    notches (negative: down / towards the end of a list) where the mouse is."""
+    if name.lower().startswith("wheel:"):
+        try:
+            notches = int(name[6:])
+        except ValueError:
+            raise SystemExit(f"bad mouse wheel '{name}' (wheel:N, e.g. wheel:-5)")
+        for _ in range(abs(notches)):
+            delta = (120 if notches > 0 else -120) & 0xFFFFFFFF
+            _send([INPUT(INPUT_MOUSE, _INPUTUNION(mi=MOUSEINPUT(0, 0, delta, MOUSEEVENTF_WHEEL, 0, 0)))])
+            time.sleep(0.06)
+        return
+    if name.lower().startswith("look:"):
+        try:
+            dx, dy = (int(v) for v in name[5:].split(","))
+        except ValueError:
+            raise SystemExit(f"bad mouse look '{name}' (look:dx,dy, e.g. look:-600,0)")
+        mouse_look(dx, dy, hold_ms)
+        return
     if name.lower() in ("lmb", "rmb"):
         down, up = MOUSE_BUTTONS["left" if name.lower() == "lmb" else "right"]
         _send([INPUT(INPUT_MOUSE, _INPUTUNION(mi=MOUSEINPUT(0, 0, 0, down, 0, 0)))])
@@ -427,6 +457,93 @@ def load_recipe(path):
         return json.load(f)
 
 
+VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# key names and free text: a ${name} there always becomes text
+TEXT_FIELDS = {"key", "keys", "press", "idle_press", "note", "shot", "phase"}
+
+
+def parse_vars(pairs):
+    """--var name=value (repeatable) -> {name: value}"""
+    variables = {}
+    for pair in pairs or []:
+        name, sep, value = pair.partition("=")
+        name = name.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise SystemExit(f"--var expects name=value, got {pair!r}")
+        variables[name] = value
+    return variables
+
+
+def resolve_vars(recipe, given):
+    """The recipe's "vars" ({name: default}, null = no default) filled with the --var values:
+    ({name: (text, value)}, [problems]). A --var value is read as JSON when it parses (180, [110, 305], true,
+    ["hud", "loading"]), else as text; a default is taken as written. Only declared names are vars: a recipe without
+    "vars" takes no --var and its steps are never changed (a literal ${...} in them stays)."""
+    declared = recipe.get("vars")
+    if declared is None:
+        declared = {}  # "vars": null is no vars, as run-test.ps1 / run-ladder.ps1 read it
+    if not isinstance(declared, dict):
+        return {}, ['the recipe\'s "vars" must be an object {name: default}']
+    problems = []
+    unknown = sorted(n for n in given if n not in declared)
+    if unknown:
+        problems.append(f"--var {', '.join(unknown)}: the recipe declares no such var"
+                        f" (its \"vars\": {', '.join(declared) or 'none'})")
+    resolved = {}
+    for name, default in declared.items():
+        if name in given:
+            text = given[name]
+            try:
+                value = json.loads(text)
+            except ValueError:
+                value = text
+        elif default is None:
+            continue  # required: an error only where a step to run uses it
+        else:
+            value = default
+            text = default if isinstance(default, str) else json.dumps(default, ensure_ascii=False)
+        resolved[name] = (text, value)
+    return resolved, problems
+
+
+def substitute_vars(value, resolved, declared, unfilled, field=None):
+    """${name} of a declared var in the steps' strings -> its value; any other ${...} stays as written. A string
+    that is only "${name}" becomes the value itself (a number for "play" / "timeout", a list for "click" /
+    "wait_for"), except in key and text fields; inside a longer string the value is text. Declared names without a
+    value are added to `unfilled` and left as they are."""
+    if isinstance(value, dict):
+        return {k: substitute_vars(v, resolved, declared, unfilled, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [substitute_vars(v, resolved, declared, unfilled, field) for v in value]
+    if not isinstance(value, str) or "${" not in value:
+        return value
+    whole = VAR_RE.fullmatch(value)
+    if whole and whole.group(1) in resolved and field not in TEXT_FIELDS:
+        return resolved[whole.group(1)][1]
+
+    def repl(m):
+        name = m.group(1)
+        if name not in declared:
+            return m.group(0)
+        if name not in resolved:
+            unfilled.add(name)
+            return m.group(0)
+        return resolved[name][0]
+    return VAR_RE.sub(repl, value)
+
+
+def recipe_steps_with_vars(recipe, given):
+    """-> (steps, {name: text}, [problems], [set of unfilled names per step]). Without "vars" the steps are the
+    recipe's own list, untouched."""
+    steps = recipe.get("steps", [])
+    resolved, problems = resolve_vars(recipe, given)
+    declared = recipe.get("vars") if isinstance(recipe.get("vars"), dict) else {}
+    unfilled = [set() for _ in steps]
+    if declared:
+        steps = [substitute_vars(s, resolved, declared, unfilled[i]) for i, s in enumerate(steps)]
+    return steps, {n: t for n, (t, _) in resolved.items()}, problems, unfilled
+
+
 def save_recipe(path, recipe):
     """One checkpoint / step per line, so recipes stay readable and diffable."""
     lines = ["{"]
@@ -507,10 +624,12 @@ class Failed(Exception):
 
 
 class Pilot:
-    def __init__(self, proc, recipe_path, out_dir, status_path, source=None):
+    def __init__(self, proc, recipe_path, out_dir, status_path, source=None, variables=None):
         self.proc = proc
         self.recipe_path = os.path.abspath(recipe_path)
         self.recipe = load_recipe(recipe_path)
+        self.recipe["steps"], self.variables, self.var_problems, self.unfilled_vars = \
+            recipe_steps_with_vars(self.recipe, dict(variables or {}))
         self.source = source or self.recipe.get("source", "window")
         self.fit = recipe_fit(self.recipe, self.source)
         self.max_width = self.recipe.get("max_width", 1280)
@@ -520,7 +639,7 @@ class Pilot:
         self.logf = open(os.path.join(out_dir, "pilot.log"), "a", encoding="utf-8")
         self.status = {"state": "running", "recipe": self.recipe_path, "step": 0, "desc": "", "phase": "",
                        "exit_expected": False, "reached": [], "error": None, "error_kind": None,
-                       "started": time.time(), "updated": time.time()}
+                       "vars": self.variables, "started": time.time(), "updated": time.time()}
         self.rng = random.Random(0)
         self.write_status()
 
@@ -694,6 +813,27 @@ class Pilot:
                 last_press = time.time()
             self.sleep(poll)
 
+    def wait_gone(self, names, timeout, settle=3.0, poll=0.5):
+        """Wait until none of the checkpoints has shown for `settle` seconds in a row (a loading screen going away;
+        the settle time rides out frames where an animated screen briefly fails its match)."""
+        names = [names] if isinstance(names, str) else list(names)
+        label = "|".join(names)
+        start = time.time()
+        end, gone_since = start + timeout, None
+        while True:
+            img, _ = self.grab()
+            if any(self.matches(n, img) for n in names):
+                gone_since = None
+            else:
+                gone_since = gone_since or time.time()
+                if time.time() - gone_since >= settle:
+                    self.log(f"  {label} gone after {gone_since - start:.0f} s")
+                    return
+            if time.time() >= end:
+                self.save_shot(f"FAILED-gone-{label}", img)
+                raise Failed("checkpoint", f"{label} still showing after {timeout} s")
+            self.sleep(poll)
+
     def do(self, step):
         if "note" in step and len(step) == 1:
             return
@@ -708,6 +848,8 @@ class Pilot:
         elif "wait_for" in step:
             self.wait_for(step["wait_for"], step.get("timeout", 30), step.get("press"), step.get("every", 3.0),
                           click=step.get("click"))
+        elif "wait_gone" in step:
+            self.wait_gone(step["wait_gone"], step.get("timeout", 60), step.get("for", 3.0))
         elif "seek" in step:
             self.seek(step["seek"], step.get("press", "down"), step.get("max", 8), step.get("gap", 1.2))
         elif "play_until" in step:
@@ -764,6 +906,15 @@ class Pilot:
         steps = self.recipe["steps"]
         last = len(steps) if last is None else min(last, len(steps))
         try:
+            # only the steps that run need their vars (run --steps during discovery)
+            unfilled = set().union(*self.unfilled_vars[max(first, 1) - 1:last])
+            if unfilled:
+                names = ", ".join("${" + n + "}" for n in sorted(unfilled))
+                self.var_problems.append(f"the steps use {names}, which have no default and no --var")
+            if self.var_problems:
+                raise Failed("recipe", "; ".join(self.var_problems))
+            if self.variables:
+                self.log(f"vars: {json.dumps(self.variables, ensure_ascii=False)}")
             end = time.time() + self.recipe.get("window_timeout", 180)
             while not find_window(self.proc):
                 if time.time() > end:
@@ -907,6 +1058,8 @@ def main():
     s.add_argument("--status", default="", help="JSON status file for the harness")
     s.add_argument("--steps", default="", help="only these steps, e.g. 9-12 or 9- (1-based, as in pilot.log)")
     s.add_argument("--source", choices=["window", "mopic"], default=None, help="override the recipe's capture source (window: the game without UEVR)")
+    s.add_argument("--var", action="append", default=[], metavar="NAME=VALUE", help="value for ${NAME} in the recipe's steps (repeatable)")
+    s.add_argument("--dry-run", action="store_true", help="print the steps after --var substitution and exit (no game needed)")
     s = sub.add_parser("matrix", help="score all checkpoints against screenshots (each screen should match one)")
     s.add_argument("recipe"); s.add_argument("shots", nargs="+", help="screenshot files or globs")
     s = sub.add_parser("checkpoint", help="save a checkpoint from a screenshot region / test one against the screen")
@@ -927,12 +1080,28 @@ def main():
         print(json.dumps(result))
         sys.exit(1 if "error" in result else 0)
     if args.cmd == "run":
+        # step descriptions and vars can hold text the console code page lacks (Chinese save names on cp949)
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="backslashreplace")
+        variables = parse_vars(args.var)
+        if args.dry_run:
+            steps, resolved, problems, unfilled = recipe_steps_with_vars(load_recipe(args.recipe), variables)
+            print(f"vars: {json.dumps(resolved, ensure_ascii=False)}")
+            for i, step in enumerate(steps, 1):
+                print(f"[{i}/{len(steps)}] {json.dumps(step, ensure_ascii=False)}")
+            missing = sorted(set().union(*unfilled))
+            if missing:
+                problems.append(f"the steps use {', '.join('${' + n + '}' for n in missing)}, which have no default and no --var")
+            if problems:
+                print(json.dumps({"error": "vars", "problems": problems, "missing": missing}, ensure_ascii=False))
+                sys.exit(1)
+            return
         first, last = 1, None
         if args.steps:
             a, _, b = args.steps.partition("-")
             first = int(a) if a else 1
             last = int(b) if b else (None if _ else first)
-        pilot = Pilot(args.process, args.recipe, args.out, args.status, args.source)
+        pilot = Pilot(args.process, args.recipe, args.out, args.status, args.source, variables)
         try:
             ok = pilot.run(first, last)
         except BaseException:  # noqa: BLE001 - the harness runs us hidden, keep the reason in pilot.log

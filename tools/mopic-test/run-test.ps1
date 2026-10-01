@@ -24,6 +24,12 @@
 #   # A/B without rebuilding: config overrides / console commands for this run only
 #   ... -Set "VR_NativeStereoFix=false" -UserScript "r.ScreenPercentage 100" -Label nsf-off
 #
+#   # start from a given save: copied over the recipe's "save_slot" before each run (the game's copy after the
+#   # run lands in <run>\save-after\); -RecipeVars fills the recipe's "vars" (${name} in its steps, gamepilot run --var)
+#   ... -Game Wukong -Recipe Wukong-save -SaveFile saves\wukong\x.sav -RecipeVars "play_s=180" -Label ladder
+#   # the same without a recipe (discovery): -SaveSlot names the file to replace
+#   ... -Game Wukong -WaitForExit -Seconds 2400 -SaveFile saves\wukong\x.sav -SaveSlot "{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav" -Label discover
+#
 # Results: runs\<time>-<game>-<label>-r<n>\ next to this script (summary.txt, result.json, log.txt, crash.dmp,
 # config.txt, pilot\*.png, exit-hang.dmp) and a one-line verdict per run on the console:
 #   PASS           game alive for the whole observation window (or quit cleanly through its menu), no dump
@@ -68,6 +74,10 @@ param(
     [switch]$WaitForExit,             # the game is expected to quit by itself within -Seconds (someone quits it through its menu): an exit without a dump or UE crash report is a PASS
     [switch]$NoInject,                # baseline: the game without UEVR (with -Recipe the pilot reads the desktop window)
     [string]$Recipe = "",             # drive the game with gamepilot.py: recipe name (recipes\<name>.json) or path. Enters gameplay, plays, quits through the menu; implies -WaitForExit
+    [string]$SaveFile = "",           # copy this save over the recipe's "save_slot" before each run (path, or relative to this script's folder); the file is overwritten, nothing is deleted
+    [string]$SaveSlot = "",           # with -SaveFile: the file it replaces, with save_slot's placeholders ("{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"); instead of the recipe's save_slot, also without a recipe (discovery)
+    [string]$SaveAs = "",             # with -SaveFile: the target file name instead of the recipe's save_slot "file"
+    [string]$RecipeVars = "",         # "k=v;k2=v2": values for the recipe's "vars" (${k} in its steps; passed to gamepilot run as --var k=v)
     [string]$EyeLumaLog = "",         # optional log with lines like "eye_luma left=0.183 right=0.179"
     [string]$EyeLumaPattern = 'eye_luma\s+left=([0-9.]+)\s+right=([0-9.]+)'
 )
@@ -112,6 +122,7 @@ $Milestones = [ordered]@{
     nsf_separate      = "\[NativeStereoFix\] Gave the second view its own upscaler"
     nsf_not_recreated = "\[NativeStereoFix\] Upscaler interface .* was not recreated"
     nsf_shared        = "\[NativeStereoFix\] Upscaler interface .* both views share it"
+    nsf_active        = "\[NativeStereoFix\] state=active"
     bootstrap_defer   = "Deferring LocalPlayer bootstrap"
     bootstrap_call    = "Calling PostInitProperties on local player!"
     bootstrap_done    = "PostInitProperties called!"
@@ -154,7 +165,7 @@ function Get-LogTime([string]$line) {
     return $null
 }
 
-function Find-SteamAppId([string]$installDir) {
+function Get-SteamLibraries {
     $steamPath = $null
     try { $steamPath = (Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction Stop).SteamPath } catch { }
     if (-not $steamPath) { $steamPath = "${env:ProgramFiles(x86)}\Steam" }
@@ -164,11 +175,18 @@ function Find-SteamAppId([string]$installDir) {
     $vdf = Join-Path $steamPath "steamapps\libraryfolders.vdf"
     if (Test-Path $vdf) {
         foreach ($m in [regex]::Matches((Get-Content $vdf -Raw), '"path"\s+"([^"]+)"')) {
-            $libraries += ($m.Groups[1].Value -replace "\\\\", "\")
+            $lib = $m.Groups[1].Value -replace "\\\\", "\"
+            # the registry's SteamPath is all lower case; the same folder from the vdf keeps its real spelling
+            $same = -1
+            for ($i = 0; $i -lt $libraries.Count; $i++) { if ($libraries[$i].TrimEnd("\") -ieq $lib.TrimEnd("\")) { $same = $i; break } }
+            if ($same -ge 0) { $libraries[$same] = $lib } else { $libraries += $lib }
         }
     }
+    return @($libraries)
+}
 
-    foreach ($lib in ($libraries | Select-Object -Unique)) {
+function Find-SteamAppId([string]$installDir) {
+    foreach ($lib in Get-SteamLibraries) {
         $apps = Join-Path $lib "steamapps"
         if (-not (Test-Path $apps)) { continue }
         foreach ($acf in Get-ChildItem $apps -Filter "appmanifest_*.acf") {
@@ -179,6 +197,161 @@ function Find-SteamAppId([string]$installDir) {
         }
     }
     return $null
+}
+
+# steamapps\common\<installDir> in whichever Steam library has it
+function Find-SteamGameDir([string]$installDir) {
+    if ($installDir -eq "") { return $null }
+    foreach ($lib in Get-SteamLibraries) {
+        $dir = Join-Path $lib "steamapps\common\$installDir"
+        if (Test-Path -LiteralPath $dir -PathType Container) { return $dir }
+    }
+    return $null
+}
+
+# The logged-in Steam user's account id (the low 32 bits of the SteamID64), $null when nobody is logged in
+function Get-SteamAccountId {
+    $id = $null
+    try { $id = (Get-ItemProperty "HKCU:\Software\Valve\Steam\ActiveProcess" -ErrorAction Stop).ActiveUser } catch { }
+    if ($null -eq $id) { return $null }
+    $n = [int64]$id
+    if ($n -lt 0) { $n += 4294967296 }   # a REG_DWORD above 2^31 reads back as a negative Int32
+    if ($n -eq 0) { return $null }
+    return [uint64]$n
+}
+
+# Values for the placeholders in a recipe's save_slot "dir"; $null = not available on this PC / for this game
+function Get-SavePlaceholderValues([string]$gameDir) {
+    $account = Get-SteamAccountId
+    return @{
+        sid64        = $(if ($account) { [string]([uint64]76561197960265728 + $account) } else { $null })
+        accountid    = $(if ($account) { [string]$account } else { $null })
+        gamedir      = $(if ($gameDir) { $gameDir } else { $null })
+        localappdata = $env:LOCALAPPDATA
+        appdata      = $env:APPDATA
+        documents    = [Environment]::GetFolderPath("MyDocuments")
+    }
+}
+
+function Expand-SavePlaceholders([string]$text, [hashtable]$values) {
+    $out = $text
+    foreach ($m in [regex]::Matches($text, '\{([A-Za-z0-9_]+)\}')) {
+        $name = $m.Groups[1].Value
+        if (-not $values.ContainsKey($name)) { throw "save_slot: unknown placeholder {$name} in '$text' (known: $((@($values.Keys) | Sort-Object | ForEach-Object { "{$_}" }) -join ' '))" }
+        $value = $values[$name]
+        if ($null -eq $value -or [string]$value -eq "") {
+            $why = $(if ($name -in @("sid64", "accountid")) { "no Steam user is logged in" } else { "the game's install folder was not found" })
+            throw "save_slot: {$name} in '$text' has no value ($why)"
+        }
+        $out = $out.Replace($m.Value, [string]$value)
+    }
+    return $out
+}
+
+# Full path of the save file a run installs: the recipe's save_slot {"dir": ..., "file": ...} (or -SaveSlot split
+# into those), -SaveAs overriding the file
+function Resolve-SaveTarget($slot, [string]$saveAs, [hashtable]$values) {
+    if (-not $slot -or -not $slot.dir) { throw "save_slot needs a `"dir`" (-SaveSlot: a full path)" }
+    $file = $(if ($saveAs -ne "") { $saveAs } else { [string]$slot.file })
+    if ($file -eq "") { throw "save_slot has no `"file`" (or pass -SaveAs <file name>)" }
+    if ($file -ne [System.IO.Path]::GetFileName($file) -or $file -in @(".", "..")) { throw "save file name '$file' must be a plain file name, not a path" }
+    $dir = Expand-SavePlaceholders ([string]$slot.dir) $values
+    if (-not [System.IO.Path]::IsPathRooted($dir)) { throw "save_slot dir '$dir' is not an absolute path" }
+    return [System.IO.Path]::GetFullPath((Join-Path $dir $file))
+}
+
+# Steam (cloud sync) or a game that is still going away can hold a save file for a moment
+function Copy-FileRetry([string]$from, [string]$to, [int]$seconds) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ($true) {
+        try { Copy-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop; return }
+        catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Seconds 2 }
+    }
+}
+
+# Puts the run's save in place: the file already there is kept in <runDir>\save-before\, the save is copied over it
+# and stamped with the current time (so Steam Cloud takes the local file as the newest). Nothing is ever deleted.
+function Install-SaveFile([string]$source, [string]$sourceHash, [string]$target, [string]$runDir) {
+    $dir = Split-Path -Parent $target
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw "save folder not found: $dir (wrong Steam user, or the game never saved on this PC?)" }
+    $before = $null
+    if (Test-Path -LiteralPath $target -PathType Leaf) {
+        $beforeDir = Join-Path $runDir "save-before"
+        New-Item -ItemType Directory -Force -Path $beforeDir | Out-Null
+        $before = Join-Path $beforeDir (Split-Path -Leaf $target)
+        Copy-FileRetry $target $before 30
+    }
+    if (-not [string]::Equals([System.IO.Path]::GetFullPath($source), $target, [StringComparison]::OrdinalIgnoreCase)) {
+        Copy-FileRetry $source $target 30
+    }
+    $now = Get-Date
+    (Get-Item -LiteralPath $target).LastWriteTime = $now
+    $installedHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    if ($installedHash -ne $sourceHash) { throw "the installed save $target does not match $source (sha256 $installedHash vs $sourceHash)" }
+    return [ordered]@{
+        source        = $source
+        source_sha256 = $sourceHash
+        target        = $target
+        size          = (Get-Item -LiteralPath $target).Length
+        installed     = $now.ToString("s")
+        target_before = $before
+        after         = $null
+    }
+}
+
+# Evidence after a run (also after crashes): the target as the game left it (autosaves, format upgrades) goes to
+# <runDir>\save-after\, plus the names of other files in the save folder written during the run.
+function Save-SaveEvidence([string]$target, [string]$installedHash, [string]$runDir, [DateTime]$since) {
+    $dir = Split-Path -Parent $target
+    $others = @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -gt $since -and $_.FullName -ne $target } | ForEach-Object { $_.Name })
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+        return [ordered]@{ path = $null; size = $null; sha256 = $null; changed = $true; modified = $null; missing = $true; others_written = $others }
+    }
+    $afterDir = Join-Path $runDir "save-after"
+    New-Item -ItemType Directory -Force -Path $afterDir | Out-Null
+    $dest = Join-Path $afterDir (Split-Path -Leaf $target)
+    Copy-FileRetry $target $dest 10
+    $hash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+    return [ordered]@{
+        path           = $dest
+        size           = (Get-Item -LiteralPath $dest).Length
+        sha256         = $hash
+        changed        = ($hash -ne $installedHash)
+        modified       = (Get-Item -LiteralPath $target).LastWriteTime.ToString("s")
+        missing        = $false
+        others_written = $others
+    }
+}
+
+# One argument of a command line built for Start-Process (which joins -ArgumentList with spaces as it is): quoted,
+# with embedded quotes and the backslashes before a quote (or before the closing one) escaped the way the MSVC
+# runtime / CommandLineToArgvW read them back
+function ConvertTo-ArgvString([string]$s) {
+    $s = [regex]::Replace($s, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $s = [regex]::Replace($s, '(\\+)$', '$1$1')
+    return '"' + $s + '"'
+}
+
+# -RecipeVars "k=v;k2=v2" -> ordered name -> value (names as in the recipe's "vars", case-sensitive)
+function ConvertFrom-RecipeVars([string]$text) {
+    $vars = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+    foreach ($pair in ($text -split ";")) {
+        if ($pair.Trim() -eq "") { continue }
+        $kv = $pair.Split("=", 2)
+        $name = $kv[0].Trim()
+        if ($kv.Count -ne 2 -or $name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "-RecipeVars expects name=value pairs separated by ';', got '$pair'" }
+        $vars[$name] = $kv[1].Trim()
+    }
+    return $vars
+}
+
+# -RecipeVars -> gamepilot arguments (--var "k=v" ...); JSON values with quotes (["hud","loading"]) arrive intact
+function ConvertTo-PilotVarArgs([string]$text) {
+    $out = @()
+    $vars = ConvertFrom-RecipeVars $text
+    foreach ($name in $vars.PSBase.Keys) { $out += @("--var", (ConvertTo-ArgvString "$name=$($vars[$name])")) }
+    return $out
 }
 
 function Set-ConfigValues([string]$path, [hashtable]$values) {
@@ -333,11 +506,63 @@ if ($Recipe -ne "") {
     if (-not $PSBoundParameters.ContainsKey("Seconds")) { $Seconds = 900 }
 }
 
+# -Set is checked here, before any run touches config.txt or a save
+$SetPairs = @()
+foreach ($pair in ($Set -split ";")) {
+    if ($pair.Trim() -eq "") { continue }
+    $kv = $pair.Split("=", 2)
+    if ($kv.Count -ne 2) { throw "-Set expects Key=Value pairs separated by ';', got '$pair'" }
+    $SetPairs += ,@($kv[0].Trim(), $kv[1].Trim())
+}
+
+# -RecipeVars fills the recipe's "vars" ({name: default}, null = must be given); checked here so a typo doesn't
+# cost a game launch (gamepilot checks the same)
+$PilotVarArgs = @()
+if ($RecipeVars -ne "" -and $Recipe -eq "") { throw "-RecipeVars needs -Recipe" }
+if ($Recipe -ne "") {
+    $given = ConvertFrom-RecipeVars $RecipeVars
+    $declared = @()
+    $required = @()
+    if ($null -ne $recipeJson.vars) {
+        if ($recipeJson.vars -isnot [System.Management.Automation.PSCustomObject]) { throw "Recipe $Recipe`: `"vars`" must be an object {name: default}" }
+        foreach ($p in $recipeJson.vars.PSObject.Properties) { $declared += $p.Name; if ($null -eq $p.Value) { $required += $p.Name } }
+    }
+    $unknown = @($given.PSBase.Keys | Where-Object { $declared -cnotcontains $_ })
+    if ($unknown.Count -gt 0) { throw "-RecipeVars: $Recipe declares no var $($unknown -join ', ') (its `"vars`": $(if ($declared.Count -gt 0) { $declared -join ', ' } else { 'none' }))" }
+    $unset = @($required | Where-Object { -not $given.Contains($_) })
+    if ($unset.Count -gt 0) { throw "$Recipe needs -RecipeVars for $($unset -join ', ') (no default in its `"vars`")" }
+    $PilotVarArgs = @(ConvertTo-PilotVarArgs $RecipeVars)
+}
+
+# -SaveFile: the save every run starts from, copied over the file -SaveSlot or the recipe's save_slot names
+$SaveSource = $null
+$SaveSourceHash = $null
+$SaveTarget = $null
+if ($SaveFile -ne "") {
+    $candidate = $SaveFile
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -and -not [System.IO.Path]::IsPathRooted($SaveFile)) { $candidate = Join-Path $ScriptDir $SaveFile }
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "-SaveFile not found: $SaveFile" }
+    $SaveSource = (Resolve-Path -LiteralPath $candidate).ProviderPath
+    if ($SaveSlot -ne "") {
+        $slotSpec = [pscustomobject]@{ dir = [System.IO.Path]::GetDirectoryName($SaveSlot); file = [System.IO.Path]::GetFileName($SaveSlot) }
+    } elseif ($Recipe -ne "" -and $recipeJson.save_slot) {
+        $slotSpec = $recipeJson.save_slot
+    } else {
+        throw "-SaveFile needs a recipe with a `"save_slot`" or -SaveSlot <file> (where the game keeps the save it loads)"
+    }
+    $SaveTarget = Resolve-SaveTarget $slotSpec $SaveAs (Get-SavePlaceholderValues (Find-SteamGameDir $SteamInstallDir))
+    $SaveSourceHash = (Get-FileHash -LiteralPath $SaveSource -Algorithm SHA256).Hash
+} elseif ($SaveAs -ne "" -or $SaveSlot -ne "") {
+    throw "-SaveAs and -SaveSlot need -SaveFile"
+}
+
 Write-Host "Game:     $Game ($ProcessName) via $LaunchTarget"
 Write-Host "Engine:   $EngineDir"
 Write-Host "DLL:      $DllHash $DllCommit"
 Write-Host "Window:   $Seconds s after injection, $Runs run(s)"
 if ($Recipe -ne "") { Write-Host "Recipe:   $Recipe" }
+if ($RecipeVars -ne "") { Write-Host "Vars:     $RecipeVars" }
+if ($SaveSource) { Write-Host "Save:     $SaveSource -> $SaveTarget" }
 if ($NoInject) { Write-Host "Baseline: UEVR is not injected" }
 if ($KeepGame -and ($Set -ne "" -or $UserScript -ne "" -or $RecipeConfig.Count -gt 0)) {
     Write-Warning "-KeepGame with config overrides: the kept game still has them loaded and UEVR saves its config on later changes (menu toggles...), so they can end up in config.txt. Close the game and check config.txt afterwards."
@@ -361,12 +586,7 @@ for ($run = 1; $run -le $Runs; $run++) {
     if ($hadConfig) { Copy-Item $ConfigPath $configBackup -Force }
     $overrides = @{ "FrameworkConfig_LogLevel" = "2" }
     foreach ($key in $RecipeConfig.Keys) { $overrides[$key] = $RecipeConfig[$key] }
-    foreach ($pair in ($Set -split ";")) {
-        if ($pair.Trim() -eq "") { continue }
-        $kv = $pair.Split("=", 2)
-        if ($kv.Count -ne 2) { throw "-Set expects Key=Value pairs separated by ';', got '$pair'" }
-        $overrides[$kv[0].Trim()] = $kv[1].Trim()
-    }
+    foreach ($kv in $SetPairs) { $overrides[$kv[0]] = $kv[1] }
     Set-ConfigValues $ConfigPath $overrides
     Copy-Item $ConfigPath (Join-Path $runDir "config.txt") -Force
 
@@ -378,6 +598,19 @@ for ($run = 1; $run -le $Runs; $run++) {
         $cmds = @($UserScript -split ";" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
         [System.IO.File]::WriteAllLines($userScriptPath, [string[]]$cmds, (New-Object System.Text.UTF8Encoding($false)))
         Copy-Item $userScriptPath (Join-Path $runDir "user_script.txt") -Force
+    }
+
+    # The run's save (-SaveFile), put in place last before the launch, with the game gone; a failure is this run's
+    # HARNESS_ERROR (still with result.json, save-after and the config restored)
+    $saveInfo = $null
+    $saveError = $null
+    if ($SaveSource) {
+        try {
+            $saveInfo = Install-SaveFile $SaveSource $SaveSourceHash $SaveTarget $runDir
+            Write-Host "Save installed: $SaveSource -> $SaveTarget"
+        } catch {
+            $saveError = "could not install the save: $($_.Exception.Message)"
+        }
     }
 
     $t0 = Get-Date
@@ -405,6 +638,7 @@ for ($run = 1; $run -le $Runs; $run++) {
     $pilotStatusPath = Join-Path $runDir "pilot-status.json"
 
     try {
+        if ($saveError) { $verdict = "HARNESS_ERROR"; $notes += $saveError; throw "stop" }
         if ($InjectDelay -le 0 -and -not $NoInject) {
             $injectorProc = Start-Process -FilePath $Injector -ArgumentList "--attach=$ProcessName" -WorkingDirectory $EngineDir -PassThru
             Start-Sleep -Seconds 2
@@ -464,6 +698,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         if ($Recipe -ne "") {
             $pilotArgs = @("`"$PilotScript`"", $ProcessName, "run", "`"$Recipe`"", "--out", "`"$pilotOut`"", "--status", "`"$pilotStatusPath`"")
             if ($NoInject) { $pilotArgs += @("--source", "window") }
+            $pilotArgs += $PilotVarArgs
             $pilotProc = Start-Process -FilePath $PilotPython -ArgumentList $pilotArgs -WindowStyle Hidden -PassThru
             Write-Host "Pilot started (pid $($pilotProc.Id)), status: $pilotStatusPath"
         }
@@ -574,6 +809,22 @@ for ($run = 1; $run -le $Runs; $run++) {
         $crashReporter = [bool](Get-Process -Name "CrashReportClient" -ErrorAction SilentlyContinue)
         if (-not ($KeepGame -and $run -eq $Runs)) { Stop-Leftovers $ProcessName }
 
+        # the installed save as the game left it (autosaves, a format upgrade), also after crashes, first thing once
+        # the game is gone; after a failed install, whatever the slot holds now
+        $saveAfter = $null
+        if ($SaveSource) {
+            try {
+                $saveAfter = Save-SaveEvidence $SaveTarget $SaveSourceHash $runDir $t0
+                if ($saveInfo) {
+                    $saveInfo.after = $saveAfter
+                    if ($saveAfter.missing) { $notes += "the installed save is gone after the run: $SaveTarget" }
+                    if ($KeepGame -and $run -eq $Runs) { $notes += "save-after was copied while the game was still running (-KeepGame)" }
+                }
+            } catch {
+                $notes += "could not copy the save after the run: $($_.Exception.Message)"
+            }
+        }
+
         # collect
         $logText = Read-Shared $LogPath
         if ((Get-MTime $LogPath) -gt $t0) { [System.IO.File]::WriteAllText((Join-Path $runDir "log.txt"), $logText) }
@@ -653,6 +904,12 @@ for ($run = 1; $run -le $Runs; $run++) {
             milestone_counts    = $counts
             eye_luma            = $eye
             recipe              = $Recipe
+            recipe_vars         = $RecipeVars
+            save                = $(if ($saveInfo) { $saveInfo } elseif ($SaveSource) {
+                    $beforeCopy = Join-Path $runDir "save-before\$(Split-Path -Leaf $SaveTarget)"
+                    [ordered]@{ source = $SaveSource; source_sha256 = $SaveSourceHash; target = $SaveTarget; error = $saveError
+                        target_before = $(if (Test-Path -LiteralPath $beforeCopy) { $beforeCopy } else { $null }); after = $saveAfter }
+                } else { $null })
             pilot               = $pilot
             notes               = $notes
         }
@@ -667,6 +924,19 @@ for ($run = 1; $run -le $Runs; $run++) {
             if ($pilot.error) { $pilotLine += " | step $($pilot.step) ($($pilot.desc)): $($pilot.error)" }
             $summary += $pilotLine
         }
+        if ($SaveSource) {
+            $summary += "save: $SaveSource (sha256 $SaveSourceHash) -> $SaveTarget"
+            if ($saveAfter) {
+                $after = $saveAfter
+                $what = $(if ($saveInfo) { "save after" } else { "slot after the failed install" })
+                if ($after.missing) { $summary += "${what}: missing" } else {
+                    $saveLine = "${what}: $($after.size) B, $(if ($after.changed) { 'changed' } else { 'unchanged' }) -> $($after.path)"
+                    if (@($after.others_written).Count -gt 0) { $saveLine += " | also written: $(@($after.others_written) -join ', ')" }
+                    $summary += $saveLine
+                }
+            }
+        }
+        if ($RecipeVars -ne "") { $summary += "vars: $RecipeVars" }
         $summary += ($notes | ForEach-Object { "  - $_" })
         $summary | Set-Content -Path (Join-Path $runDir "summary.txt") -Encoding UTF8
 
