@@ -126,10 +126,13 @@ watchdog fallback (one early injection, three at 24 s). With monado `MOPIC_MODE=
 halves measured 58.6/58.2, 65.3/64.5 and 91.0/89.9 (left/right, 0-255) at three points of a song, against 65-76
 vs 0.2-0.4 before. Full matrix, one run each: 8/9 PASS, every exit code 0, the fix active on
 TEKKEN 8, Stray, Hogwarts Legacy, Wukong and Dead as Disco. Sonic stopped at its main-menu checkpoint (score 0.75)
-in the matrix, in a re-run, and the same way with a morning build from before these changes. Since monado-service
-was restarted (21:51) every capture of the Mopic display (Sonic, Stray, Expedition 33) shows the two views
-overlaid, where the 14:xx captures showed one view; Sonic's checkpoint sits on its 3D background, so it no longer
-matches. If the overlaid capture is the display's normal 3D state, the Mopic-display recipes need re-recording.
+in the matrix, in a re-run, and the same way with a morning build from before these changes. That monado-service
+was restarted at 21:51 with nobody at the monitor and never acquired a viewer (`eye_acquired=0`, read from the live
+process): the hub only sent its "no face" sample (both eyes converged, IPD 0, anim 0), which the driver's first-
+acquisition gate drops (IPD > 20 mm, `mopic_display.c:1375`), so it kept the default rig (IPD 63 mm, anim 1) and
+every capture of the Mopic display showed two views. The other Mopic-display recipes still matched because their UI
+sits at `UI_Distance` 2.0 = the zero-parallax plane; Sonic's UI is at 1.673 m, so its menu doubles by about 16 px
+(at 1280 wide) and the references recorded in the merged state score 0.75-0.83.
 
 No run crashed or hung while quitting, and every exit code was 0. Brightness of both eyes and realtime FOV were
 checked by eye on the Mopic display (2026-09-30). Per-eye brightness can be measured with monado-service restarted
@@ -169,6 +172,11 @@ could have hidden them. The table above replaces them.
 - With monado `MOPIC_MODE=sbs`, each eye appears about 3.7% magnified around its projection centre, before and after
   the Dead as Disco fixes. Likely the FOV submitted at `xrEndFrame` differs from the one the display composites
   with (eye-tracked FOV changes every frame); not yet checked.
+- The Mopic display has three capture states, and recipes with `"source": "mopic"` screenshot the woven output:
+  merged (monado has tracked a viewer since it started, and the viewer left: one view), tracked (two views following
+  the viewer), and never acquired (monado started with nobody at the monitor: two views from a fixed 63 mm rig, until
+  a face is seen once). The references were recorded merged. Only Sonic depends on it (UI off the zero-parallax
+  plane); compare a Mopic-display MENU_FAIL against a run in the same state before calling it a regression.
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
 - joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, DIBR, alpha passes).
   Only the scene-capture paths use `is_same_d3d12_device`; the others may fail the same way on Mopic setups
