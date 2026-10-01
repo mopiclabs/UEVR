@@ -43,14 +43,18 @@ git submodule sync --recursive
 git submodule update --init --recursive
 ```
 
-- Use `--no-recurse-submodules` on fetches from `joeyhodge`: the UESDK submodule points at
-  [joeyhodge/UESDK](https://github.com/joeyhodge/UESDK) and a recursive fetch against another remote fails.
+- Use `--no-recurse-submodules` on fetches from `joeyhodge`: joeyhodge's UEVR points its UESDK submodule at
+  [joeyhodge/UESDK](https://github.com/joeyhodge/UESDK), and a recursive fetch against another remote fails.
 - The `joeyhodge` remote has `tagOpt = --no-tags`, so joeyhodge's ~150 release tags don't flood the tag
   namespace. Fetch the release you need into `refs/tags/joeyhodge/` as above.
 - If joeyhodge reworks one of the patched areas, re-apply the Mopic change by hand and keep the same check.
-- Two Mopic patches live in the UESDK submodule (rows marked "submodule"), on the submodule branch `mopic/uesdk`.
-  The superproject points at that commit, so it has to be pushed to a Mopic-owned UESDK remote before this branch is
-  pushed. On an update, rebase `mopic/uesdk` onto joeyhodge's new UESDK commit and point the submodule at the result.
+- Two Mopic patches live in the UESDK submodule (rows marked "submodule"), on branch `mopic/uesdk` of
+  [mopiclabs/UESDK](https://github.com/mopiclabs/UESDK), a fork of joeyhodge/UESDK. This branch's `.gitmodules` points
+  the submodule there; inside the submodule `origin` is the fork and `joeyhodge` the upstream. Push `mopic/uesdk` to
+  the fork before pushing this branch, or clones can't check the submodule out.
+- When a joeyhodge release moves UESDK: in the submodule `git fetch joeyhodge`, rebase `mopic/uesdk` onto the
+  release's UESDK commit, `git push --force-with-lease origin mopic/uesdk`; in the superproject keep the fork URL in
+  `.gitmodules` and resolve the submodule conflict to the rebased commit (`git add dependencies/submodules/UESDK`).
 
 ## Building
 
@@ -141,7 +145,10 @@ could have hidden them. The table above replaces them.
 - Dead as Disco (UE 5.7 custom branch): Native Stereo Fix can't activate. JH's UE5.7 path needs the engine's
   `FSceneViewFamily` copy constructor and proves it by byte patterns of stock 5.7 (`sizeof` 0x198, owned interfaces at
   +0x160..0x178); this build's family is 0x188 bytes with members elsewhere, so it is refused and the watchdog falls
-  back to plain native stereo after 20 s. The right eye then is the engine's own second view (reported darker).
+  back to plain native stereo after 20 s. The engine then leaves the right eye's 3D scene black and only the UI is
+  composited over it (reported as "the right eye is darker"; with monado `MOPIC_MODE=sbs` the scene area measured
+  65-76 left vs 0.2-0.4 right, 0-255). Supporting it needs this build's FSceneViewFamily/FSceneView offsets (JH
+  hard-codes stock 5.7: family 0x198, bAdditionalViewFamily +0xB0, owned interfaces +0x160, view StereoPass +0xDD0).
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
 - joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, DIBR, alpha passes).
   Only the scene-capture paths use `is_same_d3d12_device`; the others may fail the same way on Mopic setups
