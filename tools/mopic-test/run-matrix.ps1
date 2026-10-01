@@ -6,9 +6,10 @@
 # Each game's runs use the recipe of the same name (recipes\<Game>.json). Keep the PC unlocked and unused meanwhile.
 
 param(
-    [string[]]$Games = @("Tekken8Demo", "Expedition33", "SonicDemo", "Hozy", "Stray", "Hogwarts", "Wukong", "ACC"),
+    [string[]]$Games = @("Tekken8Demo", "Expedition33", "SonicDemo", "Hozy", "Stray", "Hogwarts", "Wukong", "ACC", "DeadAsDisco"),
     [int]$Runs = 3,
     [string]$Dll = "",
+    [string]$EngineDir = "",
     [switch]$NoInject,
     [string]$Label = "matrix"
 )
@@ -29,9 +30,10 @@ foreach ($game in $Games) {
     $harnessArgs = @("-ExecutionPolicy", "Bypass", "-File", $Harness, "-Game", $game, "-Recipe", $game, "-Runs", "$Runs", "-Label", $runLabel)
     if ($dllArg -ne "") { $harnessArgs += @("-Dll", $dllArg); $dllArg = "" }   # deploy once
     if ($NoInject) { $harnessArgs += "-NoInject" }
+    if ($EngineDir -ne "") { $harnessArgs += @("-EngineDir", $EngineDir) }
     Write-Host "=== $game ($kind, $Runs run(s))" -ForegroundColor Cyan
     $start = Get-Date
-    & powershell @harnessArgs | ForEach-Object { "$_" } | Where-Object { $_ -match "^(PASS|CRASH|EXIT_|MENU_|NO_|LAUNCH|HARNESS)|^pilot: |^  - " } | ForEach-Object { Write-Host "  $_" }
+    & powershell @harnessArgs | ForEach-Object { "$_" } | Where-Object { $_ -match "^(PASS|CRASH|FREEZE|EXIT_|MENU_|NO_|LAUNCH|HARNESS)|^pilot: |^  - " } | ForEach-Object { Write-Host "  $_" }
     $dirs = @(Get-ChildItem $RunsRoot -Directory | Where-Object { $_.Name -like "*-$game-$runLabel-r*" -and $_.CreationTime -ge $start.AddSeconds(-5) } | Sort-Object Name)
     foreach ($d in $dirs) {
         $resultPath = Join-Path $d.FullName "result.json"

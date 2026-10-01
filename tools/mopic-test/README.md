@@ -1,7 +1,7 @@
 # Mopic UEVR test tools
 
 - `run-test.ps1`: the test harness. Starts UEVRInjector, launches a game through Steam, injects at launch (like
-  Mopic Hub's auto-inject), watches it, and writes a verdict (PASS / CRASH / EXIT_CRASH / EXIT_HANG / MENU_FAIL /
+  Mopic Hub's auto-inject), watches it, and writes a verdict (PASS / CRASH / FREEZE / EXIT_CRASH / EXIT_HANG / MENU_FAIL /
   NO_VR / ...) plus log.txt, crash dumps and screenshots to `runs\`.
 - `gamepilot.py`: looks at the screen and sends keyboard/mouse input, so a run can go from the title screen into
   real gameplay and quit through the game's own menu (where exit crashes and hangs show up).
@@ -48,6 +48,8 @@ Verdicts:
 
 - `PASS`
 - `CRASH`: the game exited, or crash.dmp / a UE crash report appeared, while it should have been running.
+- `FREEZE`: the game's window stopped answering messages for `-HangSeconds` (default 30) while it should have been
+  running (a deadlocked game thread). `freeze.dmp` has the stacks (see "Reading an EXIT_HANG dump").
 - `EXIT_CRASH`: a crash while quitting (crash.dmp, a UE crash report, or an NTSTATUS error exit code such as
   0xC0000409 after the menu quit or WM_CLOSE).
 - `EXIT_HANG`: the game didn't finish quitting. Either its process was still there 30 s after it started exiting
@@ -117,7 +119,7 @@ showing right now.
 | `{"seek": "x", "press": "down", "max": 8}` | press until x shows (menu cursors don't always start on the same item; menus usually wrap around, so `max` should cover one lap) |
 | `{"key": "enter", "times": 1}` / `{"keys": "up enter"}` / `{"click": [x, y]}` / `{"move": [x, y]}` / `{"wait": 2}` | input (`move` hovers: menus that highlight under the mouse) / pause |
 | `{"play_until": "x", "while": "hud", "keys": "u i j k a d", "timeout": 600}` | random gameplay keys until x shows; with `while` only while the HUD checkpoint is visible, so they don't act as menu input on result screens |
-| `{"play": 60, "keys": "...", "every": 0.6, "hold": 500}` | random gameplay keys for a fixed time |
+| `{"play": 60, "keys": "...", "every": 0.6, "hold": 500}` | random gameplay keys for a fixed time (`lmb` / `rmb` click where the mouse is) |
 | `{"phase": "exit"}` | from here the game quitting is expected (the harness counts the exit as a menu quit) |
 | `{"expect_exit": 60}` | wait for the process to end; still running afterwards = `EXIT_HANG` |
 | `{"shot": "name"}` / `{"note": "..."}` | save a screenshot / comment |
@@ -193,3 +195,9 @@ can be stale. Check the top system function before concluding a thread is blocke
   there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인. A config saved by this line can have
   `FrameworkConfig_RememberMenuState=false`, which opens the UEVR menu over the title screen and swallows the keys;
   the recipe's `config` keeps it closed.
+- Dead as Disco Demo (UE 5.7, custom engine branch): mouse-driven menus, read from the desktop window (the Mopic
+  display doubles the UI text). The very first start asks about Streamer Safe Mode (click OFF); a fresh install shows
+  NEW GAME instead of CONTINUE. Route: CONTINUE > stage hub > Enter > FREE PLAY > first song > click again to play >
+  attack with the mouse > Esc ends the song (RESULT) > Stage Select > Esc > EXIT GAME > EXIT GAME on the wishlist
+  screen (no confirmation). Never GET THE GAME!, GIVE FEEDBACK or SIGN UP (store/browser). A played song posts its
+  score to the Steam account's leaderboard. `play` steps can click with `lmb` / `rmb`.
