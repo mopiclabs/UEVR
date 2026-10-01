@@ -2398,6 +2398,7 @@ void test_ktjl_hook_contracts() {
 #include "GalacticRacerNativeFixTests.hpp"
 #include "GalacticRacerBinkTests.hpp"
 #include "GalacticRacerBinkSeekTests.hpp"
+#include "DeadAsDiscoNativeFixTests.hpp"
 
 int main(int argc, char** argv) {
     test_swgr_render_targets();
@@ -2412,8 +2413,10 @@ int main(int argc, char** argv) {
     test_outerworlds2_tracking_policy();
     test_halloween_render_targets();
     test_halloween_native_family();
+    test_deadasdisco_native_family();
     if (argc == 3 && std::string_view{argv[1]} == "--halloween-allocation-fixture") { test_halloween_allocation_fixture(argv[2]); }
     if (argc == 3 && std::string_view{argv[1]} == "--halloween-native-family-fixture") { test_halloween_native_family_fixture(argv[2]); }
+    if (argc == 3 && std::string_view{argv[1]} == "--deadasdisco-native-family-fixture") { test_deadasdisco_native_family_fixture(argv[2]); }
     test_dune_frame_handoff();
     if (argc == 3 && std::string_view{argv[1]} == "--ktjl-memory-image") { test_ktjl_cloud_memory_image(argv[2]); }
     test_ktjl_renderer_entry();

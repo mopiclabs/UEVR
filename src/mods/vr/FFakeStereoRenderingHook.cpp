@@ -95,6 +95,7 @@
 #include "GalacticRacerBinkSeek.hpp"
 #include "GalacticRacerBink.hpp"
 #include "HalloweenNativeFix.hpp"
+#include "DeadAsDiscoNativeFix.hpp"
 #include "KtjLFogResources.hpp"
 #include "KtjLCloudResources.hpp"
 #include "KtjLCloudHook.hpp"
@@ -147,6 +148,7 @@ bool is_readable_process_range(uintptr_t address, size_t size);
 bool is_executable_process_range(uintptr_t address, size_t size);
 bool halloween_ue574_dx12_runtime();
 bool looks_like_vtable_object(void* object);
+bool deadasdisco_ue574_dx12_runtime();
 bool get_d3d12_resource_desc_guarded(ID3D12Resource* resource, D3D12_RESOURCE_DESC& out);
 bool get_d3d12_resource_device_guarded(ID3D12Resource* resource, ID3D12Device4** out);
 
@@ -564,6 +566,32 @@ std::optional<UE57FSceneViewFamilyFunctions> resolve_ue57_fsceneviewfamily_funct
         }
         if (copy_constructor_candidates == 1) {
             SPDLOG_INFO("[SWGR][NativeStereoFix] Validated native Clang family copy, deep-owned arrays/refcounts and base-only destructor; renderer views remain engine-owned");
+        }
+    }
+
+    if (copy_constructor_candidates == 0 && deadasdisco_ue574_dx12_runtime()) {
+        namespace d = uevr::deadasdisco_native;
+        const auto memory = sdk::discovery::process_memory();
+        scan_cursor = module_base;
+        while (module_size != 0 && scan_cursor < module_end) {
+            const auto match = utility::scan(scan_cursor, module_end - scan_cursor, d::family_copy_signature);
+            if (!match) { break; }
+            scan_cursor = *match + 1;
+            const auto entry = utility::find_function_entry(*match);
+            const auto start = utility::find_function_start_unwind(*match);
+            if (!entry || !start || *start != *match || module_base + entry->BeginAddress != *match) { continue; }
+            const auto table = d::family_copy_vtable(memory, *match,
+                entry->EndAddress - entry->BeginAddress, module_base, module_size);
+            if (!table || !is_readable_process_range(*table, sizeof(uintptr_t))) { continue; }
+            const auto destructor = resolve_deleting_destructor(*table);
+            if (!destructor) { continue; }
+            copy_constructor_address = *match;
+            copy_constructor_vtable = *table;
+            deleting_destructor_address = *destructor;
+            ++copy_constructor_candidates;
+        }
+        if (copy_constructor_candidates == 1) {
+            SPDLOG_INFO("[DeadAsDisco][UE5.7][NativeStereoFix] Validated the stock-layout family copy (source held in rbx) and existing owned-interface destructor contract");
         }
     }
 
@@ -6310,6 +6338,17 @@ bool halloween_ue574_dx12_runtime() {
         const auto path = utility::get_module_pathw(utility::get_executable());
         const auto version = sdk::get_file_version_info();
         return path && uevr::games::is_halloween_ue574_dx12_runtime(
+            *path, version.dwFileVersionMS, version.dwFileVersionLS, true);
+    }();
+    return exact_title_and_version;
+}
+
+bool deadasdisco_ue574_dx12_runtime() {
+    if (g_framework == nullptr || !g_framework->is_dx12()) { return false; }
+    static const bool exact_title_and_version = [] {
+        const auto path = utility::get_module_pathw(utility::get_executable());
+        const auto version = sdk::get_file_version_info();
+        return path && uevr::games::is_deadasdisco_ue574_dx12_runtime(
             *path, version.dwFileVersionMS, version.dwFileVersionLS, true);
     }();
     return exact_title_and_version;
