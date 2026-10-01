@@ -23,6 +23,8 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | OpenXR: Rate-limit the projection derivation logs | FOV-driven re-derivations log at most every 5 s. | Otherwise ~7 log lines per frame (MBs per minute) on Mopic's runtime. | log.txt stays small (a few hundred KB for 2 minutes). |
 | VR: Allocate the SceneViewExtensions array with the game's FMalloc by default | `VR_UseFMallocSceneViewExtensions` defaults to on; a one-time config migration (`Mopic_ConfigVersion` 1) turns it on in existing configs; only used when FMalloc and its Malloc slot were found. | Games reallocate UEVR's array with FMallocBinned2 on exit and hit a fatal error (Sonic Racing CrossWorlds: "Attempt to realloc an unrecognized block"). | Graceful exit (`-GracefulExit`) passes; log.txt shows `Migrated config to Mopic defaults version 1` once per old config. |
 | VR: Turn the Native Stereo Fix off for the session when it can't activate | Watchdog: 20 s outside Active while 3D view families are rendered and the runtime asks for frames → the fix is turned off for the session (plain native stereo). | This line's fix fails closed (unrendered right eye); with the fix on by default that would black out titles where it can't activate. | Titles where the fix works never log `Not active after 20 s`. |
+| VR: Show in the menu when the watchdog turned the Native Stereo Fix off | The Native Fix status reads "off for this session: not active after 20 s (plain native stereo)" instead of joeyhodge's generic "skipped: title/runtime guard". | The generic text looked like a deliberate per-title block (reported on Wukong). | Only shown after `Not active after 20 s` in log.txt. |
+| VR: Resolve the renderer entry from the view-extension callback's caller | When the singular-wrapper search finds nothing (UE4 before 4.25, UE5.0), the caller of UEVR's BeginRenderViewFamily callback is the `BeginRenderingViewFamily` entry if the callback's return address follows `CALL [reg+slot*8]` for that slot, whatever its unwind segment's size. Diagnostics: the values behind "unexpected FSceneViewFamily vtable", and why no family could hold the eye pair. | Black Myth: Wukong's entry has chained unwind info and its part up to the callback is 0x193 bytes, under the stack fallback's 0x200 minimum, so `FViewport::Draw` 7 frames up was hooked; every call failed validation and the fix never activated. praydog's line hooks the caller directly. | Wukong: `Resolved the callback's caller as the BeginRenderingViewFamily entry target=14d6bcd70` and `[NativeStereoFix] state=active`. Titles resolved through the wrapper or the UE4.25–4.27 path log the same lines as before. |
 | D3D12: Reuse the last right-eye capture when a packet is refused | While the fix is Active, a frame whose packet is stale/missing reuses the capture from the last 500 ms instead of the unrendered backbuffer half. | Sonic Racing CrossWorlds refuses packets ("delta=2") around level changes → right eye flashed black. | `reusing the last right-eye capture` only around transitions. |
 | OpenXR: Accept off-axis frusta and keep FOV-only updates cheap | FOV validity only requires a non-degenerate frustum; exact view_bounds mapping; single FOV read; no render-target resize on FOV-only updates. | Mopic's off-axis frustum can leave the view axis (eye past the panel edge), which froze the realtime FOV. | No `Refusing to recalculate eye projections` while moving in front of the display. |
 | VR: Compare devices by identity in the scene-capture reallocation path | Same device comparison as the publish path. | Avoids rebuilding the capture on every reallocation on proxy-device setups. | — |
@@ -92,8 +94,12 @@ gameplay and the game's own quit path, 3 runs each):
 | Hozy | 5.6.1 | a room, pause > quit | 3/3 PASS; the game's UI doesn't show on the Mopic display (the recipe reads the window) |
 | Stray | 4.27 | slot 1, walk, pause > main menu > quit | 3/3 PASS |
 | Hogwarts Legacy | 4.27 | a save, walk, field guide > quit | 3/3 PASS; exits ~30 s after the quit, same as without UEVR |
-| Black Myth: Wukong | 5.0 | Continue, shrine, settings > quit | 3/3 PASS; Native Stereo Fix doesn't activate (watchdog falls back) |
+| Black Myth: Wukong | 5.0 | Continue, shrine, settings > quit | 3/3 PASS; Native Stereo Fix active since the renderer-entry fix (re-run below) |
 | Assetto Corsa Competizione | 4.26 | practice session in the car, quit | 3/3 PASS for stability; nothing is shown on the Mopic display (see Known gaps) |
+
+After "VR: Resolve the renderer entry from the view-extension callback's caller": Wukong 3/3 PASS with
+`[NativeStereoFix] state=active` from the title screen to the quit (before it, the watchdog fell back to plain native
+stereo after 20 s), TEKKEN 8 1/1 PASS with the same wrapper-resolved entry and the fix active as before.
 
 No run crashed or hung while quitting, and every exit code was 0. Brightness of both eyes and realtime FOV were
 checked by eye on the Mopic display (2026-09-30); there is no automatic per-eye luminance check yet.
@@ -119,8 +125,6 @@ could have hidden them. The table above replaces them.
   (5.2), Expedition 33 (5.4) and the others show theirs.
 - The tests play briefly on the player's saves; games that autosave (Expedition 33) then start somewhere else
   next time. Saves were backed up before recording (`tools\mopic-test\runs\save-backups\`).
-- Wukong (UE 5.0): the fix stays in "learning an exact primary/secondary eye pair" (no candidate family is
-  found, nothing is logged); the praydog-based line did render the second view there. Needs a closer look.
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
 - joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, DIBR, alpha passes).
   Only the scene-capture paths use `is_same_d3d12_device`; the others may fail the same way on Mopic setups
