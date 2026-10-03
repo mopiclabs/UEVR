@@ -649,6 +649,7 @@ HRESULT WINAPI D3D11Hook::present(IDXGISwapChain* swap_chain, UINT sync_interval
     }
 
     d3d11->m_inside_present = true;
+    d3d11->m_present_wnd = swap_desc.OutputWindow;
 
     if (d3d11->m_swapchain_0 == nullptr) {
         d3d11->m_swapchain_0 = swap_chain;

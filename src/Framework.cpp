@@ -41,6 +41,8 @@ std::unique_ptr<Framework> g_framework{};
 namespace {
 constexpr auto D3D12_INIT_RETRY_INITIAL_BACKOFF = 50ms;
 constexpr auto D3D12_INIT_RETRY_MAX_BACKOFF = 250ms;
+// With the game window gone, this long without a Present means the game is exiting (end_vr_session_if_game_exited).
+constexpr auto EXIT_SESSION_PRESENT_QUIET_TIME = 2500ms;
 
 bool is_imgui_mouse_message(UINT message) {
     switch (message) {
@@ -82,6 +84,22 @@ bool should_suppress_openxr_rehook_guard() {
 
     if (openxr == nullptr) {
         return false;
+    }
+
+    // The session was ended because the game destroyed its window and stopped presenting: it is exiting. Keep the
+    // rehook off as it was while the session was active: it would create a dummy device and window in a process
+    // that is shutting down.
+    if (openxr->session_ended_for_exit) {
+        static auto last_exit_log = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+
+        if (last_exit_log.time_since_epoch().count() == 0 || now - last_exit_log >= std::chrono::seconds(2)) {
+            last_exit_log = now;
+
+            spdlog::info("[Framework] Suppressing D3D rehook: the OpenXR session was ended for game exit");
+        }
+
+        return true;
     }
 
     const auto has_openxr_session = openxr->instance != XR_NULL_HANDLE && openxr->session != XR_NULL_HANDLE;
@@ -311,6 +329,107 @@ void Framework::hook_monitor() {
     }
 }
 
+// The game destroyed its window and stopped presenting: it is exiting. Some games then take a long time to reach
+// ExitProcess (Hogwarts Legacy ~30 s), and the OpenXR session would live until the process dies, with the runtime
+// showing its last frame all that time (a frozen image on the Mopic display). Both conditions are required, so
+// normal play never gets here: a window recreated for a resolution or fullscreen change comes with Presents, and if
+// they resume after the session was ended, VR::on_post_present reinitializes OpenXR. Runs on the D3D monitor thread
+// and never waits for a lock the game's threads hold (VR::end_openxr_session_for_exit only try-locks). The framework
+// itself is still left alone at ExitProcess (Main.cpp).
+void Framework::end_vr_session_if_game_exited() {
+    // The window the game last presented to, not m_wnd: m_wnd is only refreshed when the framework reinitializes, so
+    // a game that moved to a new window would otherwise count as gone at its next pause in presenting (a loading
+    // stall, a minimized window).
+    const auto present_wnd = m_last_game_present_wnd.load();
+    const auto wnd = present_wnd != nullptr ? present_wnd : m_wnd;
+
+    if (wnd == nullptr || !m_game_data_initialized || m_vr == nullptr) {
+        return;
+    }
+
+    const auto got_wm_destroy = m_destroyed_wnd.load() == wnd;
+    const auto is_window = IsWindow(wnd) != FALSE;
+
+    if (!got_wm_destroy && is_window) {
+        m_exit_wnd = nullptr;
+        return;
+    }
+
+    if (m_exit_wnd != wnd) {
+        m_exit_wnd = wnd;
+        m_exit_session_done = false;
+        m_exit_session_busy_logged = false;
+        m_exit_session_present_logged = false;
+
+        spdlog::info("[Framework] Game window {:x} is gone (WM_DESTROY={} IsWindow={}); ending the OpenXR session once the game hasn't presented for {} ms",
+            (uintptr_t)wnd, got_wm_destroy, is_window,
+            std::chrono::duration_cast<std::chrono::milliseconds>(EXIT_SESSION_PRESENT_QUIET_TIME).count());
+    }
+
+    const auto since_present = std::chrono::steady_clock::now() - m_last_game_present_time.load();
+
+    if (since_present < EXIT_SESSION_PRESENT_QUIET_TIME) {
+        // Presenting again after the check ran (VR::on_post_present reinitializes OpenXR if the session was ended and
+        // the window is live): the next stop is judged afresh.
+        if (m_exit_session_done) {
+            m_exit_session_done = false;
+            m_exit_session_busy_logged = false;
+            m_exit_session_present_logged = false;
+
+            spdlog::info("[Framework] The game presents again although window {:x} is gone; checking the OpenXR session again once it stops", (uintptr_t)wnd);
+        }
+
+        return;
+    }
+
+    if (m_exit_session_done) {
+        return;
+    }
+
+    const auto since_present_ms = std::chrono::duration_cast<std::chrono::milliseconds>(since_present).count();
+
+    // m_last_game_present_time is taken when a Present starts: one still running is not a stop.
+    const auto& d3d11 = get_d3d11_hook();
+    const auto& d3d12 = get_d3d12_hook();
+    const auto inside_present =
+        (m_renderer_type == RendererType::D3D11 && d3d11 != nullptr && d3d11->is_inside_present()) ||
+        (m_renderer_type == RendererType::D3D12 && d3d12 != nullptr && d3d12->is_inside_present());
+
+    if (inside_present) {
+        if (!m_exit_session_present_logged) {
+            m_exit_session_present_logged = true;
+            spdlog::info("[Framework] The game window is gone and the last Present started {} ms ago but hasn't returned; waiting for it", since_present_ms);
+        }
+
+        return;
+    }
+
+    switch (m_vr->end_openxr_session_for_exit()) {
+    case VR::ExitSessionResult::ENDED:
+        spdlog::info("[Framework] Ended the OpenXR session: no Present for {} ms after the game window went away", since_present_ms);
+        m_exit_session_done = true;
+        break;
+    case VR::ExitSessionResult::DISABLED:
+        spdlog::info("[Framework] No Present for {} ms after the game window went away; keeping the OpenXR session until the process exits (VR_EndSessionOnGameExit is off)", since_present_ms);
+        m_exit_session_done = true;
+        break;
+    case VR::ExitSessionResult::NO_SESSION:
+        spdlog::info("[Framework] No Present for {} ms after the game window went away; there is no OpenXR session to end", since_present_ms);
+        m_exit_session_done = true;
+        break;
+    case VR::ExitSessionResult::NOT_SHOWN:
+        spdlog::info("[Framework] No Present for {} ms after the game window went away; the OpenXR session never showed a frame, so it is kept", since_present_ms);
+        m_exit_session_done = true;
+        break;
+    case VR::ExitSessionResult::BUSY:
+        if (!m_exit_session_busy_logged) {
+            m_exit_session_busy_logged = true;
+            spdlog::info("[Framework] No Present for {} ms after the game window went away, but another thread holds an OpenXR lock; retrying every 500 ms", since_present_ms);
+        }
+        break;
+    }
+}
+
 void Framework::command_thread() {
     m_uevr_shared_memory->data().command_thread_id = GetCurrentThreadId();
 
@@ -455,6 +574,7 @@ Framework::Framework(HMODULE framework_module)
 
         while (!s.stop_requested() && !m_terminating) {
             this->hook_monitor();
+            this->end_vr_session_if_game_exited();
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     });
@@ -608,6 +728,9 @@ void Framework::run_imgui_frame(bool from_present) {
 
 // D3D11 Draw funciton
 void Framework::on_frame_d3d11() {
+    m_last_game_present_wnd = m_d3d11_hook->get_present_window();
+    m_last_game_present_time = std::chrono::steady_clock::now();
+
     std::scoped_lock _{ m_imgui_mtx };
 
     spdlog::debug("on_frame (D3D11)");
@@ -707,6 +830,9 @@ void Framework::on_post_present_d3d11() {
 
 // D3D12 Draw funciton
 void Framework::on_frame_d3d12() {
+    m_last_game_present_wnd = m_d3d12_hook->get_present_window();
+    m_last_game_present_time = std::chrono::steady_clock::now();
+
     std::scoped_lock _{ m_imgui_mtx };
 
     m_renderer_type = RendererType::D3D12;
@@ -994,6 +1120,13 @@ void Framework::post_message(UINT message, WPARAM w_param, LPARAM l_param) {
 
 bool Framework::on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param) {
     m_last_message_time = std::chrono::steady_clock::now();
+
+    // Before the m_initialized check: a game tearing down can reset the device first. The D3D monitor thread ends the
+    // OpenXR session once Presents have stopped too (end_vr_session_if_game_exited).
+    if (message == WM_DESTROY && wnd == m_wnd) {
+        m_destroyed_wnd = wnd;
+        spdlog::info("[Framework] Game window {:x} got WM_DESTROY", (uintptr_t)wnd);
+    }
 
     if (!m_initialized) {
         return true;

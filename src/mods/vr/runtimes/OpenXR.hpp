@@ -123,6 +123,7 @@ struct OpenXR final : public VRRuntime {
     VRRuntime::Error update_input() override;
 
     void destroy() override;
+    XrResult end_session_for_exit();
     void enqueue_render_poses(uint32_t frame_count) override;
     void enqueue_render_poses_unsafe(uint32_t frame_count);
 
@@ -222,6 +223,10 @@ public:
     bool session_ready{false};
     bool frame_began{false};
     bool profile_calls{false};
+
+    // end_session_for_exit() destroyed the session, and its spaces and swapchains with it. Only reinitializing OpenXR
+    // (a new OpenXR object) clears it.
+    std::atomic<bool> session_ended_for_exit{false};
 
     std::chrono::high_resolution_clock::time_point profiler_start_time{};
 
