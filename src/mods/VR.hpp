@@ -707,9 +707,11 @@ public:
 
     // VR_NativeStereoFixPairSnapshot (default off): D3D12 double-wide Native Stereo Fix submits copy one eye pair frozen
     // at an engine frame boundary instead of the two live engine targets (d3d12/NativePairSnapshot.hpp). Off by default:
-    // with it on, Hogwarts Legacy (XeFG X2) hung right after the first frozen pair was used (2026-10-03). Likely a GPU
-    // wait cycle: the Present pass makes XeFG's present queue wait for the snapshot fence, which sits on the engine queue
-    // behind the engine's wait for XeFG's own fence. Experiment only until the consumer stops waiting on the GPU.
+    // the first version hung Hogwarts Legacy (XeFG X2) right after the first frozen pair was used (2026-10-03): the
+    // Present pass made XeFG's present queue wait for the snapshot fence, which sat on the engine queue behind the
+    // engine's wait for XeFG's own fence. Now only pairs the GPU finished are lent (no GPU wait); with XeFG X2 and frame
+    // generation left on: no hang, no one-refresh eye splits, ~90% of passes take the pair one engine frame older.
+    // Only matters where VR_NativeStereoFixDisableFrameGeneration can't turn frame generation off.
     bool is_native_stereo_fix_pair_snapshot_enabled() const {
         return m_native_stereo_fix_pair_snapshot->value() &&
             m_is_d3d12 &&

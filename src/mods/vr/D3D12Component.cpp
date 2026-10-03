@@ -6448,7 +6448,7 @@ std::optional<d3d12::NativePairSnapshot::Lease> D3D12Component::acquire_native_p
             d3d12::NativePairSnapshot::debug_name(engine_queue),
             (uintptr_t)queue,
             d3d12::NativePairSnapshot::debug_name(queue),
-            engine_queue == queue ? " (same queue)" : " (cross-queue GPU wait)");
+            engine_queue == queue ? " (same queue)" : " (other queue: only pairs the GPU finished are submitted)");
         m_native_pair_in_use = true;
     }
 
@@ -6457,10 +6457,10 @@ std::optional<d3d12::NativePairSnapshot::Lease> D3D12Component::acquire_native_p
         SPDLOG_INFO_EVERY_N_SEC(5,
             "[NativeStereoFix][D3D12] Pair snapshot frame={} slot={}; present passes since last={} "
             "(snapshots={} busy_skips={} source_skips={} missed_arms={} expired_arms={} other_queue_skips={} failures={} "
-            "passes_with_next_pending={} stale_refusals={})",
+            "passes_with_next_pending={} stale_refusals={} previous_pair={} unfinished={})",
             lease->frame, lease->slot, m_native_pair_passes, stats.snapshots, stats.skipped_busy, stats.skipped_sources,
             stats.missed_arms, stats.expired_arms, stats.other_queue_skips, stats.failures, stats.pending_at_acquire,
-            stats.stale);
+            stats.stale, stats.previous_pair, stats.unfinished);
         m_native_pair_last_value = lease->fence_value;
         m_native_pair_passes = 0;
     }

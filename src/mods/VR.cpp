@@ -15183,10 +15183,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "the game is rendering; when it stalls, the last frame is still re-submitted.");
             m_native_stereo_fix_pair_snapshot->draw("Freeze Eye Pair per Engine Frame (D3D12)");
             ImGui::TextWrapped(
-                "Experimental, default off (hung Hogwarts Legacy with XeSS frame generation). Copies both eyes once per "
-                "engine frame, right after the engine submits it, and submits that pair on every Present. Only takes "
-                "effect while frame generation presents from its own thread; otherwise, and while no frozen pair is "
-                "available, copies the live eye targets.");
+                "Experimental, default off. For games whose frame generation can't be turned off: copies both eyes once "
+                "per engine frame, right after the engine submits it, and submits the newest pair the GPU has finished "
+                "(often one engine frame old). Only takes effect while frame generation presents from its own thread; "
+                "otherwise, and while no finished pair is available, copies the live eye targets.");
             m_native_stereo_fix_texture_array_submit->draw("Experimental OpenXR Texture-Array Submit");
             {
                 const auto runtime = get_runtime();

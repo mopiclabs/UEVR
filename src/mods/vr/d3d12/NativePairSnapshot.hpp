@@ -108,6 +108,8 @@ public:
         uint64_t expired_arms{};         // armed longer than ARM_LIFETIME before an engine-queue submission
         uint64_t other_queue_skips{};    // armed thread's submissions to a direct queue that is not the engine queue
         uint64_t engine_thread_arms{};   // frames not armed: every recent Present ran on the engine's thread
+        uint64_t previous_pair{};        // passes that took the pair before the newest: the newest was still on the GPU
+        uint64_t unfinished{};           // passes with no finished pair (the live targets were copied)
     };
 
     NativePairSnapshot() = default;
@@ -159,6 +161,7 @@ private:
     std::shared_ptr<Ring> m_ring{};
     Sources m_sources{};
     int32_t m_published{-1};
+    int32_t m_previous_published{-1}; // published before m_published; lent while that is still being written
     int32_t m_pinned{-1};
     uint32_t m_cursor{};
     bool m_suspended{true};
