@@ -219,3 +219,12 @@ Results on 2026-10-02/03 (builds of this branch with the rows above; `-EngineDir
 - Hogwarts Legacy keeps a second settings copy in `SaveGames\<account>\SavedUserOptions.sav` (Steam Cloud) that
   overrides `GameUserSettings.ini`, so `-GameIni` can't change its graphics; `recipes\Hogwarts-fgoff.json` sets frame
   generation through the game's menu instead.
+- monado-service (upstream `vk_helpers.c` `vk_create_image_from_native`) never closes the Win32 NT handles of D3D12
+  client swapchain images after importing them, so every session leaves its swapchain memory charged to the system
+  (about 0.5 GB per session; after ~100 test sessions the commit charge hit its limit and Hogwarts crashed with "Ran
+  out of memory"). A local, uncommitted patch closes the handle for non-DXGI imports (monado
+  `patches-local\vk_helpers-close-imported-nt-handles.diff`): 0.07 GB per session after it. Until monado ships a fix,
+  restart monado-service between long test batches.
+- Intermittent, not reproduced: TEKKEN 8 froze once in ~38 runs right after UEVR's stereo-projection bootstrap
+  (game thread dispatching an access violation in non-module executable memory; `freeze.dmp` kept), and Wukong
+  crashed once while quitting with a null call on a game thread (Wukong also crashes at quit without UEVR).
