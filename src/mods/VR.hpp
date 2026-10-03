@@ -291,6 +291,17 @@ public:
         return m_openvr.get();
     }
 
+    // Called by Framework's D3D monitor thread once the game has destroyed its window and stopped presenting.
+    enum class ExitSessionResult : uint8_t {
+        ENDED,
+        DISABLED,   // VR_EndSessionOnGameExit is off
+        NO_SESSION, // not OpenXR, no session, or it was already ended
+        NOT_SHOWN,  // the session never put a frame on the display, so nothing is frozen there; it is kept
+        BUSY,       // another thread holds a frame-loop lock; try again later
+    };
+
+    ExitSessionResult end_openxr_session_for_exit();
+
     bool is_prospi_cut_cadence_guard_active() const;
     uint64_t get_prospi_cut_cadence_guard_generation() const {
         return m_prospi_cut_cadence_guard_generation.load(std::memory_order_relaxed);
@@ -1542,6 +1553,8 @@ private:
     const ModToggle::Ptr m_enable_hitch_diagnostics{ ModToggle::create(generate_name("EnableHitchDiagnostics"), false, true) };
     // perf.csv / perf-frames.csv next to log.txt. Cheap enough to stay on (see PerfLog.hpp).
     const ModToggle::Ptr m_perf_log{ ModToggle::create(generate_name("PerfLog"), true, true) };
+    // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
+    const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
     const ModToggle::Ptr m_decoupled_pitch{ ModToggle::create(generate_name("DecoupledPitch"), false) };
     const ModToggle::Ptr m_decoupled_pitch_ui_adjust{ ModToggle::create(generate_name("DecoupledPitchUIAdjust"), true) };
@@ -2074,6 +2087,7 @@ public:
             *m_openxr_afr_depth_target_stability,
             *m_enable_hitch_diagnostics,
             *m_perf_log,
+            *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,
             *m_decoupled_pitch_ui_adjust,

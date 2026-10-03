@@ -6343,7 +6343,8 @@ void D3D12Component::on_reset(VR* vr, bool mono_retired) {
     m_ui_batch_alpha_invert.reset();
     m_graphics_memory.reset();
 
-    if (runtime->is_openxr() && runtime->loaded) {
+    // No swapchains to recreate once the session was ended for game exit (until OpenXR is reinitialized).
+    if (runtime->is_openxr() && runtime->loaded && !vr->m_openxr->session_ended_for_exit) {
         auto& rt_pool = vr->get_render_target_pool_hook();
         ComPtr<ID3D12Resource> scene_depth_tex{rt_pool->get_texture<ID3D12Resource>(L"SceneDepthZ")};
 
@@ -7066,7 +7067,16 @@ void D3D12Component::OpenXR::destroy_swapchains() {
     auto& vr = VR::get();
     std::scoped_lock __{vr->m_openxr->swapchain_mtx};
 
-    spdlog::info("[VR] Destroying swapchains.");
+    // runtimes::OpenXR::end_session_for_exit() destroyed the session, and with it these swapchains and the images
+    // ctx.textures points at (the runtime owns them). It also cleared the swapchain handles, so wait_for_all_copies()
+    // releases nothing; only UEVR's own objects are left to drop.
+    const bool session_ended_for_exit = vr->m_openxr->session_ended_for_exit;
+
+    if (session_ended_for_exit) {
+        spdlog::info("[VR] Dropping the swapchain contexts of the OpenXR session ended for game exit; the runtime destroyed the swapchains with it.");
+    } else {
+        spdlog::info("[VR] Destroying swapchains.");
+    }
 
     this->wait_for_all_copies();
 
@@ -7082,6 +7092,11 @@ void D3D12Component::OpenXR::destroy_swapchains() {
         }
 
         ctx.texture_contexts.clear();
+
+        if (session_ended_for_exit) {
+            ctx.textures.clear();
+            continue;
+        }
 
         std::vector<ID3D12Resource*> needs_release{};
 

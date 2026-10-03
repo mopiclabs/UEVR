@@ -84,6 +84,7 @@ private:
 
 private:
     void hook_monitor();
+    void end_vr_session_if_game_exited();
     void command_thread();
 
 public:
@@ -160,6 +161,8 @@ public:
     const auto& get_last_framework_on_frame_time() const { return m_last_framework_on_frame; }
 
     auto get_window() const { return m_wnd; }
+    // The window of the swap chain the current or last Present went to. m_wnd can be a window the game replaced.
+    HWND get_last_present_window() const { return m_last_game_present_wnd.load(); }
     auto get_last_window_pos() const { return m_last_window_pos; } // Framework imgui window
     auto get_last_window_size() const { return m_last_window_size; } // Framework imgui window
 
@@ -386,6 +389,17 @@ private:
     bool m_sent_message{false};
     bool m_message_hook_requested{false};
     bool m_has_engine_thread{false};
+
+    // Game exit (end_vr_session_if_game_exited): the window that got WM_DESTROY and the last Present UEVR saw (its time
+    // and window), written on the game's threads; the rest is the D3D monitor thread's own state for the window it saw
+    // go away.
+    std::atomic<HWND> m_destroyed_wnd{nullptr};
+    std::atomic<std::chrono::steady_clock::time_point> m_last_game_present_time{};
+    std::atomic<HWND> m_last_game_present_wnd{nullptr};
+    HWND m_exit_wnd{nullptr};
+    bool m_exit_session_done{false};
+    bool m_exit_session_busy_logged{false};
+    bool m_exit_session_present_logged{false};
 
     RendererType m_renderer_type{RendererType::D3D11};
 

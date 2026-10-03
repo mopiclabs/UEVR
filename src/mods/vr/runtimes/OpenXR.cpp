@@ -25,6 +25,7 @@
 #include "../../../utility/Logging.hpp"
 #include "OpenXR.hpp"
 #include "../PerfLog.hpp"
+#include "../UIAlphaSwapchain.hpp"
 #include "../UIComposition.hpp"
 
 using namespace nlohmann;
@@ -2348,6 +2349,66 @@ void OpenXR::destroy() {
     this->system = XR_NULL_SYSTEM_ID;
     this->clear_frame_synced("destroy");
     this->frame_began = false;
+}
+
+// The game destroyed its window and stopped presenting: it is exiting, and the session would otherwise live until the
+// process dies, with the runtime showing its last frame all that time. Called from Framework's D3D monitor thread
+// through VR::end_openxr_session_for_exit(), which holds every frame-loop lock. Ending it the regular way
+// (xrRequestExitSession, STOPPING, xrEndSession) needs consume_events(), which only runs on Present, and xrEndSession
+// before STOPPING fails, so the session is destroyed outright. Its spaces and swapchains go with it: the handles are
+// cleared here so nothing calls the runtime with them, and wants_reinitialize brings VR back if the game presents
+// again after all (VR::on_post_present).
+XrResult OpenXR::end_session_for_exit() {
+    std::scoped_lock _{sync_mtx, sync_assignment_mtx, event_mtx, swapchain_mtx};
+
+    if (this->session == XR_NULL_HANDLE || this->session_ended_for_exit) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    spdlog::info("[OpenXR] Destroying the session for game exit. session_state={} session_ready={} frame_synced={} frame_began={} swapchains={}",
+        this->get_session_state_string(this->session_state),
+        this->session_ready,
+        this->frame_synced,
+        this->frame_began,
+        this->swapchains.size());
+
+    const auto result = xrDestroySession(this->session);
+
+    if (result == XR_SUCCESS) {
+        spdlog::info("[OpenXR] xrDestroySession for game exit succeeded; the runtime stops showing the last frame");
+    } else {
+        spdlog::error("[OpenXR] xrDestroySession for game exit failed: {}", this->get_result_string(result));
+    }
+
+    // Unusable for UEVR either way. The swapchain images went with the swapchains: destroy_swapchains() only drops
+    // UEVR's own objects once session_ended_for_exit is set.
+    this->session = XR_NULL_HANDLE;
+    this->stage_space = XR_NULL_HANDLE;
+    this->view_space = XR_NULL_HANDLE;
+
+    for (auto& hand : this->hands) {
+        hand.grip_space = XR_NULL_HANDLE;
+        hand.aim_space = XR_NULL_HANDLE;
+    }
+
+    this->swapchains.clear();
+
+    // The UI alpha and UI composition swapchains went with the session too: their destructors must not destroy them
+    // again when the components reset them (destroy_swapchains() on reinitialize).
+    uevr::ui_alpha::abandon_session_swapchains();
+    spdlog::info("[OpenXR] Marked the UI alpha/composition swapchains of the destroyed session as gone (generation {})",
+        uevr::ui_alpha::session_generation());
+    this->session_ready = false;
+    this->clear_frame_synced("end_session_for_exit");
+    this->frame_began = false;
+    this->session_ready_since = {};
+    this->session_state = XR_SESSION_STATE_EXITING;
+    this->session_ended_for_exit = true;
+    this->wants_reinitialize = true;
+
+    spdlog::info("[OpenXR] Session ended for game exit; OpenXR is reinitialized if the game presents again (wants_reinitialize)");
+
+    return result;
 }
 
 bool OpenXR::is_everspace2_snapshot_fresh(

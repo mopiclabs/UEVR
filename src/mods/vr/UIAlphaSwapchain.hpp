@@ -1,11 +1,19 @@
 #pragma once
 
 #include <openxr/openxr.h>
+#include <atomic>
 #include <optional>
 #include <cstdint>
 #include "UIAlphaPolicy.hpp"
 
 namespace uevr::ui_alpha {
+
+// runtimes::OpenXR::end_session_for_exit() destroys the session, and the runtime destroys every swapchain created
+// from it. The UI swapchains (UIAlpha.cpp, UIComposition.cpp) remember the generation they were created in and only
+// destroy their handle while it is still current: once it has moved on, the handle is dangling.
+inline std::atomic<uint32_t> g_session_generation{};
+inline uint32_t session_generation() { return g_session_generation.load(std::memory_order_acquire); }
+inline void abandon_session_swapchains() { g_session_generation.fetch_add(1, std::memory_order_acq_rel); }
 
 // A timeout keeps the same acquired image pending. It must not be released or
 // reacquired until a successful wait. Injectable calls keep this offline-testable.

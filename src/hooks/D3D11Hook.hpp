@@ -30,6 +30,12 @@ public:
         return m_inside_present;
     }
 
+    // The window of the swap chain the current or last Present UEVR handled went to. m_swap_chain can still be an
+    // earlier swap chain of the game.
+    HWND get_present_window() const {
+        return m_present_wnd;
+    }
+
     void ignore_next_present() {
         m_ignore_next_present = true;
     }
@@ -83,6 +89,7 @@ protected:
     IDXGISwapChain* m_swap_chain{ nullptr };
     IDXGISwapChain* m_swapchain_0{};
     IDXGISwapChain* m_swapchain_1{};
+    HWND m_present_wnd{nullptr};
     bool m_hooked{ false };
     bool m_inside_present{false};
     bool m_ignore_next_present{false};

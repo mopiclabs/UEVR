@@ -8,6 +8,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include "mods/vr/UIAlpha.hpp"
+#include "mods/vr/UIAlphaSwapchain.hpp"
 #include <array>
 #include <cstdio>
 #include <stdexcept>
@@ -173,6 +174,16 @@ template<class Helper, class Copy> static void lifecycle(Helper& helper, Copy&& 
     r.extent={17,8}; expect(copied()==ui::Status::invalid_source,"incorrect source extent refused"); helper.reset();
     r.extent={UINT32_MAX,UINT32_MAX}; expect(copied()==ui::Status::invalid_source,"oversize refused before allocation"); helper.reset();
     expect(alive==0,"all optional XR images released");
+    // A session ended for game exit took its swapchains with it (OpenXR::end_session_for_exit).
+    r.extent={16,8}; r.mode=ui::Mode::straight_to_premultiplied;
+    expect(copied()==ui::Status::ready,"converted image ready before the session ends");
+    const auto destroyed_before_exit=destructions;
+    ui::abandon_session_swapchains(); helper.reset();
+    expect(destructions==destroyed_before_exit,"swapchain of a session ended for exit is not destroyed again");
+    alive=0; // the runtime destroyed it with the session
+    expect(copied()==ui::Status::ready,"next session creates a new swapchain");
+    helper.reset();
+    expect(destructions==destroyed_before_exit+1 && alive==0,"next session's swapchain is destroyed as before");
 }
 
 int main() try {

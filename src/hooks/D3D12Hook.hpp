@@ -110,6 +110,12 @@ public:
         return m_inside_present;
     }
 
+    // The window of the swap chain the current or last Present UEVR handled went to (null when GetHwnd fails, as
+    // for a composition swap chain).
+    HWND get_present_window() const {
+        return m_present_wnd;
+    }
+
     bool is_proton_swapchain() const {
         return m_using_proton_swapchain;
     }
@@ -135,6 +141,7 @@ protected:
     IDXGISwapChain3* m_swap_chain{ nullptr };
     IDXGISwapChain3* m_swapchain_0{};
     IDXGISwapChain3* m_swapchain_1{};
+    HWND m_present_wnd{nullptr};
     ID3D12CommandQueue* m_command_queue{ nullptr };
     UINT m_display_width{ NULL };
     UINT m_display_height{ NULL };

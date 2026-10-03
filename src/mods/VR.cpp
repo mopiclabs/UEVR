@@ -4931,6 +4931,11 @@ void VR::on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE
         *retval = ERROR_SUCCESS;
     }
 
+    // The action queries below use the OpenXR session. Games still poll XInput once their window is gone, and
+    // end_openxr_session_for_exit() only destroys the session while it holds this lock (it then fails
+    // is_using_controllers()). Released before the ImGui update at the end.
+    std::unique_lock actions_lock{m_actions_mtx};
+
     if (!is_using_controllers()) {
         return;
     }
@@ -5230,7 +5235,9 @@ void VR::on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE
             }
         }
     }
-    
+
+    actions_lock.unlock();
+
     // Do it again after all the VR buttons have been spoofed
     update_imgui_state_from_xinput_state(*state, true);
 }
@@ -5241,6 +5248,9 @@ void VR::on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRA
     if (user_index != m_lowest_xinput_user_index) {
         return;
     }
+
+    // Haptics use the OpenXR session (see on_xinput_get_state).
+    std::scoped_lock actions_lock{m_actions_mtx};
 
     if (!is_using_controllers()) {
         return;
@@ -7798,6 +7808,9 @@ void VR::update_imgui_state_from_vr_controller_fallback() {
     // queried. Their normal VR controller path therefore never reaches
     // on_xinput_get_state. Feed UEVR's ImGui navigation directly from the
     // already-synchronized OpenXR actions until a real XInput callback arrives.
+    // The action queries use the OpenXR session (see on_xinput_get_state).
+    std::unique_lock actions_lock{m_actions_mtx};
+
     if (m_has_observed_xinput.load(std::memory_order_relaxed) ||
         g_framework == nullptr ||
         !is_using_controllers())
@@ -7878,6 +7891,7 @@ void VR::update_imgui_state_from_vr_controller_fallback() {
     state.Gamepad.sThumbRX = (int16_t)std::clamp(right_axis.x * 32767.0f, -32767.0f, 32767.0f);
     state.Gamepad.sThumbRY = (int16_t)std::clamp(right_axis.y * 32767.0f, -32767.0f, 32767.0f);
 
+    actions_lock.unlock();
     update_imgui_state_from_xinput_state(state, true);
 }
 
@@ -14377,6 +14391,13 @@ void VR::on_present() {
         return;
     }
 
+    // end_openxr_session_for_exit() destroyed the session and its swapchains: nothing in this frame may touch them.
+    // on_post_present reinitializes OpenXR.
+    if (runtime->is_openxr() && m_openxr->session_ended_for_exit) {
+        m_fake_stereo_hook->on_frame();
+        return;
+    }
+
     runtime->consume_events(nullptr);
 
     m_fake_stereo_hook->on_frame();
@@ -14420,6 +14441,12 @@ void VR::on_present() {
 
     // attempt to fix crash when reinitializing openvr
     std::scoped_lock _{m_openvr_mtx};
+
+    // Ended while this Present waited for the lock (end_openxr_session_for_exit holds it).
+    if (runtime->is_openxr() && m_openxr->session_ended_for_exit) {
+        return;
+    }
+
     m_submitted = false;
 
     const auto renderer = g_framework->get_renderer_type();
@@ -14521,6 +14548,31 @@ void VR::on_post_present() {
 
     std::scoped_lock _{m_openvr_mtx};
 
+    // The session was destroyed because the game's window was gone and it had stopped presenting
+    // (end_openxr_session_for_exit). The frame work below would touch the destroyed swapchains, so it is skipped.
+    // A Present to a live window is a recreated window, not an exit: take the wants_reinitialize path right away.
+    // One to the destroyed window is the game still shutting down: stay ended rather than create a new instance and
+    // session (and bring the runtime's window back) in a process that is exiting.
+    if (runtime->is_openxr() && m_openxr->session_ended_for_exit) {
+        // Recorded by Framework::on_frame_d3d11/d3d12 for this Present; m_wnd when the swap chain has no window.
+        const auto last_present_wnd = g_framework->get_last_present_window();
+        const auto present_wnd = last_present_wnd != nullptr ? last_present_wnd : g_framework->get_window();
+
+        if (present_wnd != nullptr && !IsWindow(present_wnd)) {
+            SPDLOG_INFO_EVERY_N_SEC(5, "[VR] The game presents to its destroyed window {:x} after its OpenXR session was ended for exit; keeping the session ended",
+                (uintptr_t)present_wnd);
+            return;
+        }
+
+        std::scoped_lock __{m_reinitialize_mtx};
+
+        spdlog::info("[VR] The game presents again (window {:x}) after its OpenXR session was ended for exit; reinitializing OpenXR",
+            (uintptr_t)present_wnd);
+        m_openxr->wants_reinitialize = false;
+        reinitialize_openxr();
+        return;
+    }
+
     if (!m_is_d3d12) {
         m_d3d11.on_post_present(this);
     } else {
@@ -14576,6 +14628,71 @@ void VR::on_post_present() {
             reinitialize_openxr();
         }
     }
+}
+
+// Framework's D3D monitor thread, once the game has destroyed its window and stopped presenting
+// (Framework::end_vr_session_if_game_exited). Only try-locks: it never waits for a lock the game's threads hold, and
+// returns BUSY instead. While it holds them, the Present, frame-sync and swapchain paths can't run, so none of them is
+// in the middle of a call with the handles end_session_for_exit() destroys.
+VR::ExitSessionResult VR::end_openxr_session_for_exit() {
+    if (!m_end_session_on_game_exit->value()) {
+        return ExitSessionResult::DISABLED;
+    }
+
+    // reinitialize_openxr() replaces m_openxr under this lock.
+    std::unique_lock openvr_lock{m_openvr_mtx, std::try_to_lock};
+
+    if (!openvr_lock.owns_lock()) {
+        return ExitSessionResult::BUSY;
+    }
+
+    const auto runtime = get_runtime();
+
+    if (runtime == nullptr || !runtime->loaded || !runtime->is_openxr() || m_openxr == nullptr) {
+        return ExitSessionResult::NO_SESSION;
+    }
+
+    auto& openxr = *m_openxr;
+
+    if (openxr.session == XR_NULL_HANDLE || openxr.session_ended_for_exit) {
+        return ExitSessionResult::NO_SESSION;
+    }
+
+    // m_actions_mtx: update_action_states() and the controller mapping in on_xinput_get_state/on_xinput_set_state,
+    // which XInputGetState/XInputSetState still reach once engine ticks have stopped.
+    auto& component_mtx = m_is_d3d12 ? m_d3d12.openxr().mtx : m_d3d11.openxr().mtx;
+    std::unique_lock component_lock{component_mtx, std::defer_lock};
+    std::unique_lock sync_lock{openxr.sync_mtx, std::defer_lock};
+    std::unique_lock assignment_lock{openxr.sync_assignment_mtx, std::defer_lock};
+    std::unique_lock event_lock{openxr.event_mtx, std::defer_lock};
+    std::unique_lock swapchain_lock{openxr.swapchain_mtx, std::defer_lock};
+    std::unique_lock actions_lock{m_actions_mtx, std::defer_lock};
+
+    if (std::try_lock(component_lock, sync_lock, assignment_lock, event_lock, swapchain_lock, actions_lock) != -1) {
+        return ExitSessionResult::BUSY;
+    }
+
+    // Only a session the runtime has shown frames from leaves a frozen image behind. That is also the session for
+    // which Framework's rehook guard already keeps the D3D rehook off (should_suppress_openxr_rehook_guard), and it
+    // stays off once the session is ended, so rehooking is unchanged: a game that recreates its window before VR got
+    // going is still rehooked.
+    const auto shown_frames =
+        openxr.ever_submitted &&
+        openxr.got_first_valid_poses &&
+        (openxr.session_state == XR_SESSION_STATE_VISIBLE || openxr.session_state == XR_SESSION_STATE_FOCUSED);
+
+    if (!shown_frames) {
+        spdlog::info("[VR] Keeping the OpenXR session at game exit: it has not shown a frame (session_state={} ever_submitted={} got_first_valid_poses={})",
+            openxr.get_session_state_string(openxr.session_state),
+            openxr.ever_submitted,
+            openxr.got_first_valid_poses);
+        return ExitSessionResult::NOT_SHOWN;
+    }
+
+    spdlog::info("[VR] Ending the OpenXR session for game exit ({})", m_is_d3d12 ? "D3D12" : "D3D11");
+    openxr.end_session_for_exit();
+
+    return ExitSessionResult::ENDED;
 }
 
 uint32_t VR::get_hmd_width() const {
@@ -16349,6 +16466,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         }
         m_perf_log->draw("Write Frame-Rate Log (perf.csv)");
         ImGui::TextWrapped("Writes the VR frame rate (new engine frames submitted per second) and its timing to perf.csv and perf-frames.csv next to log.txt, once per second. Turning it on mid-session takes effect at once; mapping the runtime's display times onto the PC clock needs it on at launch.");
+        m_end_session_on_game_exit->draw("End OpenXR Session When the Game Exits");
+        ImGui::TextWrapped("Ends the OpenXR session once the game has destroyed its window and has not presented for 2.5 s, so the runtime stops showing the last frame while the game finishes shutting down. If the game presents again, OpenXR is reinitialized.");
 
         const double min_ = 0.0;
         const double max_ = 25.0;

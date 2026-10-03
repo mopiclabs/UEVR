@@ -31,8 +31,11 @@ struct Swapchain {
     XrSwapchain handle{XR_NULL_HANDLE};
     ui_alpha::ImageLease lease;
     uint32_t count{};
-    ~Swapchain() { if (handle != XR_NULL_HANDLE) { xrDestroySwapchain(handle); } }
+    uint32_t generation{};
+    // A session ended for game exit took the handle with it (ui_alpha::abandon_session_swapchains).
+    ~Swapchain() { if (handle != XR_NULL_HANDLE && generation == ui_alpha::session_generation()) { xrDestroySwapchain(handle); } }
     bool create(const Request& r) {
+        generation = ui_alpha::session_generation();
         XrSystemProperties props{XR_TYPE_SYSTEM_PROPERTIES};
         if (xrGetSystemProperties(r.instance, r.system, &props) != XR_SUCCESS ||
             r.extent.width > props.graphicsProperties.maxSwapchainImageWidth ||
