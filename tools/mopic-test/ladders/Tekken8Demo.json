@@ -1,0 +1,31 @@
+{
+  "draft": true,
+  "game": "Tekken8Demo",
+  "recipe": "Tekken8Demo-pvc",
+  "requires": "Rungs have no \"save\": they play mopic_demo1's own progress (global1.sav). Today's run-ladder.ps1 refuses that before the first launch ('rung <name> has no save'); it needs the save-less rung change (proposal in the session notes: skip -SaveFile and the save_slot check when a rung has no save). Without the change, pin every rung to the baseline instead: \"save\": \"runs\\\\save-sets\\\\tekken8demo\\\\own\\\\20261002-baseline\\\\76561199750818073\\\\global1.sav\" (all these recipes have a save_slot for global1.sav).",
+  "notes": [
+    "TEKKEN 8 Demo build 13144577 (appid 2524440). No Steam Cloud: saves are local only, in %LOCALAPPDATA%\\TEKKEN 8 Demo\\Saved\\SaveGames\\<SteamID64>. Baseline copy of both accounts' saves (10 files): runs\\save-sets\\tekken8demo\\own\\20261002-baseline (set.json has the hashes).",
+    "Demo content: Story 'The Dark Awakens' Chapter 1, Arcade Quest Chapter 1, Super Ghost Battle (unlocked by clearing Arcade Quest Chapter 1; your own ghost), Player vs Player (needs 2 pads, not covered), Player vs CPU with JIN, KAZUYA, PAUL, NINA on Urban Square (Evening), Yakushima, Sanctum (+ Random), Gallery (partial). ONLINE, CUSTOMIZE, COMMUNITY are unavailable; no achievements or leaderboards.",
+    "Order matters without saves: aq-ch1 must clear Arcade Quest Chapter 1 before ghost can open Super Ghost Battle. With pinned saves, ghost would pin aq-ch1's run folder save-after\\global1.sav instead.",
+    "Tiers: 1 = one rung per content item (story, Arcade Quest, each fighter and each stage once); 2 = Super Ghost Battle and the other 8 fighter x stage pairs; 3 = Gallery. story-ch1, aq-ch1, ghost and gallery are skeleton drafts: their unrecorded screens are listed under todo_checkpoints in the recipes; a run stops at the first one (MENU_FAIL) until a discovery run records them.",
+    "pvc-* rungs: P1 cursor starts on JIN in row 2 (PAUL, JIN, ?, KAZUYA, NINA), the CPU stays KAZUYA (in_match is the P2 KAZUYA plate), difficulty EASY, stage_moves from RANDOM: 1 Urban Square (Evening), 2 Yakushima, 3 Sanctum (order read from thumbnails; titles TODO). About 4 min per rung including boot and quit."
+  ],
+  "rungs": [
+    {"name": "story-ch1", "recipe": "Tekken8Demo-story", "tier": 1, "story_point": "Story 'The Dark Awakens' Chapter 1, from its first cutscene to the chapter's end (20-40 min)"},
+    {"name": "aq-ch1", "recipe": "Tekken8Demo-arcadequest", "tier": 1, "story_point": "Arcade Quest Chapter 1: avatar creation (first visit), arcade hub, tutorials, chapter matches, chapter clear (30-60 min)"},
+    {"name": "ghost", "recipe": "Tekken8Demo-ghost", "tier": 2, "story_point": "Super Ghost Battle (after Arcade Quest Chapter 1 is cleared): 2 matches against your own ghost"},
+    {"name": "pvc-jin-urban", "tier": 1, "vars": {"p1": "jin", "p1_key": "right", "p1_moves": 0, "stage": "urban", "stage_moves": 1}, "story_point": "VS CPU: JIN vs KAZUYA, Urban Square (Evening), EASY"},
+    {"name": "pvc-jin-yakushima", "tier": 2, "vars": {"p1": "jin", "p1_key": "right", "p1_moves": 0, "stage": "yakushima", "stage_moves": 2}, "story_point": "VS CPU: JIN vs KAZUYA, Yakushima"},
+    {"name": "pvc-jin-sanctum", "tier": 2, "vars": {"p1": "jin", "p1_key": "right", "p1_moves": 0, "stage": "sanctum", "stage_moves": 3}, "story_point": "VS CPU: JIN vs KAZUYA, Sanctum"},
+    {"name": "pvc-paul-urban", "tier": 2, "vars": {"p1": "paul", "p1_key": "left", "p1_moves": 1, "stage": "urban", "stage_moves": 1}, "story_point": "VS CPU: PAUL vs KAZUYA, Urban Square (Evening)"},
+    {"name": "pvc-paul-yakushima", "tier": 1, "vars": {"p1": "paul", "p1_key": "left", "p1_moves": 1, "stage": "yakushima", "stage_moves": 2}, "story_point": "VS CPU: PAUL vs KAZUYA, Yakushima"},
+    {"name": "pvc-paul-sanctum", "tier": 2, "vars": {"p1": "paul", "p1_key": "left", "p1_moves": 1, "stage": "sanctum", "stage_moves": 3}, "story_point": "VS CPU: PAUL vs KAZUYA, Sanctum"},
+    {"name": "pvc-kazuya-urban", "tier": 2, "vars": {"p1": "kazuya", "p1_key": "right", "p1_moves": 2, "stage": "urban", "stage_moves": 1}, "story_point": "VS CPU: KAZUYA vs KAZUYA (mirror), Urban Square (Evening)"},
+    {"name": "pvc-kazuya-yakushima", "tier": 2, "vars": {"p1": "kazuya", "p1_key": "right", "p1_moves": 2, "stage": "yakushima", "stage_moves": 2}, "story_point": "VS CPU: KAZUYA vs KAZUYA, Yakushima"},
+    {"name": "pvc-kazuya-sanctum", "tier": 1, "vars": {"p1": "kazuya", "p1_key": "right", "p1_moves": 2, "stage": "sanctum", "stage_moves": 3}, "story_point": "VS CPU: KAZUYA vs KAZUYA, Sanctum"},
+    {"name": "pvc-nina-urban", "tier": 1, "vars": {"p1": "nina", "p1_key": "right", "p1_moves": 3, "stage": "urban", "stage_moves": 1}, "story_point": "VS CPU: NINA vs KAZUYA, Urban Square (Evening)"},
+    {"name": "pvc-nina-yakushima", "tier": 2, "vars": {"p1": "nina", "p1_key": "right", "p1_moves": 3, "stage": "yakushima", "stage_moves": 2}, "story_point": "VS CPU: NINA vs KAZUYA, Yakushima"},
+    {"name": "pvc-nina-sanctum", "tier": 2, "vars": {"p1": "nina", "p1_key": "right", "p1_moves": 3, "stage": "sanctum", "stage_moves": 3}, "story_point": "VS CPU: NINA vs KAZUYA, Sanctum"},
+    {"name": "gallery", "recipe": "Tekken8Demo-gallery", "tier": 3, "story_point": "Gallery: one highlight movie (full-screen video in UEVR's UI quad)"}
+  ]
+}
