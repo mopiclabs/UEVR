@@ -25,6 +25,7 @@
 #include "../../../utility/Logging.hpp"
 #include "OpenXR.hpp"
 #include "../SteamFrameBindings.hpp"
+#include "../PerfLog.hpp"
 
 using namespace nlohmann;
 
@@ -107,6 +108,25 @@ const char* sync_frame_callsite_name(VRRuntime::SyncFrameCallsite callsite) {
     default:
         return "unknown";
     }
+}
+
+// xrBeginFrame for the perf log: counts XR_FRAME_DISCARDED and keeps the time inside the runtime out of UEVR's
+// own render-thread cost.
+XrResult begin_frame_counted(XrSession session, const XrFrameBeginInfo& info) {
+    const auto start = uevr::perf::now_ns();
+    const auto result = xrBeginFrame(session, &info);
+    uevr::perf::note_xr_begin(uevr::perf::now_ns() - start, result == XR_FRAME_DISCARDED);
+    return result;
+}
+
+// xrEndFrame without layers (recovery, startup and mono-transition frames). The perf log counts them as empty
+// submits, so they never pass for frames with a new image.
+XrResult end_empty_frame_counted(XrSession session, const XrFrameEndInfo& info) {
+    const auto start = uevr::perf::now_ns();
+    const auto result = xrEndFrame(session, &info);
+    const auto end = uevr::perf::now_ns();
+    uevr::perf::note_xr_end(result == XR_SUCCESS, false, 0, end, end - start, info.displayTime, 0);
+    return result;
 }
 
 bool is_projection_component_valid(float value) {
@@ -961,7 +981,7 @@ bool OpenXR::recover_focused_stale_frame_loop(const char* caller) {
         const auto begin_frame_start = collect_frame_timing
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        const auto begin_result = xrBeginFrame(this->session, &frame_begin_info);
+        const auto begin_result = begin_frame_counted(this->session, frame_begin_info);
         if (collect_frame_timing) {
             this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
         }
@@ -987,7 +1007,7 @@ bool OpenXR::recover_focused_stale_frame_loop(const char* caller) {
         const auto end_frame_start = collect_frame_timing
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        const auto end_result = xrEndFrame(this->session, &frame_end_info);
+        const auto end_result = end_empty_frame_counted(this->session, frame_end_info);
         if (collect_frame_timing) {
             this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
         }
@@ -1029,7 +1049,7 @@ XrResult OpenXR::recover_wedged_frame(const char* reason) {
     frame_end_info.layerCount = 0;
     frame_end_info.layers = nullptr;
 
-    const auto result = xrEndFrame(this->session, &frame_end_info);
+    const auto result = end_empty_frame_counted(this->session, frame_end_info);
 
     if (result != XR_SUCCESS) {
         spdlog::error("[OpenXR] Recovery xrEndFrame failed ({}): {}", reason, this->get_result_string(result));
@@ -1064,7 +1084,7 @@ bool OpenXR::close_synced_frame_without_layers(const char* reason) {
         const auto begin_frame_start = collect_frame_timing
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        const auto begin_result = xrBeginFrame(this->session, &frame_begin_info);
+        const auto begin_result = begin_frame_counted(this->session, frame_begin_info);
         if (collect_frame_timing) {
             this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
         }
@@ -1092,7 +1112,7 @@ bool OpenXR::close_synced_frame_without_layers(const char* reason) {
     const auto end_frame_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    const auto result = xrEndFrame(this->session, &frame_end_info);
+    const auto result = end_empty_frame_counted(this->session, frame_end_info);
     if (collect_frame_timing) {
         this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
     }
@@ -1226,6 +1246,7 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, 
             this->frame_synced_skip_streak = 0;
         }
 
+        uevr::perf::note_xr_wait_skipped();
         return VRRuntime::Error::SUCCESS;
     }
     this->begin_profile();
@@ -1244,6 +1265,14 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, 
             this->wait_frame_callsite_timing[callsite_index].add(wait_frame_duration);
         }
     }
+
+    uevr::perf::note_xr_wait(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(wait_frame_duration).count(),
+        result == XR_SUCCESS,
+        local_frame_state.shouldRender == XR_TRUE,
+        local_frame_state.predictedDisplayPeriod,
+        static_cast<uint8_t>(callsite),
+        sync_frame_callsite_name(callsite));
 
     const auto wait_frame_ms = std::chrono::duration<double, std::milli>{wait_frame_duration}.count();
     if (wait_frame_ms >= 100.0) {
@@ -2132,6 +2161,7 @@ void OpenXR::destroy() {
     if (this->instance != nullptr && this->ever_submitted) {
         xrDestroyInstance(this->instance);
         this->instance = nullptr;
+        this->convert_win32_performance_counter_to_time = nullptr;
     }
 
     this->session = nullptr;
@@ -3641,7 +3671,7 @@ XrResult OpenXR::begin_frame(const char* caller) {
     const auto begin_frame_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    auto result = xrBeginFrame(this->session, &frame_begin_info);
+    auto result = begin_frame_counted(this->session, frame_begin_info);
     if (collect_frame_timing) {
         this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
     }
@@ -3659,7 +3689,7 @@ XrResult OpenXR::begin_frame(const char* caller) {
         const auto retry_begin_frame_start = collect_frame_timing
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        result = xrBeginFrame(this->session, &frame_begin_info);
+        result = begin_frame_counted(this->session, frame_begin_info);
         if (collect_frame_timing) {
             this->begin_frame_timing.add(std::chrono::steady_clock::now() - retry_begin_frame_start);
         }
@@ -3694,7 +3724,7 @@ XrResult OpenXR::begin_frame(const char* caller) {
             frame_end_info.layerCount = 0;
             frame_end_info.layers = nullptr;
 
-            const auto end_result = xrEndFrame(this->session, &frame_end_info);
+            const auto end_result = end_empty_frame_counted(this->session, frame_end_info);
             this->frame_began = false;
             this->clear_frame_synced("startup_empty_frame");
             ++this->forced_frame_recovery_count;
@@ -3968,7 +3998,12 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     const auto end_frame_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
+    const auto perf_end_start = uevr::perf::now_ns();
     auto result = xrEndFrame(this->session, &frame_end_info);
+    const auto perf_end_time = uevr::perf::now_ns();
+    // A projection for an engine frame that was already submitted counts as a repeat, not a new VR frame.
+    uevr::perf::note_xr_end(result == XR_SUCCESS, !projection_layer_views.empty(), submit_state.frame_count,
+        perf_end_time, perf_end_time - perf_end_start, frame_end_info.displayTime, pipelined_frame_state.predictedDisplayPeriod);
     if (collect_frame_timing) {
         this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
     }
@@ -3998,6 +4033,17 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
                 pipelined_frame_state.shouldRender,
                 frame_end_info.displayTime
             );
+        }
+
+        // Once a second, pair QPC with XrTime so perf-frames.csv display times can be placed on the QPC clock.
+        if (this->convert_win32_performance_counter_to_time != nullptr && uevr::perf::time_pair_due(uevr::perf::now_ns())) {
+            LARGE_INTEGER qpc{};
+            XrTime xr_time{};
+            QueryPerformanceCounter(&qpc);
+
+            if (this->convert_win32_performance_counter_to_time(this->instance, &qpc, &xr_time) == XR_SUCCESS) {
+                uevr::perf::note_time_pair(qpc.QuadPart, xr_time);
+            }
         }
     }
     

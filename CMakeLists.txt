@@ -913,6 +913,49 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	unset(CMKR_SOURCES)
 endif()
 
+# Target perf-log-tests
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET perf-log-tests)
+	set(perf-log-tests_SOURCES "")
+
+	list(APPEND perf-log-tests_SOURCES
+		"tests/PerfLogTests.cpp"
+		"src/mods/vr/PerfLog.cpp"
+	)
+
+	list(APPEND perf-log-tests_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${perf-log-tests_SOURCES})
+	add_executable(perf-log-tests)
+
+	if(perf-log-tests_SOURCES)
+		target_sources(perf-log-tests PRIVATE ${perf-log-tests_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT perf-log-tests)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${perf-log-tests_SOURCES})
+
+	target_compile_features(perf-log-tests PRIVATE
+		cxx_std_23
+	)
+
+	target_include_directories(perf-log-tests PRIVATE
+		"src/"
+	)
+
+	add_test(NAME perf-log-tests COMMAND perf-log-tests)
+	set_tests_properties(perf-log-tests PROPERTIES TIMEOUT 60)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
 # Target stalker2-native-policy-tests
 if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	set(CMKR_TARGET stalker2-native-policy-tests)
@@ -1420,6 +1463,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/IXRTrackingSystemHook.cpp"
 	"src/mods/vr/KtjLOpenXRFactory.cpp"
 	"src/mods/vr/OverlayComponent.cpp"
+	"src/mods/vr/PerfLog.cpp"
 	"src/mods/vr/RenderTargetPoolHook.cpp"
 	"src/mods/vr/SatisfactoryRuntime.cpp"
 	"src/mods/vr/UE57SlateSymbols.cpp"
@@ -1478,6 +1522,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/ControllerTouchBindings.hpp"
 	"src/mods/vr/D3D11Component.hpp"
 	"src/mods/vr/D3D12Component.hpp"
+	"src/mods/vr/DeadAsDiscoNativeFix.hpp"
 	"src/mods/vr/DuneFrameHandoff.hpp"
 	"src/mods/vr/FFakeStereoRenderingHook.hpp"
 	"src/mods/vr/GalacticRacerBink.hpp"
@@ -1511,6 +1556,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/NativeFrameDiagnostics.hpp"
 	"src/mods/vr/NativeFrameDiagnosticsJson.hpp"
 	"src/mods/vr/OverlayComponent.hpp"
+	"src/mods/vr/PerfLog.hpp"
 	"src/mods/vr/RenderTargetPoolHook.hpp"
 	"src/mods/vr/SWZeroCompanyBinary.hpp"
 	"src/mods/vr/SatisfactoryModular.hpp"
@@ -1544,6 +1590,7 @@ list(APPEND uevr_SOURCES
 	"src/uevr-imgui/uevr_imconfig.hpp"
 	"src/utility/BoundedTextureDiagnostics.hpp"
 	"src/utility/BuildIdentity.hpp"
+	"src/utility/D3DDeviceIdentity.hpp"
 	"src/utility/GpuRetirement.hpp"
 	"src/utility/HiFiRushHookMemory.hpp"
 	"src/utility/ImGui.hpp"

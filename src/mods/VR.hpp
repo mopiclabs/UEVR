@@ -1010,6 +1010,7 @@ private:
     void hitch_snapshot_writer_loop(std::stop_token stop_token);
     void stop_hitch_snapshot_writer();
     static void write_hitch_snapshot_request(HitchSnapshotDumpRequest&& request);
+    void update_perf_state();
     struct UILayerPoseTelemetrySnapshot;
     UILayerPoseTelemetrySnapshot get_ui_layer_pose_telemetry_snapshot();
 
@@ -1446,6 +1447,8 @@ private:
     const ModToggle::Ptr m_enable_gui{ ModToggle::create(generate_name("EnableGUI"), true) };
     const ModToggle::Ptr m_enable_depth{ ModToggle::create(generate_name("PassDepthToRuntime"), false, true) };
     const ModToggle::Ptr m_enable_hitch_diagnostics{ ModToggle::create(generate_name("EnableHitchDiagnostics"), false, true) };
+    // perf.csv / perf-frames.csv next to log.txt. Cheap enough to stay on (see PerfLog.hpp).
+    const ModToggle::Ptr m_perf_log{ ModToggle::create(generate_name("PerfLog"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
     const ModToggle::Ptr m_decoupled_pitch{ ModToggle::create(generate_name("DecoupledPitch"), false) };
     const ModToggle::Ptr m_decoupled_pitch_ui_adjust{ ModToggle::create(generate_name("DecoupledPitchUIAdjust"), true) };
@@ -1796,6 +1799,7 @@ public:
             *m_enable_gui,
             *m_enable_depth,
             *m_enable_hitch_diagnostics,
+            *m_perf_log,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,
             *m_decoupled_pitch_ui_adjust,
@@ -2043,6 +2047,9 @@ private:
     bool m_first_submit{true};
     bool m_is_d3d12{false};
     bool m_hitch_diagnostics_enabled_last_frame{false};
+    bool m_perf_log_start_attempted{false};
+    uint32_t m_perf_slow_flags{}; // DLSSG and foreground bits, refreshed every 500 ms
+    std::chrono::steady_clock::time_point m_perf_slow_flags_time{};
     bool m_backbuffer_inconsistency{false};
     bool m_init_finished{false};
     bool m_has_hw_scheduling{false}; // hardware accelerated GPU scheduling
