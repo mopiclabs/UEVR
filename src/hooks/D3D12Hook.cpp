@@ -22,6 +22,14 @@
 
 static D3D12Hook* g_d3d12_hook = nullptr;
 thread_local bool g_inside_depth_stencil_observer = false;
+// Set while an ExecuteCommandLists call on this thread is UEVR's own (InternalExecuteScope) or comes from inside an
+// execute observer: such calls go straight to the original and are not reported.
+thread_local bool g_internal_execute = false;
+
+using ExecuteCommandListsFn = void(WINAPI*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+// The vtable entry the hook replaced. Never cleared: a call already inside the detour while the hook is removed still
+// reaches it.
+static std::atomic<ExecuteCommandListsFn> g_original_execute_command_lists{nullptr};
 
 namespace {
 constexpr size_t CREATE_GRAPHICS_PIPELINE_STATE_VTABLE_INDEX = 10;
@@ -38,6 +46,8 @@ constexpr size_t DISPATCH_VTABLE_INDEX = 14;
 constexpr size_t RS_SET_VIEWPORTS_VTABLE_INDEX = 21;
 constexpr size_t SET_PIPELINE_STATE_VTABLE_INDEX = 25;
 constexpr size_t RESOURCE_BARRIER_VTABLE_INDEX = 26;
+// ID3D12CommandQueue: IUnknown 0-2, ID3D12Object 3-6, ID3D12DeviceChild 7, UpdateTileMappings 8, CopyTileMappings 9.
+constexpr size_t EXECUTE_COMMAND_LISTS_VTABLE_INDEX = 10;
 constexpr size_t SET_DESCRIPTOR_HEAPS_VTABLE_INDEX = 28;
 constexpr size_t SET_COMPUTE_ROOT_DESCRIPTOR_TABLE_VTABLE_INDEX = 31;
 constexpr size_t SET_GRAPHICS_ROOT_DESCRIPTOR_TABLE_VTABLE_INDEX = 32;
@@ -735,6 +745,8 @@ bool D3D12Hook::unhook() {
     m_resource_barrier_hook_lookup.clear();
     m_set_pipeline_state_hook_generation.fetch_add(1, std::memory_order_release);
     m_swapchain_hook.reset();
+    m_execute_observer.store(nullptr, std::memory_order_release);
+    m_execute_command_lists_hook.reset();
 
     m_hooked = false;
     m_is_phase_1 = true;
@@ -1198,6 +1210,61 @@ void WINAPI D3D12Hook::resource_barrier(
     if (original != nullptr) {
         original(command_list, count, barriers);
     }
+}
+
+bool D3D12Hook::hook_execute_command_lists(ID3D12CommandQueue* queue) {
+    if (m_execute_command_lists_hook != nullptr) {
+        return true;
+    }
+
+    if (queue == nullptr) {
+        return false;
+    }
+
+    try {
+        auto** slot = &(*(void***)queue)[EXECUTE_COMMAND_LISTS_VTABLE_INDEX];
+
+        // The original must be in place before the detour can be reached: another thread may call it the moment
+        // the entry is swapped.
+        g_original_execute_command_lists.store(reinterpret_cast<ExecuteCommandListsFn>(*slot), std::memory_order_release);
+        auto hook = std::make_unique<PointerHook>(slot, reinterpret_cast<void*>(&D3D12Hook::execute_command_lists));
+        g_original_execute_command_lists.store(hook->get_original<ExecuteCommandListsFn>(), std::memory_order_release);
+        m_execute_command_lists_hook = std::move(hook);
+        spdlog::info("[D3D12] Hooked ExecuteCommandLists of queue {:x} (vtable entry {:x})", (uintptr_t)queue, (uintptr_t)slot);
+        return true;
+    } catch (const std::exception& e) {
+        spdlog::error("[D3D12] Failed to hook ExecuteCommandLists: {}", e.what());
+        return false;
+    }
+}
+
+void WINAPI D3D12Hook::execute_command_lists(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
+    if (const auto original = g_original_execute_command_lists.load(std::memory_order_acquire); original != nullptr) {
+        original(queue, count, lists);
+    }
+
+    if (g_internal_execute) {
+        return;
+    }
+
+    const auto d3d12 = g_d3d12_hook;
+    const auto observer = d3d12 != nullptr ? d3d12->m_execute_observer.load(std::memory_order_acquire) : nullptr;
+
+    if (observer != nullptr) {
+        g_internal_execute = true;
+        observer->on_post_execute_command_lists(queue, count, lists);
+        g_internal_execute = false;
+    }
+}
+
+D3D12Hook::InternalExecuteScope::InternalExecuteScope() noexcept
+    : m_previous{g_internal_execute}
+{
+    g_internal_execute = true;
+}
+
+D3D12Hook::InternalExecuteScope::~InternalExecuteScope() {
+    g_internal_execute = m_previous;
 }
 
 thread_local int32_t g_resize_buffers_depth = 0;

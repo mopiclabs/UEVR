@@ -847,6 +847,11 @@ public:
         return m_native_stereo_fix_state.load(std::memory_order_acquire) == NativeStereoFixState::Active;
     }
 
+    // The newest published packet, without the submit-time frame checks (null once invalidated).
+    std::shared_ptr<const NativeStereoFramePacket> get_native_stereo_frame_packet() const {
+        return m_native_stereo_frame_packet.load(std::memory_order_acquire);
+    }
+
     std::shared_ptr<const NativeStereoFramePacket> get_native_stereo_frame_packet_for_submit(
         int32_t render_frame, uevr::native_frame::Backend backend = uevr::native_frame::Backend::unknown,
         uevr::native_frame::Ticket* diagnostic_ticket = nullptr) const;

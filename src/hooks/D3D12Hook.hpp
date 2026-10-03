@@ -37,6 +37,19 @@ public:
         const D3D12_RESOURCE_BARRIER* barriers) = 0;
 };
 
+// Sees the game's ID3D12CommandQueue::ExecuteCommandLists calls right after they return (the original call always
+// runs first, unchanged). UEVR's own submissions (d3d12::CommandContext::execute, and anything an observer submits)
+// are not reported. The Native Stereo Fix pair snapshot uses it to submit on the engine's own queue, in its order.
+class D3D12ExecuteObserver {
+public:
+    virtual ~D3D12ExecuteObserver() = default;
+
+    virtual void on_post_execute_command_lists(
+        ID3D12CommandQueue* queue,
+        UINT count,
+        ID3D12CommandList* const* lists) = 0;
+};
+
 class D3D12Hook
 {
 public:
@@ -136,6 +149,30 @@ public:
         m_depth_stencil_observer.store(observer, std::memory_order_release);
     }
 
+    // Hooks ExecuteCommandLists in `queue`'s vtable (shared by the device's command queues) the first time; true once
+    // it is hooked. Present thread.
+    bool hook_execute_command_lists(ID3D12CommandQueue* queue);
+
+    void set_execute_observer(D3D12ExecuteObserver* observer) {
+        m_execute_observer.store(observer, std::memory_order_release);
+    }
+
+    void clear_execute_observer(D3D12ExecuteObserver* observer) {
+        m_execute_observer.compare_exchange_strong(observer, nullptr, std::memory_order_acq_rel);
+    }
+
+    // While alive, ExecuteCommandLists calls on this thread are UEVR's own and not reported to the observer.
+    class InternalExecuteScope {
+    public:
+        InternalExecuteScope() noexcept;
+        ~InternalExecuteScope();
+        InternalExecuteScope(const InternalExecuteScope&) = delete;
+        InternalExecuteScope& operator=(const InternalExecuteScope&) = delete;
+
+    private:
+        bool m_previous{};
+    };
+
 protected:
     ID3D12Device4* m_device{ nullptr };
     IDXGISwapChain3* m_swap_chain{ nullptr };
@@ -161,6 +198,8 @@ protected:
     bool m_inside_present{false};
     bool m_ignore_next_present{false};
     std::atomic<D3D12DepthStencilObserver*> m_depth_stencil_observer{nullptr};
+    std::atomic<D3D12ExecuteObserver*> m_execute_observer{nullptr};
+    std::unique_ptr<PointerHook> m_execute_command_lists_hook{};
     std::unordered_set<uintptr_t> m_swapchains_requiring_original_present_params{};
     std::unordered_set<uintptr_t> m_original_present_param_skip_logged_swapchains{};
 
@@ -198,6 +237,7 @@ protected:
     static void WINAPI create_depth_stencil_view(ID3D12Device* device, ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC* desc, D3D12_CPU_DESCRIPTOR_HANDLE descriptor);
     static void WINAPI set_pipeline_state(ID3D12GraphicsCommandList* command_list, ID3D12PipelineState* pipeline_state);
     static void WINAPI resource_barrier(ID3D12GraphicsCommandList* command_list, UINT count, const D3D12_RESOURCE_BARRIER* barriers);
+    static void WINAPI execute_command_lists(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
     static HRESULT WINAPI resize_buffers(IDXGISwapChain3* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags);
     static HRESULT WINAPI resize_target(IDXGISwapChain3* swap_chain, const DXGI_MODE_DESC* new_target_parameters);
     //static HRESULT WINAPI create_swap_chain(IDXGIFactory4* factory, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC* desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* p_fullscreen_desc, IDXGIOutput* p_restrict_to_output, IDXGISwapChain** swap_chain);

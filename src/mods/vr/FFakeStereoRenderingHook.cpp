@@ -20890,6 +20890,9 @@ struct SceneViewExtensionAnalyzer {
             if (N == correct_execute_index) {
                 runtime->enqueue_render_poses(frame_count);
                 if (g_hook != nullptr) { g_hook->note_nascar25_render_pose_handoff(frame_count); }
+                // Both eye families of this frame are recorded: the D3D12 Native Stereo Fix freezes its eye pair right
+                // after this thread's next submission (VR_NativeStereoFixPairSnapshot).
+                vr->arm_native_pair_snapshot(frame_count);
             }
 
             return result;
@@ -21085,6 +21088,8 @@ struct SceneViewExtensionAnalyzer {
 
             runtime->enqueue_render_poses(frame_count);
             runtime->on_pre_render_rhi_thread(frame_count);
+            // See hooked_command_fn: freeze the Native Stereo Fix eye pair at this thread's next submission.
+            vr->arm_native_pair_snapshot(frame_count);
 
             auto call_orig = [&]() {
                 func(*cmd_list, cmd);

@@ -15130,6 +15130,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "Recommended for UE5.5 and newer. Keeps the real secondary-eye pass identity for per-eye water, "
                 "post-process, and renderer paths while retaining the Native Fix constructor safety guard. "
                 "Disable only to restore the legacy same-pass behavior.");
+            m_native_stereo_fix_pair_snapshot->draw("Freeze Eye Pair per Engine Frame (D3D12)");
+            ImGui::TextWrapped(
+                "Experimental, default off (hung Hogwarts Legacy with XeSS frame generation). Copies both eyes once per "
+                "engine frame, right after the engine submits it, and submits that pair on every Present. Only takes "
+                "effect while frame generation presents from its own thread; otherwise, and while no frozen pair is "
+                "available, copies the live eye targets.");
             m_native_stereo_fix_texture_array_submit->draw("Experimental OpenXR Texture-Array Submit");
             {
                 const auto runtime = get_runtime();

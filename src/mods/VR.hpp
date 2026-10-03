@@ -705,6 +705,27 @@ public:
             m_rendering_method->value() == RenderingMethod::NATIVE_STEREO;
     }
 
+    // VR_NativeStereoFixPairSnapshot (default off): D3D12 double-wide Native Stereo Fix submits copy one eye pair frozen
+    // at an engine frame boundary instead of the two live engine targets (d3d12/NativePairSnapshot.hpp). Off by default:
+    // with it on, Hogwarts Legacy (XeFG X2) hung right after the first frozen pair was used (2026-10-03). Likely a GPU
+    // wait cycle: the Present pass makes XeFG's present queue wait for the snapshot fence, which sits on the engine queue
+    // behind the engine's wait for XeFG's own fence. Experiment only until the consumer stops waiting on the GPU.
+    bool is_native_stereo_fix_pair_snapshot_enabled() const {
+        return m_native_stereo_fix_pair_snapshot->value() &&
+            m_is_d3d12 &&
+            !uevr::nascar::is_target() &&
+            !is_using_mono() &&
+            is_native_stereo_fix_enabled() &&
+            !is_native_stereo_fix_texture_array_submit_enabled();
+    }
+
+    // Render-submission thread, from the frame's pose callback once both eye families are recorded.
+    void arm_native_pair_snapshot(uint32_t frame_count) {
+        if (is_native_stereo_fix_pair_snapshot_enabled()) {
+            m_d3d12.arm_native_pair_snapshot(frame_count);
+        }
+    }
+
     bool is_native_stereo_fix_async_openxr_wait_enabled() const {
         const auto runtime = get_runtime();
         return m_native_stereo_fix_async_openxr_wait->value() &&
@@ -1836,6 +1857,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
+    const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
 
     const ModSlider::Ptr m_custom_z_near{ ModSlider::create(generate_name("CustomZNear"), 0.001f, 100.0f, 0.01f, true) };
     const ModToggle::Ptr m_custom_z_near_enabled{ ModToggle::create(generate_name("EnableCustomZNear"), false, true) };
@@ -2311,6 +2333,7 @@ public:
             *m_native_stereo_fix_preserve_secondary_pass,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
+            *m_native_stereo_fix_pair_snapshot,
             *m_splitscreen_compatibility_mode,
             *m_splitscreen_view_index,
             *m_compatibility_skip_pip,

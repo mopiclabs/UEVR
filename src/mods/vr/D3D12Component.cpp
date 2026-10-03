@@ -2642,6 +2642,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         nullptr,
         &sw_zero_company_validated_scene_target,
         &stalker2_validated_synced_scene_target);
+    // The engine's own scene target: the Native Fix pair snapshot only freezes a left eye that is this target itself,
+    // never one of the owned copies UEVR refreshes at Present time.
+    const ComPtr<ID3D12Resource> engine_scene_target = backbuffer;
 
     if (FAILED(swapchain->GetBuffer(swapchain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&real_backbuffer)))) {
         spdlog::error("[VR] Failed to get real back buffer.");
@@ -3640,6 +3643,23 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         SPDLOG_INFO_ONCE("[NASCAR25][NativeFix][D3D12] Copying with independent source states: left=SRVMask, right=RENDER_TARGET; restoring both");
     }
 
+    // VR_NativeStereoFixPairSnapshot: the eye pair frozen right after the engine submitted its last frame (see
+    // d3d12/NativePairSnapshot.hpp). pre_render and pre_render_cached copy it instead of the two live engine targets,
+    // which a Present pass between the engine's left and right renders would pair from two different frames, and copy
+    // the live targets as before while there is none.
+    std::optional<d3d12::NativePairSnapshot::Lease> native_pair_lease{};
+    bool native_pair_copied = false;
+    utility::ScopeGuard release_native_pair{[&]() {
+        if (native_pair_lease) {
+            m_native_pair.release(*native_pair_lease, command_queue, native_pair_copied);
+        }
+    }};
+
+    if (runtime->is_openxr()) {
+        native_pair_lease = acquire_native_pair_snapshot(vr, device, command_queue, engine_scene_target.Get(),
+            native_eye_width, native_eye_height, native_left_source_fits, nascar25_native_copy_states.has_value());
+    }
+
     // We need to render the scene capture texture to the right side of the double wide texture
     auto pre_render = [
         left_source = m_game_tex.texture,
@@ -3651,41 +3671,53 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         nascar25_native_copy_states,
         native_stereo_packet,
         native_frame_ticket,
-        native_stereo_hook](d3d12::CommandContext& commands, ID3D12Resource* render_target) {
+        native_stereo_hook,
+        native_pair_lease,
+        native_pair_queue = command_queue,
+        native_pair_copied = &native_pair_copied](d3d12::CommandContext& commands, ID3D12Resource* render_target) {
         if (render_target == nullptr || left_source == nullptr || right_source == nullptr || native_stereo_packet == nullptr) {
             return;
         }
 
-        D3D12_BOX left_src_box{
-            .left = 0,
-            .top = 0,
-            .front = 0,
-            .right = left_width,
-            .bottom = left_height,
-            .back = 1
-        };
-        D3D12_BOX right_src_box{
-            .left = 0,
-            .top = 0,
-            .front = 0,
-            .right = right_width,
-            .bottom = right_height,
-            .back = 1
-        };
-
-        if (nascar25_native_copy_states) {
-            uevr::nascar::title25::copy_native_eye_pair(commands,
-                left_source.Get(), right_source.Get(), render_target,
-                left_src_box, right_src_box, left_width, *nascar25_native_copy_states,
-                uevr::nascar::title25::NativeCopyLayout::double_wide);
+        if (native_pair_lease &&
+            d3d12::NativePairSnapshot::record_copy(*native_pair_lease, commands, render_target, native_pair_queue))
+        {
+            *native_pair_copied = true;
+            uevr::perf::note_native_pair(uevr::perf::NativePair::Snapshot);
         } else {
-            commands.copy_region_stereo(
-                left_source.Get(), right_source.Get(), render_target,
-                &left_src_box, &right_src_box,
-                0, 0, 0, left_width, 0, 0,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
-                D3D12_RESOURCE_STATE_RENDER_TARGET
-            );
+            D3D12_BOX left_src_box{
+                .left = 0,
+                .top = 0,
+                .front = 0,
+                .right = left_width,
+                .bottom = left_height,
+                .back = 1
+            };
+            D3D12_BOX right_src_box{
+                .left = 0,
+                .top = 0,
+                .front = 0,
+                .right = right_width,
+                .bottom = right_height,
+                .back = 1
+            };
+
+            if (nascar25_native_copy_states) {
+                uevr::nascar::title25::copy_native_eye_pair(commands,
+                    left_source.Get(), right_source.Get(), render_target,
+                    left_src_box, right_src_box, left_width, *nascar25_native_copy_states,
+                    uevr::nascar::title25::NativeCopyLayout::double_wide);
+            } else {
+                commands.copy_region_stereo(
+                    left_source.Get(), right_source.Get(), render_target,
+                    &left_src_box, &right_src_box,
+                    0, 0, 0, left_width, 0, 0,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET
+                );
+            }
+
+            uevr::perf::note_native_pair(uevr::perf::NativePair::Live);
         }
 
         if (native_stereo_hook != nullptr) {
@@ -3700,15 +3732,26 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
 
     // Same copy with the last validated right-eye capture, for a frame whose packet was missing or refused.
     // The engine never renders the right half of the backbuffer under the Native Stereo Fix, so copying the
-    // backbuffer instead would show an unrendered (black) right eye for that frame.
+    // backbuffer instead would show an unrendered (black) right eye for that frame. With a frozen pair, that pair.
     auto pre_render_cached = [
         left_source = m_game_tex.texture,
         right_source = m_scene_capture_tex.texture,
         left_width = native_eye_width,
         left_height = native_eye_height,
         right_width = m_scene_capture_width,
-        right_height = m_scene_capture_height](d3d12::CommandContext& commands, ID3D12Resource* render_target) {
+        right_height = m_scene_capture_height,
+        native_pair_lease,
+        native_pair_queue = command_queue,
+        native_pair_copied = &native_pair_copied](d3d12::CommandContext& commands, ID3D12Resource* render_target) {
         if (render_target == nullptr || left_source == nullptr || right_source == nullptr) {
+            return;
+        }
+
+        if (native_pair_lease &&
+            d3d12::NativePairSnapshot::record_copy(*native_pair_lease, commands, render_target, native_pair_queue))
+        {
+            *native_pair_copied = true;
+            uevr::perf::note_native_pair(uevr::perf::NativePair::Snapshot);
             return;
         }
 
@@ -3722,6 +3765,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             D3D12_RESOURCE_STATE_RENDER_TARGET,
             D3D12_RESOURCE_STATE_RENDER_TARGET
         );
+        uevr::perf::note_native_pair(uevr::perf::NativePair::Live);
     };
 
     // For copying the real backbuffer if we need to
@@ -6268,6 +6312,163 @@ void D3D12Component::on_post_present(VR* vr) {
     }
 }
 
+void D3D12Component::arm_native_pair_snapshot(uint32_t frame_count) {
+    const auto& native_hook = VR::get()->m_fake_stereo_hook;
+
+    // Only while the fix is operating with a published packet: its right render ran, into the capture it names. An
+    // arm left from an earlier frame is dropped: fired inside this one, it would pair this frame's left eye with that
+    // frame's right eye.
+    if (native_hook == nullptr || !native_hook->is_native_stereo_fix_active()) {
+        m_native_pair.disarm();
+        return;
+    }
+
+    const auto packet = native_hook->get_native_stereo_frame_packet();
+    if (packet == nullptr || packet->capture == nullptr) {
+        m_native_pair.disarm();
+        return;
+    }
+
+    m_native_pair.arm(frame_count, packet->capture_generation);
+}
+
+std::optional<d3d12::NativePairSnapshot::Lease> D3D12Component::acquire_native_pair_snapshot(
+    VR* vr,
+    ID3D12Device* device,
+    ID3D12CommandQueue* queue,
+    ID3D12Resource* engine_scene_target,
+    uint32_t eye_width,
+    uint32_t eye_height,
+    bool left_source_fits,
+    bool title_copy_states)
+{
+    const auto& native_hook = vr->m_fake_stereo_hook;
+
+    if (!vr->is_native_stereo_fix_pair_snapshot_enabled()) {
+        // Off, or not the D3D12 double-wide Native Fix: today's path. A ring and observer left from an earlier
+        // setting go once (the ring's VRAM with them); otherwise nothing runs here.
+        if (m_native_pair_engaged) {
+            if (auto& hook = g_framework->get_d3d12_hook(); hook != nullptr) {
+                hook->clear_execute_observer(&m_native_pair);
+            }
+
+            m_native_pair.retire();
+            m_native_pair_engaged = false;
+            m_native_pair_in_use = false;
+            spdlog::info("[NativeStereoFix][D3D12] Pair snapshots off; released the snapshot ring");
+        }
+
+        return std::nullopt;
+    }
+
+    if (native_hook == nullptr || !native_hook->is_native_stereo_fix_active()) {
+        // The fix is not operating (startup, transitions): no frozen pair outlives that; the ring stays.
+        if (m_native_pair_engaged) {
+            m_native_pair.suspend();
+        }
+
+        m_native_pair_in_use = false;
+        return std::nullopt;
+    }
+
+    // Each reason once per session: the live copy runs whenever no frozen pair can be used.
+    static std::unordered_set<std::string_view> logged_reasons{};
+    const auto live_copy = [&](const char* reason, bool suspend) -> std::optional<d3d12::NativePairSnapshot::Lease> {
+        if (suspend) {
+            m_native_pair.suspend();
+        }
+
+        if (logged_reasons.emplace(reason).second) {
+            spdlog::info("[NativeStereoFix][D3D12] Copying the live eye targets: {}", reason);
+        }
+
+        m_native_pair_in_use = false;
+        return std::nullopt;
+    };
+
+    if (m_game_tex.texture == nullptr || m_scene_capture_tex.texture == nullptr || m_scene_capture_generation == 0) {
+        return live_copy("the eye targets are not set up", true);
+    }
+
+    if (!left_source_fits) {
+        return live_copy("the left-eye source is smaller than the eye pair", true);
+    }
+
+    if (title_copy_states) {
+        return live_copy("this title copies the eyes with its own resource states", true);
+    }
+
+    if (engine_scene_target == nullptr || m_game_tex.texture.Get() != engine_scene_target) {
+        return live_copy("the left eye is an owned copy of the engine target, refreshed at Present", true);
+    }
+
+    const auto target_desc = m_openxr.image_desc((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE);
+    if (!target_desc) {
+        return live_copy("no double-wide swapchain", true);
+    }
+
+    auto& hook = g_framework->get_d3d12_hook();
+    if (hook == nullptr || !hook->hook_execute_command_lists(queue)) {
+        return live_copy("ExecuteCommandLists could not be hooked", true);
+    }
+
+    hook->set_execute_observer(&m_native_pair);
+    m_native_pair_engaged = true;
+
+    const d3d12::NativePairSnapshot::Sources sources{
+        .left = m_game_tex.texture,
+        .right = m_scene_capture_tex.texture,
+        .right_generation = m_scene_capture_generation,
+        .eye_width = eye_width,
+        .eye_height = eye_height,
+        .right_width = m_scene_capture_width,
+        .right_height = m_scene_capture_height,
+    };
+
+    const char* reason = nullptr;
+    if (!m_native_pair.configure(device, *target_desc, sources, &reason)) {
+        return live_copy(reason != nullptr ? reason : "the pair snapshot could not be configured", true);
+    }
+
+    // Up to the live copy's own reuse window: past that, the engine's submissions are not being observed.
+    auto lease = m_native_pair.acquire(std::chrono::milliseconds(500), &reason);
+    if (!lease) {
+        return live_copy(reason != nullptr ? reason : "no frozen eye pair", false);
+    }
+
+    if (!m_native_pair_in_use) {
+        const auto engine_queue = lease->queue;
+        // Rate-limited: refusals (a stale pair, a capture change) can switch back and forth.
+        SPDLOG_INFO_EVERY_N_SEC(10,
+            "[NativeStereoFix][D3D12] Submitting eye pairs frozen at engine frame boundaries (frame={} slot={}); "
+            "engine queue {:x} '{}', Present queue {:x} '{}'{}",
+            lease->frame,
+            lease->slot,
+            (uintptr_t)engine_queue,
+            d3d12::NativePairSnapshot::debug_name(engine_queue),
+            (uintptr_t)queue,
+            d3d12::NativePairSnapshot::debug_name(queue),
+            engine_queue == queue ? " (same queue)" : " (cross-queue GPU wait)");
+        m_native_pair_in_use = true;
+    }
+
+    if (lease->fence_value != m_native_pair_last_value) {
+        const auto stats = m_native_pair.stats();
+        SPDLOG_INFO_EVERY_N_SEC(5,
+            "[NativeStereoFix][D3D12] Pair snapshot frame={} slot={}; present passes since last={} "
+            "(snapshots={} busy_skips={} source_skips={} missed_arms={} expired_arms={} other_queue_skips={} failures={} "
+            "passes_with_next_pending={} stale_refusals={})",
+            lease->frame, lease->slot, m_native_pair_passes, stats.snapshots, stats.skipped_busy, stats.skipped_sources,
+            stats.missed_arms, stats.expired_arms, stats.other_queue_skips, stats.failures, stats.pending_at_acquire,
+            stats.stale);
+        m_native_pair_last_value = lease->fence_value;
+        m_native_pair_passes = 0;
+    }
+
+    ++m_native_pair_passes;
+    return lease;
+}
+
 void D3D12Component::on_reset(VR* vr, bool mono_retired) {
     if (vr->mono_generation() != 0 && !mono_retired) {
         m_force_reset = true;
@@ -6286,6 +6487,10 @@ void D3D12Component::on_reset(VR* vr, bool mono_retired) {
     if (runtime->is_openxr() && runtime->loaded) {
         m_openxr.wait_for_all_copies();
     }
+
+    // The frozen Native Fix pairs reference the same sources (and were sized for the old swapchain).
+    m_native_pair.retire();
+    m_native_pair_in_use = false;
 
     for (auto& ctx : m_openvr.left_eye_tex) {
         ctx.reset();
@@ -7650,7 +7855,10 @@ bool D3D12Component::OpenXR::copy(
 
         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait_info.timeout = XR_INFINITE_DURATION;
+        // VR_PerfLog: waiting for the runtime to release the image is blocked time, not UEVR's own cost.
+        const auto perf_wait_start = uevr::perf::now_ns();
         result = xrWaitSwapchainImage(swapchain.handle, &wait_info);
+        uevr::perf::note_blocked(uevr::perf::now_ns() - perf_wait_start);
 
         if (result != XR_SUCCESS) {
             spdlog::error("[VR] xrWaitSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));
@@ -7736,10 +7944,7 @@ bool D3D12Component::OpenXR::copy(
 
         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait_info.timeout = XR_INFINITE_DURATION;
-        // VR_PerfLog: waiting for the runtime to release the image is blocked time, not UEVR's own cost.
-        const auto perf_wait_start = uevr::perf::now_ns();
         result = xrWaitSwapchainImage(swapchain.handle, &wait_info);
-        uevr::perf::note_blocked(uevr::perf::now_ns() - perf_wait_start);
 
         if (result != XR_SUCCESS) {
             spdlog::error("[VR] xrWaitSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));

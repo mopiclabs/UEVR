@@ -703,7 +703,11 @@ void CommandContext::execute() {
         const auto execute_start = profile_fence
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        command_queue->ExecuteCommandLists(1, cmd_lists);
+        {
+            // UEVR's own submission: the Native Stereo Fix pair snapshot must not take it for the engine's.
+            D3D12Hook::InternalExecuteScope internal_execute{};
+            command_queue->ExecuteCommandLists(1, cmd_lists);
+        }
         const auto next_fence_value = this->fence_value + 1;
         const auto signal_result = command_queue->Signal(this->fence.Get(), next_fence_value);
         if (FAILED(signal_result)) {
