@@ -11,6 +11,7 @@
 - `analysis\eyesampler.py`: whether both eyes on the Mopic display change together, and one-eye black frames
   (monado-service in `MOPIC_MODE=sbs`; see "Each eye").
 - `analysis\`: also scripts for the hang dumps the harness writes.
+- `plans\hogwarts-fg-nsf.ps1`: Hogwarts Legacy's frame generation x Native Stereo Fix A/B with the eye sampler.
 
 Setup (Python 3.10+), in `tools\mopic-test`:
 
@@ -391,6 +392,12 @@ can be stale. Check the top system function before concluding a thread is blocke
   Steam Cloud syncs that folder (`steam_autocloud.vdf` in it): the game's copy with the run's value can reach the
   cloud when it quits, before the harness puts the original back; whether Steam ever brings it back down is
   untested, so check the setting a run quit with (`<run>\game-settings\GameUserSettings.after.ini`).
+  `recipes\Hogwarts-eyes.json` (not run yet) is the Hogwarts route with a steady camera turn and two field guide
+  toggles for the eye sampler (each toggle measured from the Esc press for 3 s, without the pilot's captures);
+  `plans\hogwarts-fg-nsf.ps1` runs it XeFG on / off x Native Stereo Fix on / off (`-DryRun` prints the harness
+  commands; read its header before running it). Its table shows per run the frame generation setting the game quit
+  with (MISMATCH when it isn't the arm's) and UEVR's Present passes per VR frame (about 2 while XeFG generates
+  frames, if UEVR's hook sees them), so an fg-off arm that wasn't off shows.
 - Black Myth: Wukong: mouse-driven menus that highlight under the mouse (the recipe hovers first). The first start
   after an update compiles shaders for about a minute. Title > 게임 계속하기 (never 새 게임) > shrine > walk (never E
   there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인. A config saved by this line can have
