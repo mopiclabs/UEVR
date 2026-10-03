@@ -14364,6 +14364,31 @@ void VR::update_perf_state() {
     perf::set_enabled(true);
 }
 
+// VR_SubmitOncePerEngineFrame: frame generation (XeFG, DLSS-G, FSR FI) presents 2-4 times per engine frame. UEVR copies
+// the engine's own eye targets, so the extra passes only re-copied the same frame and ran another xrWaitFrame /
+// xrBeginFrame / xrEndFrame (Hogwarts Legacy XeFG X2: 2.00 Presents per engine frame, half of all submits repeats). A
+// pass with no new engine frame since the last one is skipped while the engine is producing frames (it moved in the last
+// 250 ms); when the engine stalls (loading, menus that stop rendering) the repeats submit as before, so the runtime keeps
+// getting frames. Not in AFR, where the second pass of a frame is the other eye.
+bool VR::should_skip_duplicate_present(VRRuntime* runtime) {
+    if (!is_submit_once_per_engine_frame_enabled() || runtime == nullptr || !runtime->is_openxr() || is_using_afr()) {
+        return false;
+    }
+
+    if (!runtime->got_first_sync || m_render_frame_count <= 0 || m_frame_count != m_render_frame_count) {
+        return false;
+    }
+
+    if (std::chrono::steady_clock::now() - m_last_engine_frame_advance > std::chrono::milliseconds{250}) {
+        return false;
+    }
+
+    ++m_skipped_duplicate_presents;
+    SPDLOG_INFO_ONCE("[VR] Skipping Present passes without a new engine frame (frame generation); VR_SubmitOncePerEngineFrame");
+    SPDLOG_INFO_EVERY_N_SEC(30, "[VR] Present passes skipped without a new engine frame: {}", m_skipped_duplicate_presents);
+    return true;
+}
+
 void VR::on_present() {
     ZoneScopedN(__FUNCTION__);
 
@@ -14379,6 +14404,12 @@ void VR::on_present() {
     }};
 
     m_frame_count = get_runtime()->internal_render_frame_count;
+    m_skipped_duplicate_present = false;
+
+    if (m_frame_count != m_last_advanced_frame_count) {
+        m_last_advanced_frame_count = m_frame_count;
+        m_last_engine_frame_advance = std::chrono::steady_clock::now();
+    }
 
     if (!is_using_afr() || m_render_frame_count % 2 == m_left_eye_interval) {
         ResetEvent(m_present_finished_event);
@@ -14444,6 +14475,11 @@ void VR::on_present() {
 
     // Ended while this Present waited for the lock (end_openxr_session_for_exit holds it).
     if (runtime->is_openxr() && m_openxr->session_ended_for_exit) {
+        return;
+    }
+
+    if (should_skip_duplicate_present(runtime)) {
+        m_skipped_duplicate_present = true;
         return;
     }
 
@@ -14577,6 +14613,12 @@ void VR::on_post_present() {
         m_d3d11.on_post_present(this);
     } else {
         m_d3d12.on_post_present(this);
+    }
+
+    // A frame-generation extra (VR_SubmitOncePerEngineFrame): on_present began and submitted nothing, so no xrWaitFrame
+    // either; xrWaitFrame / xrBeginFrame / xrEndFrame stay paired across the skipped pass.
+    if (m_skipped_duplicate_present) {
+        return;
     }
 
     bool native_openxr_async_wait_requested = false;
@@ -15135,6 +15177,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "
                 "Native Stereo Fix is on, and puts it back when the fix is off. Generated frames never reach the headset, "
                 "and their extra Presents between the two eye renders make the right eye show the previous frame.");
+            m_submit_once_per_engine_frame->draw("Submit Once per Engine Frame");
+            ImGui::TextWrapped(
+                "Default on. Skips the VR work of Present calls that carry no new engine frame (frame generation) while "
+                "the game is rendering; when it stalls, the last frame is still re-submitted.");
             m_native_stereo_fix_pair_snapshot->draw("Freeze Eye Pair per Engine Frame (D3D12)");
             ImGui::TextWrapped(
                 "Experimental, default off (hung Hogwarts Legacy with XeSS frame generation). Copies both eyes once per "

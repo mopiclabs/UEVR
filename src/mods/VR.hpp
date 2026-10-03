@@ -727,6 +727,11 @@ public:
         return m_native_stereo_fix_disable_frame_generation->value() && is_native_stereo_fix_enabled();
     }
 
+    // VR_SubmitOncePerEngineFrame (default on): see should_skip_duplicate_present().
+    bool is_submit_once_per_engine_frame_enabled() const {
+        return m_submit_once_per_engine_frame->value();
+    }
+
     // Render-submission thread, from the frame's pose callback once both eye families are recorded.
     void arm_native_pair_snapshot(uint32_t frame_count) {
         if (is_native_stereo_fix_pair_snapshot_enabled()) {
@@ -1867,6 +1872,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
     const ModToggle::Ptr m_native_stereo_fix_disable_frame_generation{ ModToggle::create(generate_name("NativeStereoFixDisableFrameGeneration"), true) };
+    const ModToggle::Ptr m_submit_once_per_engine_frame{ ModToggle::create(generate_name("SubmitOncePerEngineFrame"), true) };
 
     const ModSlider::Ptr m_custom_z_near{ ModSlider::create(generate_name("CustomZNear"), 0.001f, 100.0f, 0.01f, true) };
     const ModToggle::Ptr m_custom_z_near_enabled{ ModToggle::create(generate_name("EnableCustomZNear"), false, true) };
@@ -2344,6 +2350,7 @@ public:
             *m_native_stereo_fix_async_openxr_wait,
             *m_native_stereo_fix_pair_snapshot,
             *m_native_stereo_fix_disable_frame_generation,
+            *m_submit_once_per_engine_frame,
             *m_splitscreen_compatibility_mode,
             *m_splitscreen_view_index,
             *m_compatibility_skip_pip,
@@ -2745,6 +2752,14 @@ private:
     int m_frame_count{};
     int m_render_frame_count{};
     int m_last_frame_count{-1};
+
+    // VR_SubmitOncePerEngineFrame: this Present pass skipped the VR work (should_skip_duplicate_present), and when the
+    // engine frame counter last moved.
+    bool should_skip_duplicate_present(VRRuntime* runtime);
+    bool m_skipped_duplicate_present{false};
+    uint64_t m_skipped_duplicate_presents{0};
+    int m_last_advanced_frame_count{-1};
+    std::chrono::steady_clock::time_point m_last_engine_frame_advance{};
     int m_left_eye_frame_count{0};
     int m_right_eye_frame_count{0};
 
