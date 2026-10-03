@@ -1,0 +1,63 @@
+{
+  "draft": true,
+  "process": "PagodaSteamDemo-Win64-Shipping",
+  "source": "window",
+  "max_width": 1280,
+  "game": "DeadAsDisco",
+  "images": "DeadAsDisco",
+  "config": {"FrameworkConfig_RememberMenuState": "true", "FrameworkConfig_MenuOpen": "false"},
+  "notes": "DRAFT, never run past the stage hub. The demo's story mission against the Idol Hemlock (the subway, the underground concert, enemy waves, the boss and his cutscenes); clearing it unlocks Hemlock's skill tab (Bass Invader). The stage hub (Level_LevelSelect_Standalone, run discover n11.png) shows two tiles, THE ENCORE (left, about (320, 450)) and HEMLOCK (right, about (840, 490)); Enter on the hub opens Infinite Disco, so HEMLOCK is clicked. mopic_demo1's PagodaPlayHistorySaveGame.sav lists only MainMenu, LevelSelect and Practice, so Hemlock was never started: it begins at its start. Combat keys: LMB attack, RMB counter, Space dodge, E finisher, F takedown, T dance move, R drumstick toss, hold LShift fever rush, W/A/S/D move. The play runs until end_cp (default: the Free Play RESULT menu, which the mission's end screen may share; TODO) or mission_timeout.",
+  "vars": {"end_cp": "result", "mission_timeout": 1800, "load_wait_s": 8},
+  "todo": [
+    "Discovery: what a click on the HEMLOCK tile opens (briefing / difficulty / start button / straight into loading).",
+    "The mission's end screen (hemlock_result) and its 'stage select' item; set end_cp to it.",
+    "Death: what the fail screen offers (retry / checkpoint / stage select) and whether the random keys (LMB clicks) pick retry; record it so the run can retry on purpose.",
+    "Cutscenes: whether keys skip them (they should play; if LMB skips, use play steps with movement only during cutscenes or accept skipping).",
+    "Pause menu (Esc) and its 'back to stage select' item, for leaving early with play_s instead of finishing."
+  ],
+  "todo_checkpoints": {
+    "hemlock_briefing": {"region_guess": null, "what": "screen after clicking the HEMLOCK tile"},
+    "hemlock_result": {"region_guess": [60, 365, 250, 250], "what": "mission end screen menu"},
+    "hemlock_failed": {"region_guess": null, "what": "death / fail screen"},
+    "pause_menu": {"region_guess": null, "what": "in-mission pause menu"}
+  },
+  "checkpoints": {
+    "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
+    "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
+    "result": {"image": "result.png", "region": [60, 365, 250, 250], "threshold": 0.8},
+    "exit_screen": {"image": "exit_screen.png", "region": [30, 540, 300, 120], "threshold": 0.8}
+  },
+  "steps": [
+    {"phase": "boot"},
+    {"wait_for": "main_menu", "timeout": 300},
+    {"phase": "enter"},
+    {"click": [230, 80]},
+    {"wait_for": "stage_select", "timeout": 60, "click": [230, 80], "every": 8},
+    {"wait": 2},
+    {"note": "HEMLOCK tile (right); hover first, then click (TODO: one click or two)"},
+    {"move": [840, 490]},
+    {"wait": 1},
+    {"click": [840, 490]},
+    {"wait": 4},
+    {"shot": "hemlock-entry"},
+    {"note": "TODO: a briefing / start button would be clicked here"},
+    {"wait_gone": "stage_select", "timeout": 60, "for": 3},
+    {"wait": "${load_wait_s}"},
+    {"phase": "play"},
+    {"move": [640, 400]},
+    {"play_until": "${end_cp}", "keys": "lmb lmb lmb lmb rmb rmb space e f t r w a s d", "every": 0.3, "hold": 110, "timeout": "${mission_timeout}"},
+    {"shot": "hemlock-end"},
+    {"phase": "leave"},
+    {"note": "TODO: 'Stage Select' on the mission end screen; (165, 443) is its place on the Free Play RESULT menu"},
+    {"click": [165, 443]},
+    {"wait_for": "stage_select", "timeout": 60, "click": [165, 443], "every": 8},
+    {"wait": 1},
+    {"key": "esc"},
+    {"wait_for": "main_menu", "timeout": 30, "press": "esc", "every": 8},
+    {"click": [180, 370]},
+    {"wait_for": "exit_screen", "timeout": 20},
+    {"phase": "exit"},
+    {"click": [100, 633]},
+    {"expect_exit": 60}
+  ]
+}

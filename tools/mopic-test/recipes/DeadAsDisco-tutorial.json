@@ -1,0 +1,53 @@
+{
+  "draft": true,
+  "process": "PagodaSteamDemo-Win64-Shipping",
+  "source": "window",
+  "max_width": 1280,
+  "game": "DeadAsDisco",
+  "images": "DeadAsDisco",
+  "config": {"FrameworkConfig_RememberMenuState": "true", "FrameworkConfig_MenuOpen": "false"},
+  "notes": "DRAFT, never run. The tutorial (Beat Kune Do basics) through main menu NEW GAME (about (180, 148)). NEW GAME probably starts slot 0 over (PagodaDemoPT_M_0.sav, PagodaDemoGP_Main.sav, FTUE.sav: Fans, unlocks and the Hemlock clear are lost; the user allowed overwriting their saves, and runs\\save-sets\\deadasdisco\\own\\20261002-baseline holds all 8 files to copy back with the game closed). Steam Cloud stays on, so the reset is uploaded; the folder is shared by every Steam account on this PC. Run it last in the ladder. The tutorial asks for specific actions on the beat (attack, counter, dodge, finisher, takedown); the random combat keys get through them sooner or later.",
+  "vars": {"tutorial_timeout": 1500},
+  "todo": [
+    "What NEW GAME asks first: an overwrite confirmation, a slot picker (the full game has 3 slots), the Streamer Safe Mode question (FTUE; click OFF).",
+    "A tutorial HUD or prompt element and the tutorial's end (where it leads: Hemlock, the stage hub, a cutscene).",
+    "Whether the tutorial can be replayed without NEW GAME (then this recipe should use that instead)."
+  ],
+  "todo_checkpoints": {
+    "newgame_confirm": {"region_guess": null, "what": "overwrite / slot confirmation"},
+    "newgame_confirm_yes": {"region_guess": null, "what": "its confirm button (position for a click)"},
+    "streamer_safe": {"region_guess": null, "what": "Streamer Safe Mode question (click OFF)"},
+    "tutorial_end": {"region_guess": null, "what": "the screen the tutorial ends on"}
+  },
+  "checkpoints": {
+    "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
+    "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
+    "exit_screen": {"image": "exit_screen.png", "region": [30, 540, 300, 120], "threshold": 0.8}
+  },
+  "steps": [
+    {"phase": "boot"},
+    {"wait_for": "main_menu", "timeout": 300},
+    {"phase": "enter"},
+    {"click": [180, 148]},
+    {"wait": 3},
+    {"shot": "newgame"},
+    {"wait_for": ["newgame_confirm", "streamer_safe"], "timeout": 30},
+    {"note": "TODO: click the confirm button (newgame_confirm_yes position)"},
+    {"wait_gone": "main_menu", "timeout": 60, "for": 3},
+    {"wait": 10},
+    {"phase": "play"},
+    {"move": [640, 400]},
+    {"play_until": "tutorial_end", "keys": "lmb lmb lmb rmb rmb space e f t r w a s d", "every": 0.3, "hold": 110, "timeout": "${tutorial_timeout}"},
+    {"shot": "tutorial-end"},
+    {"phase": "leave"},
+    {"note": "TODO: from the tutorial's end to the main menu"},
+    {"wait_for": ["stage_select", "main_menu"], "timeout": 120, "press": "esc", "every": 8},
+    {"key": "esc", "if": "stage_select"},
+    {"wait_for": "main_menu", "timeout": 30, "press": "esc", "every": 8},
+    {"click": [180, 370]},
+    {"wait_for": "exit_screen", "timeout": 20},
+    {"phase": "exit"},
+    {"click": [100, 633]},
+    {"expect_exit": 60}
+  ]
+}

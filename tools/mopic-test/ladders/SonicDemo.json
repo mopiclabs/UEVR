@@ -1,0 +1,22 @@
+{
+  "draft": true,
+  "game": "SonicDemo",
+  "recipe": "SonicDemo-gp",
+  "requires": "Rungs have no \"save\": they play mopic_demo1's own progress (app.sav). Today's run-ladder.ps1 refuses that ('rung <name> has no save'); it needs the save-less rung change. Without it, pin each rung to the baseline: \"save\": \"runs\\\\save-sets\\\\sonicdemo\\\\own\\\\20261002-baseline\\\\76561199750818073\\\\app.sav\" (SonicDemo-gp.json has a save_slot for app.sav).",
+  "notes": [
+    "Sonic Racing CrossWorlds Demo build 21761499 (appid 3601140; updated 2026-09-30, auto-update on). Saves in %APPDATA%\\SEGA\\SonicRacingCrossWorldsDemo\\steam\\76561199750818073 (encrypted), Steam Cloud on for app/net/playlog.sav; demo progress carries over to the full game. Baseline copy: runs\\save-sets\\sonicdemo\\own\\20261002-baseline.",
+    "Playable demo content: Grand Prix cup 1 only (E-스타디움 > 레인보우 가든 > 워터 팰리스; lap 2 goes through a CrossWorld picked at the Travel Ring by the leader, so repeated cups show different ones of the 5), characters SONIC, TAILS, KNUCKLES, AMY, classes Normal / High / Sonic Speed (Super Sonic and Mirror locked), 15 machines incl. Extreme Gear, Time Trial (does not start in the recipes so far), Garage menus. Race Park and Online are locked.",
+    "Keyboard: Space accelerate (not W: W is the forward item throw), A/D steer, E or LShift drift, Q item, T gadget, C brake/back, F rear view (F on the hub = Steam store), Tab/Esc pause. UEVR does not take the keyboard away: its XInput hook reports a pad only after a VR motion controller was used (VR::on_xinput_get_state, is_using_controllers_within), which never happens on the Mopic display, and the menus show keyboard glyphs under UEVR.",
+    "Tiers: 1 = the whole cup with each of the 4 characters (High Speed, default machine), about 13-15 min each; 2 = the other two classes (run in this order: Sonic Speed then Normal, because the class cursor may be remembered); 3 = an Extreme Gear machine (vehicle select layout TODO).",
+    "Race end and cup end: a race ends when the next 'ROUND n' banner shows; the cup's end screen (gp_result) is not recorded yet, so every rung stops there (MENU_FAIL after the third race was played) until it is."
+  ],
+  "rungs": [
+    {"name": "gp-sonic", "tier": 1, "vars": {"char": "sonic", "char_right": 0}, "story_point": "Grand Prix cup 1, all 3 races, SONIC, High Speed"},
+    {"name": "gp-tails", "tier": 1, "vars": {"char": "tails", "char_right": 1}, "story_point": "Grand Prix cup 1, all 3 races, TAILS, High Speed"},
+    {"name": "gp-knuckles", "tier": 1, "vars": {"char": "knuckles", "char_right": 2}, "story_point": "Grand Prix cup 1, all 3 races, KNUCKLES, High Speed"},
+    {"name": "gp-amy", "tier": 1, "vars": {"char": "amy", "char_right": 3}, "story_point": "Grand Prix cup 1, all 3 races, AMY, High Speed"},
+    {"name": "gp-sonic-sonicspeed", "tier": 2, "vars": {"char": "sonic", "char_right": 0, "class": "sonic", "class_cp": "class_sonic_selected", "class_key": "right"}, "story_point": "Grand Prix cup 1 at Sonic Speed (needs the class_sonic_selected checkpoint)"},
+    {"name": "gp-tails-normal", "tier": 2, "vars": {"char": "tails", "char_right": 1, "class": "normal", "class_cp": "class_normal_selected", "class_key": "left"}, "story_point": "Grand Prix cup 1 at Normal Speed (needs class_normal_selected; leaves the class cursor on Normal, which the default rungs' seek to the right undoes)"},
+    {"name": "gp-amy-extremegear", "tier": 3, "vars": {"char": "amy", "char_right": 3, "vehicle_key": "down", "vehicle_moves": null}, "story_point": "Grand Prix cup 1 with an Extreme Gear machine (vehicle_moves TODO: the vehicle select layout is not recorded)"}
+  ]
+}
