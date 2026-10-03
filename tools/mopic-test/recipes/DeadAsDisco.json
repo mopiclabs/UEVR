@@ -7,6 +7,7 @@
   "notes": "Dead as Disco Demo (Steam 3763830, UE 5.7 custom branch). Mouse-driven menus, read from the desktop window (the Mopic display doubles the UI text). The very first start asks about Streamer Safe Mode (click OFF) before the main menu; a fresh install shows NEW GAME instead of CONTINUE. Route: CONTINUE > stage hub > Enter > FREE PLAY > first song (Maniac) > click again to play > play > Esc ends the song (RESULT) > Stage Select > Esc > EXIT GAME > EXIT GAME on the wishlist screen. Never click GET THE GAME!, GIVE FEEDBACK or SIGN UP (store/browser). With Native Stereo Fix active the desktop window shows the 3D scene behind the menus; checkpoints sit on opaque UI. A played song posts its score to the account's leaderboard.",
   "checkpoints": {
     "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
+    "file_slot_select": {"image": "file_slot_select.png", "region": [310, 80, 650, 65], "threshold": 0.8},
     "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
     "mode_select": {"image": "mode_select.png", "region": [488, 118, 290, 62], "threshold": 0.8},
     "song_select": {"image": "song_select.png", "region": [686, 36, 132, 28], "threshold": 0.8},
@@ -19,6 +20,9 @@
     {"wait_for": "main_menu", "timeout": 300},
     {"phase": "enter"},
     {"click": [230, 80]},
+    {"note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"},
+    {"wait": 3},
+    {"click": [270, 255], "if": "file_slot_select"},
     {"wait_for": "stage_select", "timeout": 60, "click": [230, 80], "every": 8},
     {"wait": 2},
     {"key": "enter"},

@@ -12,6 +12,7 @@
   "todo_checkpoints": {"skill_trees": {"region_guess": null, "what": "Skill Trees screen title"}, "encore_pause": {"region_guess": null, "what": "pause menu in The Encore"}, "encore_pause_leave_selected": {"region_guess": null, "what": "its 'stage select' / 'leave' item"}},
   "checkpoints": {
     "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
+    "file_slot_select": {"image": "file_slot_select.png", "region": [310, 80, 650, 65], "threshold": 0.8},
     "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
     "exit_screen": {"image": "exit_screen.png", "region": [30, 540, 300, 120], "threshold": 0.8},
     "skill_trees": {"image": "skill_trees.png", "region": [25, 15, 100, 55], "threshold": 0.8}
@@ -21,6 +22,9 @@
     {"wait_for": "main_menu", "timeout": 300},
     {"phase": "enter"},
     {"click": [230, 80]},
+    {"note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"},
+    {"wait": 3},
+    {"click": [270, 255], "if": "file_slot_select"},
     {"wait_for": "stage_select", "timeout": 60, "click": [230, 80], "every": 8},
     {"wait": 2},
     {"note": "Skill Trees: look only (nothing bought). THE ENCORE and HEMLOCK tiles start nothing on mopic_demo1 (clicks, Enter and Space tried 2026-10-04; they likely need NEW GAME's tutorial), so the rung stops at the skill screen"},
