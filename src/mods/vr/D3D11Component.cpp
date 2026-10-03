@@ -24,6 +24,7 @@ namespace pixel_shader1 {
 #include "../VR.hpp"
 
 #include "D3D11Component.hpp"
+#include "PerfLog.hpp"
 
 //#define VERBOSE_D3D11
 
@@ -1357,8 +1358,13 @@ vr::EVRCompositorError D3D11Component::on_frame(VR* vr) {
                         vr->set_mono_status("Waiting: Mono DX11 scene/device/format/extent validation failed");
                     }
                 } else if (native_stereo_packet == nullptr || !m_scene_capture_tex_ref.has_texture()) {
+                    // VR_PerfLog: the flat backbuffer goes to both eyes while the Native Stereo Fix is operating.
+                    if (vr->is_native_stereo_fix_enabled() && ffsr != nullptr && ffsr->is_native_stereo_fix_active()) {
+                        uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
+                    }
                     m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, backbuffer.Get(), nullptr);
                 } else {
+                    uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fresh);
                     // copy invokes this callback synchronously; the local packet
                     // and ticket remain owned by this submit invocation.
                     m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, nullptr, [&](ID3D11Texture2D* render_target) {
@@ -3393,7 +3399,10 @@ bool D3D11Component::OpenXR::copy(uint32_t swapchain_idx, ID3D11Texture2D* resou
         wait_info.timeout = XR_INFINITE_DURATION;
 
         LOG_VERBOSE("Waiting on swapchain image for {}", swapchain_idx);
+        // VR_PerfLog: waiting for the runtime to release the image is blocked time, not UEVR's own cost.
+        const auto perf_wait_start = uevr::perf::now_ns();
         result = xrWaitSwapchainImage(swapchain.handle, &wait_info);
+        uevr::perf::note_blocked(uevr::perf::now_ns() - perf_wait_start);
 
         if (result != XR_SUCCESS) {
             spdlog::error("[VR] xrWaitSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));

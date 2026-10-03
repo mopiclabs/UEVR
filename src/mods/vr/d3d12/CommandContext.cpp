@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "Framework.hpp"
+#include "mods/vr/PerfLog.hpp"
 #include "render/D3D12Diagnostics.hpp"
 
 #include "TextureContext.hpp"
@@ -310,8 +311,12 @@ bool CommandContext::wait(uint32_t ms) {
             const auto wait_duration = std::chrono::steady_clock::now() - wait_start;
             const auto completed_after = this->fence->GetCompletedValue();
             record_fence_wait(wait_duration, ms, wait_result, this->fence_value, completed_before, completed_after, this->internal_name);
+            uevr::perf::note_fence_wait(std::chrono::duration_cast<std::chrono::nanoseconds>(wait_duration).count());
         } else {
+            // VR_PerfLog: blocked on the GPU, kept out of UEVR's own render-thread cost.
+            const auto perf_wait_start = uevr::perf::now_ns();
             wait_result = WaitForSingleObject(this->fence_event, ms);
+            uevr::perf::note_fence_wait(uevr::perf::now_ns() - perf_wait_start);
         }
     }
 

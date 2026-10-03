@@ -53,6 +53,7 @@
 #include "UObjectHook.hpp"
 #include "GameSpecific.hpp"
 #include "vr/KtjLOpenXRFactory.hpp"
+#include "vr/PerfLog.hpp"
 
 namespace {
 bool is_stalker2_executable_cached();
@@ -70,6 +71,8 @@ VR::~VR() {
     restore_1666amsterdam_native_postprocess_cvars();
     restore_daysgone_gbuffer_cvar();
     stop_hitch_snapshot_writer();
+    uevr::perf::set_enabled(false);
+    uevr::perf::stop();
 }
 
 bool VR::on_openxr_resolution_scale_changed(
@@ -4407,11 +4410,16 @@ std::optional<std::string> VR::initialize_openxr() {
                     spdlog::info("[VR] Found OpenXR extension: {}", extension_property.extensionName);
                 }
 
-                const std::unordered_set<std::string> wanted_extensions {
+                std::unordered_set<std::string> wanted_extensions {
                     XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
                     XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
                     // To be seen if we need more!
                 };
+
+                // Only converts timestamps, so the perf log (VR_PerfLog) can map XrTime onto QPC time. Changes nothing else.
+                if (m_perf_log->value()) {
+                    wanted_extensions.insert(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+                }
 
                 for (const auto& extension_property : extension_properties) {
                     if (wanted_extensions.contains(extension_property.extensionName)) {
@@ -4491,7 +4499,17 @@ std::optional<std::string> VR::initialize_openxr() {
     } else {
         spdlog::info("[VR] Found existing openxr instance");
     }
-    
+
+    if (m_openxr->convert_win32_performance_counter_to_time == nullptr &&
+        m_openxr->enabled_extensions.contains(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME))
+    {
+        PFN_xrVoidFunction fn{nullptr};
+
+        if (xrGetInstanceProcAddr(m_openxr->instance, "xrConvertWin32PerformanceCounterToTimeKHR", &fn) == XR_SUCCESS && fn != nullptr) {
+            m_openxr->convert_win32_performance_counter_to_time = (PFN_xrConvertWin32PerformanceCounterToTimeKHR)fn;
+        }
+    }
+
     // Step 2: Create a system
     spdlog::info("[VR] Creating OpenXR system");
 
@@ -14253,10 +14271,90 @@ void VR::on_frame() {
     }
 }
 
+// Feeds PerfLog the mode flags its rows are tagged with and starts its writer (VR_PerfLog). Runs on every Present,
+// so the two checks that leave UEVR (loaded modules, foreground window) only run twice a second. Only reads state:
+// nothing here changes how a frame is rendered or paced.
+void VR::update_perf_state() {
+    namespace perf = uevr::perf;
+
+    if (!m_perf_log->value()) {
+        perf::set_enabled(false);
+        return;
+    }
+
+    // Once per session. If the files can't be created the counters stay off rather than retrying every Present.
+    if (!m_perf_log_start_attempted) {
+        m_perf_log_start_attempted = true;
+        const auto dir = Framework::get_persistent_dir();
+
+        if (const auto error = perf::start(dir); error == 0) {
+            spdlog::info("[Perf] Writing perf.csv and perf-frames.csv next to log.txt, once per second (VR_PerfLog)");
+        } else {
+            spdlog::warn("[Perf] Could not create perf.csv / perf-frames.csv next to log.txt (error {}); no frame-rate log this session", error);
+        }
+    }
+
+    if (!perf::is_running()) {
+        perf::set_enabled(false);
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now - m_perf_slow_flags_time >= std::chrono::milliseconds(500)) {
+        m_perf_slow_flags_time = now;
+        m_perf_slow_flags = 0;
+
+        // DLSS Frame Generation stays as the game set it; this only records that it is loaded.
+        if (GetModuleHandleW(L"nvngx_dlssg.dll") != nullptr) {
+            m_perf_slow_flags |= perf::flag::DLSSG;
+        }
+
+        DWORD foreground_pid{};
+        if (const auto foreground = GetForegroundWindow(); foreground != nullptr &&
+            GetWindowThreadProcessId(foreground, &foreground_pid) != 0 &&
+            foreground_pid == GetCurrentProcessId())
+        {
+            m_perf_slow_flags |= perf::flag::FOREGROUND;
+        }
+    }
+
+    uint32_t flags = m_perf_slow_flags;
+    const auto set = [&flags](bool condition, uint32_t bit) {
+        if (condition) {
+            flags |= bit;
+        }
+    };
+
+    const auto& d3d12_hook = g_framework->get_d3d12_hook();
+    const auto runtime = get_runtime();
+
+    const auto synced = is_using_synchronized_afr();
+
+    set(is_using_afr(), perf::flag::AFR);
+    set(synced, perf::flag::SYNCED);
+    set(synced && get_synced_sequential_method() == SyncedSequentialMethod::SKIP_DRAW, perf::flag::SKIP_DRAW);
+    set(is_native_stereo_fix_enabled(), perf::flag::NSF);
+    set(m_fake_stereo_hook != nullptr && m_fake_stereo_hook->is_native_stereo_fix_active(), perf::flag::NSF_ACTIVE);
+    set(is_native_stereo_fix_texture_array_submit_enabled(), perf::flag::NSF_ARRAY);
+    set(is_native_openxr_async_wait_active(), perf::flag::ASYNC_WAIT);
+    set(g_framework->is_dx12(), perf::flag::D3D12);
+    set(g_framework->is_dx12() && d3d12_hook != nullptr && d3d12_hook->is_framegen_swapchain(), perf::flag::FRAMEGEN_SWAPCHAIN);
+    set(g_framework->is_drawing_ui(), perf::flag::MENU);
+    set(is_hmd_active(), perf::flag::HMD);
+    set(runtime != nullptr && runtime->is_openxr() && m_openxr->session_state == XR_SESSION_STATE_FOCUSED, perf::flag::FOCUSED);
+    set(is_using_mono(), perf::flag::MONO);
+
+    perf::set_state(perf::flag::pack(flags, static_cast<uint32_t>(get_synchronize_stage()),
+        static_cast<uint32_t>(m_rendering_method->value())));
+    perf::set_enabled(true);
+}
+
 void VR::on_present() {
     ZoneScopedN(__FUNCTION__);
 
     m_present_thread_id = GetCurrentThreadId();
+    update_perf_state();
 
     utility::ScopeGuard _guard {[&]() {
         if (!is_using_afr() || (m_render_frame_count + 1) % 2 == m_left_eye_interval) {
@@ -14405,6 +14503,9 @@ void VR::on_post_present() {
     ZoneScopedN(__FUNCTION__);
 
     const auto is_same_frame = m_render_frame_count > 0 && m_render_frame_count == m_frame_count;
+    if (is_same_frame) {
+        uevr::perf::note_duplicate_present();
+    }
 
     const auto completed_present_frame = m_frame_count;
     m_render_frame_count = completed_present_frame;
@@ -16246,6 +16347,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         } else {
             ImGui::TextWrapped("Hitch diagnostics are disabled. No hitch ring sampling, JSON dumps, or snapshot writer thread will run.");
         }
+        m_perf_log->draw("Write Frame-Rate Log (perf.csv)");
+        ImGui::TextWrapped("Writes the VR frame rate (new engine frames submitted per second) and its timing to perf.csv and perf-frames.csv next to log.txt, once per second. Turning it on mid-session takes effect at once; mapping the runtime's display times onto the PC clock needs it on at launch.");
 
         const double min_ = 0.0;
         const double max_ = 25.0;

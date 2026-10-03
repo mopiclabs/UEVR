@@ -237,6 +237,17 @@ add_test(NAME input-hook-installation-tests COMMAND input-hook-installation-test
 set_tests_properties(input-hook-installation-tests PROPERTIES TIMEOUT 60)
 """
 
+[target.perf-log-tests]
+condition = "compatibility-policy-tests"
+type = "executable"
+sources = ["tests/PerfLogTests.cpp", "src/mods/vr/PerfLog.cpp"]
+include-directories = ["src/"]
+compile-features = ["cxx_std_23"]
+cmake-after = """
+add_test(NAME perf-log-tests COMMAND perf-log-tests)
+set_tests_properties(perf-log-tests PROPERTIES TIMEOUT 60)
+"""
+
 [target.mono-d3d11-tests]
 condition = "compatibility-policy-tests"
 type = "executable"

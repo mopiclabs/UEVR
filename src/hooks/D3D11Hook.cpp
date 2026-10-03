@@ -13,6 +13,7 @@
 
 #include "WindowFilter.hpp"
 #include "Framework.hpp"
+#include "mods/vr/PerfLog.hpp"
 #include "render/ShaderOverrideRegistry.hpp"
 
 #include "D3D11Hook.hpp"
@@ -703,6 +704,9 @@ HRESULT WINAPI D3D11Hook::present(IDXGISwapChain* swap_chain, UINT sync_interval
         return last_d3d11_present_result;
     }
 
+    // VR_PerfLog: the original Present call, and UEVR's own work around it (on_present/on_post_present).
+    uevr::perf::PresentTimer perf_present{};
+
     if (d3d11->m_on_present) {
         d3d11->m_on_present(*d3d11);
 
@@ -726,7 +730,9 @@ HRESULT WINAPI D3D11Hook::present(IDXGISwapChain* swap_chain, UINT sync_interval
     g_inside_d3d11_present = true;
 
     if (!d3d11->m_ignore_next_present) {
+        perf_present.begin_present();
         result = present_fn(swap_chain, sync_interval, flags);
+        perf_present.end_present();
         last_d3d11_present_result = result;
     } else {
         d3d11->m_ignore_next_present = false;
@@ -739,6 +745,7 @@ HRESULT WINAPI D3D11Hook::present(IDXGISwapChain* swap_chain, UINT sync_interval
         d3d11->m_on_post_present(*d3d11);
     }
 
+    perf_present.finish();
     d3d11->m_last_depthstencil_used.Reset();
     d3d11->m_inside_present = false;
 

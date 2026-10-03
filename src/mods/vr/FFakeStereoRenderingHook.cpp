@@ -92,6 +92,7 @@
 #include "KtjLMeshResourceHook.hpp"
 #include "KtjLHookContracts.hpp"
 #include "KtjLRendererEntry.hpp"
+#include "PerfLog.hpp"
 #include "SWZeroCompanyBinary.hpp"
 #include "utility/HiFiRushHookMemory.hpp"
 #include "utility/BoundedTextureDiagnostics.hpp"
@@ -13987,13 +13988,18 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
         return result;
     }
 
+    // VR_PerfLog: the original Tick, the queued game-thread jobs, and UEVR's own work around them.
+    uevr::perf::TickTimer perf_tick{};
+
     hook->attempt_hooking();
 
     // Best place to run game thread jobs.
+    perf_tick.begin_jobs();
     GameThreadWorker::get().execute();
     if (uevr::nascar::is_target()) {
         hook->service_nascar_synced_redraw(engine);
     }
+    perf_tick.end_jobs();
     if (is_validated_ue58_slate_ui_runtime() && is_ue58_dx12_backend()) {
         hook->get_render_target_manager()->service_ue58_ui_game_thread();
     }
@@ -14001,6 +14007,7 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
     if (hook->m_ignore_next_engine_tick) {
         hook->m_ignored_engine_delta = delta;
         hook->m_ignore_next_engine_tick = false;
+        perf_tick.finish_skipped();
         return nullptr;
     }
     
@@ -14021,6 +14028,7 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
 
     void* result = nullptr;
 
+    perf_tick.begin_tick();
     {
         if (hook->m_safe_tick_hook->value()) {
             result = (hook->m_nascar_tick.original_address() ? hook->m_nascar_tick.call<void*>(engine, delta, idle) : hook->m_tick_hook.call<void*>(engine, delta, idle));
@@ -14056,6 +14064,7 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
 #endif
         }
     }
+    perf_tick.end_tick();
 
     for (auto& mod : mods) {
         mod->on_post_engine_tick(engine, delta);
@@ -14065,6 +14074,7 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
         hook->m_tracking_system_hook->on_post_engine_tick(engine, delta);
     }
 
+    perf_tick.finish(delta);
     return result;
 }
 

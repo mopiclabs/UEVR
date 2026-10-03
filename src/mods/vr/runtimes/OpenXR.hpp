@@ -248,6 +248,10 @@ public:
 
     std::unordered_set<std::string> enabled_extensions{};
 
+    // XR_KHR_win32_convert_performance_counter_time, only so the perf log can map XrTime onto QPC time. Null when
+    // the runtime lacks it or VR_PerfLog was off when the instance was created.
+    PFN_xrConvertWin32PerformanceCounterToTimeKHR convert_win32_performance_counter_to_time{nullptr};
+
     std::vector<XrViewConfigurationView> view_configs{};
     std::unordered_map<uint32_t, Swapchain> swapchains{}; // SwapchainIndex -> Swapchain
     std::atomic_uint32_t cached_swapchain_count{};

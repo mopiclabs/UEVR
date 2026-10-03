@@ -36,6 +36,7 @@
 #include "D3D12Component.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "MonoD3D12.hpp"
+#include "PerfLog.hpp"
 
 //#define AFR_DEPTH_TEMP_DISABLED
 
@@ -5081,6 +5082,10 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         native_left_source_fits &&
                         m_last_native_capture_submit.time_since_epoch().count() != 0 &&
                         std::chrono::steady_clock::now() - m_last_native_capture_submit < std::chrono::milliseconds(500);
+                    // VR_PerfLog: whether a Native Stereo Fix submit carries this frame's right eye.
+                    const bool native_stereo_fix_live =
+                        vr->is_native_stereo_fix_enabled() &&
+                        native_stereo_hook != nullptr && native_stereo_hook->is_native_stereo_fix_active();
 
                     if (vr->is_using_mono()) {
                         bool recorded = false;
@@ -5132,6 +5137,8 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                             native_stereo_packet != nullptr &&
                             m_scene_capture_tex.texture.Get() != nullptr &&
                             m_game_tex.texture.Get() != nullptr;
+                        uevr::perf::note_native_stereo(using_native_scene_capture ? uevr::perf::NativeStereo::Fresh
+                            : native_stereo_fix_live ? uevr::perf::NativeStereo::Fallback : uevr::perf::NativeStereo::None);
 
                         if (using_native_scene_capture) {
                             left_source = m_game_tex.texture;
@@ -5195,13 +5202,18 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                             nullptr);
                     } else if (reuse_last_native_capture && !shf_using_mono_expansion && !dune_using_hmd_mono_expansion) {
                         SPDLOG_INFO_EVERY_N_SEC(5, "[NativeStereoFix][D3D12] No right-eye packet this frame, reusing the last right-eye capture");
+                        uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Reused);
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, pre_render_cached, std::nullopt, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
                     } else if (native_stereo_packet == nullptr ||
                                m_scene_capture_tex.texture.Get() == nullptr ||
                                shf_using_mono_expansion ||
                                dune_using_hmd_mono_expansion) {
+                        if (native_stereo_fix_live) {
+                            uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
+                        }
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, backbuffer.Get(), scene_source_state, nullptr);
                     } else {
+                        uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fresh);
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, pre_render, std::nullopt, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
                         m_last_native_capture_submit = std::chrono::steady_clock::now();
                     }
@@ -7709,7 +7721,10 @@ bool D3D12Component::OpenXR::copy(
 
         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait_info.timeout = XR_INFINITE_DURATION;
+        // VR_PerfLog: waiting for the runtime to release the image is blocked time, not UEVR's own cost.
+        const auto perf_wait_start = uevr::perf::now_ns();
         result = xrWaitSwapchainImage(swapchain.handle, &wait_info);
+        uevr::perf::note_blocked(uevr::perf::now_ns() - perf_wait_start);
 
         if (result != XR_SUCCESS) {
             spdlog::error("[VR] xrWaitSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));
