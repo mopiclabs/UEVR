@@ -12,7 +12,7 @@
     "Tiers: 1 = Hemlock and each of the 11 songs (about 4 min per song rung: play_s 90 + 20 s of movement); 2 = Encore / Skill Trees, Infinite mode, the 3 other arena pages, the tutorial."
   ],
   "rungs": [
-    {"name": "hemlock", "recipe": "DeadAsDisco-hemlock", "tier": 1, "story_point": "Story mission vs the Idol Hemlock, start to end (subway, concert stage, waves, boss)"},
+    {"name": "hemlock", "recipe": "DeadAsDisco-hemlock", "tier": 1, "status": "UNPROVEN (2026-10-03): on the stage hub Right focuses the HEMLOCK tile (hemlock_focused), but Enter, Space, a click and a double click on it start nothing; the mission may need NEW GAME's tutorial first, which would replace mopic_demo1's progress, so it was not tried.", "story_point": "Story mission vs the Idol Hemlock, start to end (subway, concert stage, waves, boss)"},
     {"name": "song-01-maniac", "tier": 1, "vars": {"song": "maniac", "row": 1, "row_y": 95}, "story_point": "Free Play: Maniac (Radio Edit) - Hemlock, 165 BPM"},
     {"name": "song-02-echolokators", "tier": 1, "vars": {"song": "echolokators", "row": 2, "row_y": 148}, "story_point": "Free Play: Echolokators (Radio Edit) - Deckard Voltair, 152 BPM"},
     {"name": "song-03-mission", "tier": 1, "vars": {"song": "mission", "row": 3, "row_y": 202}, "story_point": "Free Play: Mission (Radio Edit) - Prophet, 155 BPM"},
