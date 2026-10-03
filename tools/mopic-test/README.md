@@ -6,7 +6,9 @@
 - `gamepilot.py`: looks at the screen and sends keyboard/mouse input, so a run can go from the title screen into
   real gameplay and quit through the game's own menu (where exit crashes and hangs show up).
 - `recipes\<Game>.json` (+ checkpoint images in `recipes\<Game>\`): a recorded route through a game's menus.
-- `analysis\`: scripts for the hang dumps the harness writes.
+- `perfreport.py`: the frame rate of a run (VR fps, lows, hitches, pacing, frame generation), cut to the gameplay the
+  pilot measured (see "Frame rate").
+- `analysis\`: also scripts for the hang dumps the harness writes.
 
 Setup (Python 3.10+), in `tools\mopic-test`:
 
@@ -42,16 +44,21 @@ powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game <pr
 | `-SaveFile <path> [-SaveAs <name>]` | before each run, copy this save over the file the recipe's `save_slot` names (`-SaveAs`: another file name in that folder), stamped with the current time so Steam Cloud keeps it. The file there before goes to `<run>\save-before\`, the file after the run (also after a crash or a hang) to `<run>\save-after\`; source, sha256 and target are in result.json / summary.txt. Nothing in the save folder is deleted. A relative path is tried from the current folder, then from `tools\mopic-test`. A failed install makes that run `HARNESS_ERROR` without launching the game. |
 | `-SaveSlot <file>` | with `-SaveFile`: the file it replaces, with `save_slot`'s placeholders (`"{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"`), instead of the recipe's `save_slot`; also works without a recipe (discovery with `-WaitForExit`) |
 | `-RecipeVars "k=v;k2=v2"` | values for the recipe's `vars` (`${k}` in its steps; gamepilot `run --var k=v`). A name the recipe doesn't declare, or a declared var without a default that isn't given, stops the harness before the first run. Values can't contain `;`. |
+| `-NoPerf` | no frame-rate measurement (see "Frame rate"): no nvidia-smi / PresentMon, no `VR_PerfLog` override, no perf.json |
+| `-PresentMon auto` / `off` | `auto` (default): also capture the game's Presents with the PresentMon console app when it is installed and allowed |
 | `-Runs <n>`, `-Label <text>`, `-KeepGame`, `-Screenshot` | |
 
 `run-matrix.ps1 -Runs 3 [-Dll <path>] [-Games A,B] [-NoInject]` runs every recipe (or the given games) through the
-harness and writes one table to `runs\matrix-<time>-uevr.md` / `-vanilla.md` (+ `.json`).
+harness and writes one table to `runs\matrix-<time>-uevr.md` / `-vanilla.md` (+ `.json`), with each run's frame
+rate (VR fps, or flat fps for `-NoInject`), 1% low and hitches, and per game the median of its runs. An injected
+run without UEVR's frame log (an engine without `VR_PerfLog`) shows `(Present <fps>)`, the game's own Present rate,
+which is not a VR frame rate (2 Presents per VR frame in AFR) and is left out of the median.
 
 `run-ladder.ps1 -Game Wukong [-Tier 1] [-Only a,b] [-From name] [-Runs 1] [-EngineDir <dir>] [-Label ladder] [-StopOn HARNESS_ERROR,NO_VR] [-DryRun]`
 runs a save ladder: one harness run per rung of `ladders\<Game>.json`, each from its own save, and writes
 `runs\ladder-<time>-<Game>.md` (+ `.json`, rewritten after every rung: verdict, harness and game exit codes,
-`[NativeStereoFix] state=active` count in log.txt, save-after size, screens reached; `.log`: everything the harness
-printed). Before the first launch it checks every selected rung: its save (and its `sha256`, when the rung has
+`[NativeStereoFix] state=active` count in log.txt, save-after size, screens reached, VR fps / 1% low / hitches;
+`.log`: everything the harness printed). Before the first launch it checks every selected rung: its save (and its `sha256`, when the rung has
 one), its recipe (exists, has a `save_slot`, declares the rung's vars, gets every var it has no default for). It
 stops after a rung that ended `HARNESS_ERROR` or `NO_VR` (the runs after it wouldn't be valid tests; `-StopOn`
 sets the list). A rung whose harness wrote no result.json is a `HARNESS_ERROR` row with the harness's error
@@ -90,6 +97,72 @@ Verdicts:
 
 .NET's `Process.HasExited` is true as soon as the exit code is set, which is before DLL shutdown; the harness waits
 for the process handle so exits stuck in shutdown are caught (that's how UEVR's exit hang was found).
+
+## Frame rate
+
+Every run that got the game started (unless `-NoPerf`) is measured. It never changes a verdict. The numbers come
+from these sources, all timed in QueryPerformanceCounter ns ("QPC ns": Python's `time.perf_counter_ns()`, MSVC's
+`steady_clock`, monado's `os_monotonic_get_ns()`), so they can be cut to the same seconds of gameplay:
+
+| Source | In the run folder | What it gives |
+| --- | --- | --- |
+| UEVR, `VR_PerfLog` (on by default; the harness sets it for injected runs) | `perf-frames.csv`, `perf.csv` (copied from `%APPDATA%\UnrealVRMod\<exe>\`) | one row per `xrEndFrame` (`P` a new engine frame, `R` the previous one again, `E` empty, `F` failed) with xrWaitFrame / Present / Tick times and mode flags; one row per second, also while nothing is submitted, with QPC/XrTime pairs |
+| monado-service | `monado-frames.csv` (the run's rows of `%LOCALAPPDATA%\monado\app_frame_stats.csv`) | per second: compositor presents to the Mopic display and how many showed a new frame of the game, frames dropped before display |
+| PresentMon console app | `presentmon-<exe>-<pid>.csv` | the game's own Presents (the only source without UEVR), monado-service's |
+| nvidia-smi, 1 Hz | `gpu.csv` | GPU load, clocks, temperature, power and its limit, throttle reasons |
+| gamepilot | `pilot-status.json`, `pilot\captures.csv` | the measured segments (below), the game window's display and adapter, AC/battery |
+| run-test.ps1 | `perf-context.json`, `game-settings\` | clock pairs, pids, PresentMon / nvidia-smi status, frame generation DLLs loaded in the game, power mode, the game's GameUserSettings.ini before and after (with `-GameIni`: as the game saw it and as it left it) |
+
+`perfreport.py run <run folder>` (the harness runs it) writes `perf.json` (every segment) and `perf-summary.json`;
+its summary is result.json's `perf`, its line goes into summary.txt:
+
+```
+perf[gameplay 50.0s, settle 4.0s, excluded menu 10s]: VR 47.8 fps (1% low 30.0, p99 33.3 ms, 2 hitches, 1 stalls) | paced 60:60% 30:40% <=20:0% (max period 33 ms) | work 8.7 ms | display: new frame on 80% of refreshes (48.0/s), 1 dropped | game Present 120.0 fps (sim 60.0) | FG on | GPU 95% 2100 MHz 79C 120/160 W | hint paced
+```
+
+What is measured:
+
+- Recipe runs: the `play` and `play_until` steps (label `gameplay`), and any step with `"measure": true` or
+  `"measure": "<label>"` (a `wait` during a movie, a `bench`); `"measure": false` leaves a play step out. Each step's
+  random keys come from its own seed (`<recipe file>:<step>`), so runs press the same keys. A recipe without such a
+  step (Tekken8Demo-quit) has no numbers. Runs without a recipe: `observe`, from XR focus (without UEVR: the game's
+  start) + 30 s to the end of `-Seconds`; never used as a baseline.
+- Each segment starts once monado paces the game at 2 refreshes or less for 2 s (after a stall its period estimate
+  stays at 6-25 refreshes for seconds): `settle_s`, at most 10 s (`settle_capped`); without UEVR data 5 s (at most
+  a quarter of the segment).
+- Seconds left out (`excluded_s`): UEVR menu open, session not focused, and 3 s or more in a row of loading (no
+  engine tick, no new frame, more empty than new submits) or no submit at all. Shorter ones stay in, as stalls. No
+  interval spans a left-out second.
+
+Fields (summary; `perf.json` has the same per segment):
+
+| Field | |
+| --- | --- |
+| `vr.fps` | new engine frames submitted (`P` rows: an engine frame newer than every one submitted before) per measured second: the VR frame rate. monado paces in whole refreshes, so it moves in steps of 60 / 30 / 20. With 2x frame generation every engine frame is submitted twice (the second Present resubmits the previous one): those are `R`. perf-frames.csv files from before UEVR counted them as `R` are reclassified from their `frame` column (with a warning) |
+| `vr.frame_ms` {p50, p95, p99, p999, max}, `low1_fps`, `low01_fps` | wall-clock intervals between new-frame submits; 1% low = 1000 / p99; p99.9 only with 10000+ intervals |
+| `vr.hitches`, `hitch_per_min`, `stalls`, `hitches_in_capture` | interval >= max(50 ms, 2x median); stall >= 250 ms; hitches overlapping a pilot screen capture |
+| `vr.paced_pct` {1, 2, 3+}, `s_at_3plus`, `period_max_ms` | time at the predicted display period of 1 / 2 / 3+ refreshes |
+| `vr.predicted_slot_ms` | steps of the predicted display time between new frames. monado's display timing is a synthetic 60 Hz grid: not what the viewer saw (that is `display`) |
+| `vr.work_ms` | median of (submit interval - time in xrWaitFrame): the game's cost, continuous where fps moves in steps. Null with a note unless the very-late sync runs on one thread (no async wait, xrWaitFrame at `vr_very_late_post_present`) and no frame cap applies |
+| `vr.presents_per_tick`, `older_pct`, `older_submits`, `nsf_snapshot_pct` | UEVR Present passes per engine tick (2.00 with 2x frame generation, 1.00 without); submits of an engine frame older than the newest one submitted; Native Stereo Fix submits whose eye pair came from the pair frozen at an engine frame boundary (`VR_NativeStereoFixPairSnapshot`, perf-frames.csv `nsf_pair` 2) rather than the live targets (1) |
+| `vr.engine_fps`, `fps_fresh`, `r_pct`, `submits_per_frame`, `wait_ok_per_frame`, `late_pct`, `nsf_reused_pct`, `no_submit_s`, `engine_time_ratio`, `ring_dropped`, `frames_1hz` | engine ticks per second; new frames without a reused / fallback Native Stereo Fix eye; repeats; submits and waits per new frame; frames submitted after their display time - 4 ms; seconds without any submit (whole segment); engine delta time / wall time; frame records UEVR lost (buffer full, or perf-frames.csv at its size cap); `perf.csv`'s count of the new frames (a warning when perf-frames.csv has clearly fewer) |
+| `attrib` | per VR frame medians: `tick_ms`, `present_ms`, `wait_ms`, `uevr_gt_ms`, `uevr_rt_ms` (UEVR's own time, blocked time apart in `rt_blocked_ms`), presents and ticks per VR frame; `bound`: capped / paced (headroom) / gpu / game_thread |
+| `display` | monado: refreshes per second, `new_fps` / `new_pct` (refreshes that showed a new game frame), `dropped`, `uevr_vs_display_pct` |
+| `flat` | PresentMon, the game's main swap chain: `fps`, `sim_fps` (Reflex markers: the real engine rate with frame generation), lows, hitches, `gpu_busy_ms`, `frame_types`. With UEVR it is the game's Present rate (2 per VR frame in AFR) |
+| `framegen` | `on`, `measured`, `presents_per_tick`, `evidence`. Measured first: UEVR Present passes per engine tick (1.7 or more, not in AFR) and PresentMon frame types / presents per simulated frame; when one of them could be measured they decide (`measured` true). UEVR's Streamline frame-generation swapchain flag, nvngx_dlssg.dll loaded (UEVR, or the harness's module probe) and the log line only show it is available, and decide only without a measurement. `setting` from GameUserSettings.ini. Measured and flagged, never changed |
+| `capped` | the game's FrameRateLimit (and VSync without UEVR); with UEVR it binds when the limit, halved in AFR, is at most the refresh rate |
+| `mode`, `gpu`, `window`, `power`, `settings`, `render_config` | UEVR's mode (AFR, NSF, D3D12, sync stage, rendering method, the xrWaitFrame `callsite` of most frames, foreground share); GPU load, clock, temperature, power limit and throttle reasons; the game window's monitor and adapter; AC/battery and power mode; the settings fingerprint and what changed; a fingerprint of the run's `VR_*` config |
+| `compare` | `flat`: the newest PASS `-NoInject` runs with the same game, recipe, vars, label, settings, monitor and variant (perf-context.json `variant`: `-EyeSampler` on, the `-GameIni` / `game_ini` values; runs with them only compare among themselves) (`vr_vs_flat60` = VR fps / (min(flat, refresh) / 2 in AFR)); `prev_build`: the newest PASS runs of another UEVRBackend.dll with the same keys. With 3+ such runs and a spread under 10 %, a 5 % lower fps below their range, a 15 % higher p99, doubled hitches or 10 % more work is a `regression`: a `WARN: perf regression` note, never a verdict |
+| `headline` | what the matrix and ladder tables show: fps, 1% low, hitches, FG |
+
+PresentMon needs admin rights or the "Performance Log Users" group (add the account in `compmgmt.msc`, then sign
+out and in). Without them it stops at once with "access denied": the harness notes `PresentMon access denied` in
+the perf line and goes on. The game's flat numbers (and the `-NoInject` baselines) need it. Nothing here needs
+admin rights otherwise; `-PresentMon off` skips it.
+
+Cost: UEVR does a few atomic adds per frame and writes once a second from its own thread; nvidia-smi samples once a
+second; PresentMon reads ETW events. Not measured on this PC yet: compare a game's numbers with `VR_PerfLog`
+on and off (`-Set "VR_PerfLog=false"`) before trusting small differences.
 
 ## gamepilot
 
@@ -171,6 +244,7 @@ showing right now.
 | `{"phase": "exit"}` | from here the game quitting is expected (the harness counts the exit as a menu quit) |
 | `{"expect_exit": 60}` | wait for the process to end; still running afterwards = `EXIT_HANG` |
 | `{"shot": "name"}` / `{"note": "..."}` | save a screenshot / comment |
+| `"measure": true` / `"<label>"` / `false` on a step | its frame rate is measured (see "Frame rate"): `play` and `play_until` are, as `gameplay`, unless `false`; `true` = `gameplay` |
 
 Checkpoints compare a region of the live screenshot with the saved crop (grayscale, shifts up to `margin` px,
 default 8):

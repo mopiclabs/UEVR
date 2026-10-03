@@ -15,7 +15,8 @@
 # default). Before the first launch every selected rung is checked: its save exists (and matches its "sha256",
 # when it has one), its recipe exists, has a "save_slot" and declares the rung's vars, and every var the recipe
 # needs is given. Other fields (notes...) are ignored. Stops after the first rung whose verdict is in -StopOn
-# (HARNESS_ERROR, NO_VR: nothing after it would be a valid test).
+# (HARNESS_ERROR, NO_VR: nothing after it would be a valid test). The VR fps / 1% low / Hitches columns are each run's
+# perf headline (result.json "perf", README "Frame rate"; " FG" = frame generation on).
 # Keep the PC unlocked and unused meanwhile.
 
 param(
@@ -65,6 +66,12 @@ function Get-RungVars($vars) {
         $out[$p.Name] = $v
     }
     return $out
+}
+
+# a number for the table ("" when the run measured nothing), with a dot whatever the PC's locale
+function Format-Num($v, [string]$fmt = "0.0") {
+    if ($null -eq $v) { return "" }
+    return ([double]$v).ToString($fmt, [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
 # rung name -> part of the run folder name (run-test.ps1 puts the label in it)
@@ -163,7 +170,7 @@ Write-Host "Ladder:   $Ladder ($preset, $($selected.Count) of $($allRungs.Count)
 if ($EngineDir -eq "" -and -not $DryRun) { Write-Warning "no -EngineDir: run-test.ps1 picks the newest engine folder" }
 
 # the harness lines shown while it runs (all of them go to the .log)
-$EchoPattern = "^(PASS|CRASH|FREEZE|EXIT_|MENU_|NO_|LAUNCH|HARNESS)|^pilot: |^save after: |^  - "
+$EchoPattern = "^(PASS|CRASH|FREEZE|EXIT_|MENU_|NO_|LAUNCH|HARNESS)|^pilot: |^save after: |^perf|^  - "
 
 # Runs the harness, shows its verdict lines and appends everything it printed to the ladder's .log. -> its exit code
 # and, when it stopped with an error, the error's message (stderr up to PowerShell's "At <script>:<line>" part)
@@ -214,11 +221,12 @@ function Get-NsfActiveCount([string]$runDir) {
 
 function Write-LadderTable($rows, [string]$path, [bool]$stopped) {
     $md = @("# Save ladder $stamp ($preset)", "", "Ladder: ``$Ladder``", "",
-        "| Rung | Tier | Run | Verdict | Harness exit | Game exit code | NSF active | Save after | Screens | Notes | Run folder |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        "| Rung | Tier | Run | Verdict | Harness exit | Game exit code | NSF active | Save after | Screens | VR fps | 1% low | Hitches | Notes | Run folder |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     foreach ($r in $rows) {
         $notes = ($r.notes -replace '\|', '/')
-        $md += "| $($r.rung -replace '\|', '/') | $($r.tier) | $($r.run) | $($r.verdict) | $($r.harness_exit) | $($r.exit_code) | $($r.nsf_active) | $($r.save_after) | $($r.reached) | $notes | $($r.dir) |"
+        $fps = $(if ($null -ne $r.vr_fps) { (Format-Num $r.vr_fps) + $(if ($r.fg) { " FG" } else { "" }) } elseif ($null -ne $r.present_fps) { "(Present $(Format-Num $r.present_fps))" } else { "" })
+        $md += "| $($r.rung -replace '\|', '/') | $($r.tier) | $($r.run) | $($r.verdict) | $($r.harness_exit) | $($r.exit_code) | $($r.nsf_active) | $($r.save_after) | $($r.reached) | $fps | $(Format-Num $r.low1_fps) | $($r.hitches) | $notes | $($r.dir) |"
     }
     $md += ""
     $md += "Totals: " + ((@($rows) | Group-Object { $_.verdict } | ForEach-Object { "$($_.Name) $($_.Count)" }) -join ", ")
@@ -261,10 +269,16 @@ foreach ($rung in $selected) {
             else { $saveAfter = "$($r.save.after.size) B" + $(if ($r.save.after.changed) { " (changed)" } else { "" }) }
         }
         if ($r.save -and $r.save.error) { $saveAfter = "not installed" }
+        # VR numbers only: without UEVR's frame log (an engine without VR_PerfLog) the headline is the game's Present rate
+        $perfHl = $(if ($r.perf) { $r.perf.headline } else { $null })
+        $hl = $(if ($perfHl -and $perfHl.kind -eq "vr") { $perfHl } else { $null })
         $rows += [pscustomobject][ordered]@{
             rung = $rung.name; tier = $rung.tier; run = $r.run; verdict = $r.verdict; harness_exit = $harnessExit
             exit_code = $r.exit_code; nsf_active = (Get-NsfActiveCount $d.FullName); save_after = $saveAfter
             reached = $(if ($r.pilot) { @($r.pilot.reached).Count } else { 0 })
+            vr_fps = $(if ($hl) { $hl.fps } else { $null }); low1_fps = $(if ($hl) { $hl.low1_fps } else { $null })
+            hitches = $(if ($hl) { $hl.hitches } else { $null }); fg = $(if ($hl) { [bool]$hl.fg } else { $null })
+            present_fps = $(if ($perfHl -and -not $hl) { $perfHl.fps } else { $null })
             notes = (@($r.notes) | Where-Object { $_ -notmatch "^WARN: PostInitProperties" }) -join "; "
             save = $rung.save; vars = $rung.vars; dir = $d.Name
         }
@@ -275,7 +289,7 @@ foreach ($rung in $selected) {
         if ($h.error -ne "") { $why += ": $($h.error)" }
         $rows += [pscustomobject][ordered]@{
             rung = $rung.name; tier = $rung.tier; run = ""; verdict = "HARNESS_ERROR"; harness_exit = $harnessExit
-            exit_code = ""; nsf_active = ""; save_after = ""; reached = 0
+            exit_code = ""; nsf_active = ""; save_after = ""; reached = 0; vr_fps = $null; low1_fps = $null; hitches = $null; fg = $null; present_fps = $null
             notes = $why; save = $rung.save; vars = $rung.vars; dir = ""
         }
         Write-Host "  $why" -ForegroundColor Red

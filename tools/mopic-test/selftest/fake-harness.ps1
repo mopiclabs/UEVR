@@ -1,6 +1,6 @@
 # Stand-in for run-test.ps1 in the run-ladder.ps1 self-test: writes a run folder like the harness does, no game.
 # -RecipeVars may hold verdict=<VERDICT>, nsf=<count>, nores=1 (write no result.json and stop with an error, like
-# run-test.ps1 refusing an argument: the message on stderr, exit 1).
+# run-test.ps1 refusing an argument: the message on stderr, exit 1). A PASS run gets a perf headline (47.78 fps).
 param(
     [string]$Game = "",
     [string]$Recipe = "",
@@ -36,6 +36,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         recipe = $Recipe; recipe_vars = $RecipeVars
         save = [ordered]@{ source = $SaveFile; after = [ordered]@{ size = $saveSize + 10; changed = $true; missing = $false } }
         pilot = [ordered]@{ state = "done"; reached = @("title", "main_menu", "hud") }
+        perf = $(if ($verdict -eq "PASS") { [ordered]@{ label = "gameplay"; headline = [ordered]@{ kind = "vr"; fps = 47.78; low1_fps = 30.0; hitches = 2; hitch_per_min = 2.4; fg = $false; measured_s = 50.0 } } } else { $null })
         notes = @("fake note | with a pipe", "WARN: PostInitProperties slot not found (filtered)")
         received = $received
     }
