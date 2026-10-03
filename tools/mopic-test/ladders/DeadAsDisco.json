@@ -8,7 +8,7 @@
     "LEADERBOARDS: every song played (Free Play, Infinite) posts a score under mopic.demo1 to the brainCloud / Steam global and friends leaderboards (the RESULT screen already lists mopic.demo2 6,638 and mopic.demo1 477). Restoring the save files does not remove them. Fans earned go to the save.",
     "Demo content: Tutorial (NEW GAME), the Hemlock story mission, Infinite Disco Free Play with 11 songs (8 visible + 3 after scrolling) on 4 arena pages, an Infinite (loop) checkbox, The Encore hub and Skill Trees. CHALLENGES and CUSTOM are locked (buy the full game), MULTIPLAYER shows a wrench (not covered).",
     "Order: hemlock first (mopic_demo1 never started it), then the 11 songs on the saved arena, then the rungs that change saved choices (encore, infinite, arenas), and the tutorial last because NEW GAME probably resets slot 0.",
-    "Songs 9-11 are rows 6-8 after scrolling the list to its end (assumed: 11 songs, 8 visible; TODO). Their names are three of Authority 165, Kitsune no Uta 174, Mensch Maschine 132, Neko Miku 194 (the demo's free-play sound banks).",
+    "Songs 9-11 are rows 1-3 after scrolling the list to its end (seen 2026-10-03: Mensch Maschine - Machtwort 132 BPM, Neko Neko Let's Go - Neko X 194 BPM, Untitled Mixtape - Charlie Disco 125 BPM; the rows below them are full-game songs, 'Buy the Full Game to unlock'). Their names are three of Authority 165, Kitsune no Uta 174, Mensch Maschine 132, Neko Miku 194 (the demo's free-play sound banks).",
     "Tiers: 1 = Hemlock and each of the 11 songs (about 4 min per song rung: play_s 90 + 20 s of movement); 2 = Encore / Skill Trees, Infinite mode, the 3 other arena pages, the tutorial."
   ],
   "rungs": [
@@ -21,9 +21,9 @@
     {"name": "song-06-just-dance", "tier": 1, "vars": {"song": "just-dance", "row": 6, "row_y": 362}, "story_point": "Free Play: Just Dance - Bad Computer, 124 BPM"},
     {"name": "song-07-magazine", "tier": 1, "vars": {"song": "magazine", "row": 7, "row_y": 415}, "story_point": "Free Play: Magazine (feat. RIENK) - Solomon France, 168 BPM"},
     {"name": "song-08-remedy", "tier": 1, "vars": {"song": "remedy", "row": 8, "row_y": 468}, "story_point": "Free Play: Remedy - Maliboux, 128 BPM"},
-    {"name": "song-09", "tier": 1, "vars": {"song": "song9", "scroll": -10, "row": 6, "row_y": 362}, "story_point": "Free Play: song 9 of 11 (after scrolling; name TODO)"},
-    {"name": "song-10", "tier": 1, "vars": {"song": "song10", "scroll": -10, "row": 7, "row_y": 415}, "story_point": "Free Play: song 10 of 11 (after scrolling; name TODO)"},
-    {"name": "song-11", "tier": 1, "vars": {"song": "song11", "scroll": -10, "row": 8, "row_y": 468}, "story_point": "Free Play: song 11 of 11 (after scrolling; name TODO)"},
+    {"name": "song-09", "tier": 1, "vars": {"song": "song9", "scroll": -10, "row": 1, "row_y": 95}, "story_point": "Free Play: Machtwort - Mensch Maschine, 132 BPM (song 9 of 11, after scrolling)"},
+    {"name": "song-10", "tier": 1, "vars": {"song": "song10", "scroll": -10, "row": 2, "row_y": 148}, "story_point": "Free Play: Neko Neko Let's Go - Neko X, 194 BPM (song 10 of 11, after scrolling)"},
+    {"name": "song-11", "tier": 1, "vars": {"song": "song11", "scroll": -10, "row": 3, "row_y": 202}, "story_point": "Free Play: Untitled Mixtape - Charlie Disco, 125 BPM (song 11 of 11, after scrolling)"},
     {"name": "encore", "recipe": "DeadAsDisco-encore", "tier": 2, "story_point": "Skill Trees screen and The Encore bar hub (walk, look; nothing bought)"},
     {"name": "infinite", "tier": 2, "vars": {"song": "maniac", "row": 1, "row_y": 95, "infinite": 1, "play_s": 240}, "story_point": "Infinite Disco with the Infinite (loop / survival) box ticked, 4 min"},
     {"name": "arena-2", "tier": 2, "vars": {"song": "mission", "row": 3, "row_y": 202, "arena_next": 1, "arena_pick": 1}, "story_point": "Free Play on arena page 2"},
