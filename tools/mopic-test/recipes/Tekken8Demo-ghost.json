@@ -10,21 +10,8 @@
   "height": 720,
   "save_slot": {"dir": "{localappdata}\\TEKKEN 8 Demo\\Saved\\SaveGames\\{sid64}", "file": "global1.sav"},
   "vars": {"offline_tabs": 2, "match_timeout": 600},
-  "todo": [
-    "Record the OFFLINE tab (title / its item list) and the SUPER GHOST BATTLE item highlight; check offline_tabs (P presses from the home tab).",
-    "What follows the item: ghost select, character select (which cursor rules), difficulty, stage select.",
-    "match_hud: a fighter-independent HUD element (timer frame); sgb_post_match: the menu after a ghost match and where 'next match' / 'main menu' sit.",
-    "If Super Ghost Battle is still locked, record the lock notice so the run ends with a clear MENU_FAIL instead of a timeout."
-  ],
-  "todo_checkpoints": {
-    "offline_tab": {"region_guess": [112, 100, 600, 40], "what": "OFFLINE tab underlined"},
-    "sgb_selected": {"region_guess": null, "what": "SUPER GHOST BATTLE item highlighted (highlight mode)"},
-    "sgb_locked": {"region_guess": null, "what": "lock notice"},
-    "sgb_select": {"region_guess": null, "what": "ghost / character select screen"},
-    "match_hud": {"region_guess": [588, 64, 104, 56], "what": "match timer frame"},
-    "sgb_post_match": {"region_guess": null, "what": "post-match menu"},
-    "sgb_post_match_main_menu": {"region_guess": null, "what": "'main menu' item highlighted"}
-  },
+  "todo": ["Record the OFFLINE tab (title / its item list) and the SUPER GHOST BATTLE item highlight; check offline_tabs (P presses from the home tab).", "What follows the item: ghost select, character select (which cursor rules), difficulty, stage select.", "match_hud: a fighter-independent HUD element (timer frame); sgb_post_match: the menu after a ghost match and where 'next match' / 'main menu' sit.", "If Super Ghost Battle is still locked, record the lock notice so the run ends with a clear MENU_FAIL instead of a timeout."],
+  "todo_checkpoints": {"offline_tab": {"region_guess": [112, 100, 600, 40], "what": "OFFLINE tab underlined"}, "sgb_selected": {"region_guess": null, "what": "SUPER GHOST BATTLE item highlighted (highlight mode)"}, "sgb_locked": {"region_guess": null, "what": "lock notice"}, "sgb_select": {"region_guess": null, "what": "ghost / character select screen"}, "match_hud": {"region_guess": [588, 64, 104, 56], "what": "match timer frame"}, "sgb_post_match": {"region_guess": null, "what": "post-match menu"}, "sgb_post_match_main_menu": {"region_guess": null, "what": "'main menu' item highlighted"}},
   "checkpoints": {
     "notice": {"image": "notice.png", "region": [450, 298, 380, 90], "threshold": 0.8},
     "title": {"image": "title.png", "region": [815, 338, 360, 60], "threshold": 0.8},
@@ -35,7 +22,8 @@
     "quit_selected": {"image": "quit_selected.png", "region": [338, 466, 604, 28], "threshold": 0.8, "mode": "highlight"},
     "quit_confirm": {"image": "quit_confirm.png", "region": [540, 310, 200, 80], "threshold": 0.8},
     "quit_yes": {"image": "quit_yes.png", "region": [392, 364, 496, 54], "threshold": 0.8, "mode": "highlight"},
-    "stage_select": {"image": "stage_select.png", "region": [118, 86, 214, 66], "threshold": 0.8}
+    "stage_select": {"image": "stage_select.png", "region": [118, 86, 214, 66], "threshold": 0.8},
+    "offline_tab": {"image": "offline_tab.png", "region": [300, 108, 85, 24], "threshold": 0.8}
   },
   "steps": [
     {"phase": "boot"},
