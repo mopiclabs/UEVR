@@ -20,6 +20,7 @@
 #include <../../directxtk12-src/Inc/DescriptorHeap.h>
 
 #include "d3d12/CommandContext.hpp"
+#include "d3d12/NativePairSnapshot.hpp"
 #include "d3d12/TextureContext.hpp"
 #include "Stalker2NativeD3D12.hpp"
 
@@ -42,6 +43,10 @@ public:
     void on_reset(VR* vr);
 
     void force_reset() { m_force_reset = true; }
+
+    // Render-submission thread (VR::arm_native_pair_snapshot): the pose callback of an engine frame whose two eye
+    // families are recorded. Arms the Native Stereo Fix pair snapshot while the fix is active with a published packet.
+    void arm_native_pair_snapshot(uint32_t frame_count);
 
     const auto& get_backbuffer_size() const { return m_backbuffer_size; }
 
@@ -122,6 +127,17 @@ private:
     void mark_ue58_converted_ui_slot_consumed(uint32_t slot_index);
     void wait_for_ue58_slate_ui_consumers();
     void clear_backbuffer();
+    // Present thread: the frozen Native Stereo Fix eye pair this pass copies instead of the live targets, or none (the
+    // live copy then runs, as before). Configures the ring and the ExecuteCommandLists observer as needed.
+    std::optional<d3d12::NativePairSnapshot::Lease> acquire_native_pair_snapshot(
+        VR* vr,
+        ID3D12Device* device,
+        ID3D12CommandQueue* queue,
+        ID3D12Resource* engine_scene_target,
+        uint32_t eye_width,
+        uint32_t eye_height,
+        bool left_source_fits,
+        bool title_copy_states);
     bool ensure_2d_screen_textures(ID3D12Device* device, const D3D12_RESOURCE_DESC& base_desc);
     bool ensure_halo_electra_quad_source_texture(ID3D12Device* device, uint64_t width, uint32_t height);
 
@@ -227,6 +243,12 @@ private:
     std::chrono::steady_clock::time_point m_last_native_capture_submit{};
     uint32_t m_scene_capture_width{};
     uint32_t m_scene_capture_height{};
+    // VR_NativeStereoFixPairSnapshot: one consistent eye pair per engine frame (see d3d12/NativePairSnapshot.hpp).
+    d3d12::NativePairSnapshot m_native_pair{};
+    uint64_t m_native_pair_last_value{};   // fence value of the frozen pair the last pass submitted
+    uint32_t m_native_pair_passes{};       // passes that submitted it
+    bool m_native_pair_in_use{};           // the last eligible pass submitted a frozen pair
+    bool m_native_pair_engaged{};          // the observer was set (and the ring may exist) since the feature was last off
     d3d12::TextureContext m_shf_mono_scene_tex{};
     d3d12::TextureContext m_dune_hmd_mono_scene_tex{};
     d3d12::TextureContext m_halo_electra_quad_source_tex{};
@@ -377,6 +399,18 @@ private:
                     texture_ctx->commands.wait(INFINITE);
                 }
             }
+        }
+
+        // The description of `swapchain_idx`'s images, if the swapchain exists.
+        std::optional<D3D12_RESOURCE_DESC> image_desc(uint32_t swapchain_idx) {
+            std::scoped_lock _{this->mtx};
+
+            const auto it = this->contexts.find(swapchain_idx);
+            if (it == this->contexts.end() || it->second.textures.empty() || it->second.textures[0].texture == nullptr) {
+                return std::nullopt;
+            }
+
+            return it->second.textures[0].texture->GetDesc();
         }
 
         bool ever_acquired(uint32_t swapchain_idx) {
