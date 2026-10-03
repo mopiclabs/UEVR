@@ -11,7 +11,7 @@
     "pvc-* rungs: P1 cursor starts on JIN in row 2 (PAUL, JIN, ?, KAZUYA, NINA), the CPU stays KAZUYA (in_match is the P2 KAZUYA plate), difficulty EASY, stage_moves from RANDOM: 1 Urban Square (Evening), 2 Yakushima, 3 Sanctum (order read from thumbnails; titles TODO). About 4 min per rung including boot and quit."
   ],
   "rungs": [
-    {"name": "story-ch1", "recipe": "Tekken8Demo-story", "tier": 1, "story_point": "Story 'The Dark Awakens' Chapter 1, from its first cutscene to the chapter's end (20-40 min)"},
+    {"name": "story-ch1", "recipe": "Tekken8Demo-story", "tier": 1, "story_point": "Story 'The Dark Awakens' Chapter 1: the opening cutscenes (~80 s) and the JIN vs KAZUYA fight in Times Square (90 s of attacks, then lost on purpose: the lost-fight menu is the way out)"},
     {"name": "aq-ch1", "recipe": "Tekken8Demo-arcadequest", "tier": 1, "story_point": "Arcade Quest Chapter 1: avatar creation (first visit), arcade hub, tutorials, chapter matches, chapter clear (30-60 min)"},
     {"name": "ghost", "recipe": "Tekken8Demo-ghost", "tier": 2, "story_point": "Super Ghost Battle (after Arcade Quest Chapter 1 is cleared): 2 matches against your own ghost"},
     {"name": "pvc-jin-urban", "tier": 1, "vars": {"p1": "jin", "p1_key": "right", "p1_moves": 0, "stage": "urban", "stage_moves": 1}, "story_point": "VS CPU: JIN vs KAZUYA, Urban Square (Evening), EASY"},
