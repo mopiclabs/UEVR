@@ -127,6 +127,24 @@ def process_names():
     return {name for _, name in processes()}
 
 
+def process_threads():
+    """{pid: thread count} of all processes."""
+    counts = {}
+    snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snap in (0, -1):
+        return counts
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            counts[entry.th32ProcessID] = entry.cntThreads
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+    return counts
+
+
 def process_alive(pid):
     """An exited process stays in the process list while anyone (the harness) holds a handle to it."""
     h = kernel32.OpenProcess(0x00100000 | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)  # SYNCHRONIZE
@@ -1145,10 +1163,13 @@ class Pilot:
         return self.status["state"] == "done"
 
 def write_dump(proc, out):
-    """Thread stacks + module list of the (first) process with this exe name."""
+    """Thread stacks + module list of the process with this exe name. A launcher stub can share the game's name
+    (Hogwarts: HogwartsLegacy.exe starts Phoenix\\Binaries\\Win64\\HogwartsLegacy.exe), so the one with the most
+    threads is taken."""
     import msvcrt
     exe = proc.lower() + ".exe"
-    pids = [pid for pid, name in processes() if name == exe]
+    threads = process_threads()
+    pids = sorted((pid for pid, name in processes() if name == exe), key=lambda p: -threads.get(p, 0))
     if not pids:
         return {"error": f"no process {exe}"}
     h = kernel32.OpenProcess(0x0400 | 0x0010 | 0x0040, False, pids[0])  # QUERY_INFORMATION, VM_READ, DUP_HANDLE
