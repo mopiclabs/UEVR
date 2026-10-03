@@ -34,6 +34,11 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | OpenXR: Accept off-axis frusta and keep FOV-only updates cheap | FOV validity only requires a non-degenerate frustum; exact view_bounds mapping; single FOV read; no render-target resize on FOV-only updates. | Mopic's off-axis frustum can leave the view axis (eye past the panel edge), which froze the realtime FOV. | No `Refusing to recalculate eye projections` while moving in front of the display. |
 | VR: Compare devices by identity in the scene-capture reallocation path | Same device comparison as the publish path. | Avoids rebuilding the capture on every reallocation on proxy-device setups. | — |
 | Framework: Don't tear the framework down while the game exits | `DllMain(DLL_PROCESS_DETACH)` with a non-null `reserved` (process terminating) releases `g_framework` instead of letting the CRT destroy it. | The static destructors released D3D12 resources into the GPU driver after ExitProcess had killed its threads: TEKKEN 8 stayed in `~TextureContext` → dxgi → Intel driver forever after a menu quit (upstream has the same DllMain). | Menu-exit test (`-Recipe`) passes with no `EXIT_HANG` noted "stuck in shutdown"; the process is gone a few seconds after the quit (an `EXIT_HANG` noted "never called ExitProcess" is the known gap below). |
+| VR: Log frame rate and frame pacing to perf CSVs | `VR_PerfLog` (default on) writes `perf.csv` (1 s rows: VR fps, new/repeated submits, xrWaitFrame/xrEndFrame times, Presents per engine tick, NSF fresh/reused/fallback) and `perf-frames.csv` (one row per `xrEndFrame`) next to log.txt; a submit counts as new only if its engine frame is newer than any submitted before. | UEVR's "Show FPS" sends `stat fps` once (screen only, stripped in Shipping); the harness needs a per-run frame rate, and frame generation doubled the naive count (Hogwarts "40 fps" was 20). | `perf.csv` exists after a run; `presents_per_tick` is 1.00 without frame generation. |
+| Framework: End the OpenXR session when the game's window is gone | Once the window the game last presented to got WM_DESTROY and no Present has run for 2.5 s, the D3D monitor thread destroys the session (try-locks only); a Present to a live window reinitializes OpenXR. `VR_EndSessionOnGameExit` turns it off. | Hogwarts takes ~30 s from destroying its window to ExitProcess (D3D12 teardown in the NVIDIA driver, vanilla too) and the Mopic display showed the frozen last frame all that time. | Hogwarts: frozen tail ~2 s instead of ~36 s (monado `app_frame_stats.csv`); TEKKEN 8 / E33 / Dead as Disco menu exits still PASS. |
+| VR: Turn frame generation off while the Native Stereo Fix is on | `VR_NativeStereoFixDisableFrameGeneration` (default on): once a second, while the fix is on, `r.XeFG.Enabled`, `r.Streamline.DLSSG.Enable`, `r.FidelityFX.FI.Enabled` are held at 0 and put back when it is off; a cvar the game keeps (Wukong's DLSSG) is logged once and left alone. | UEVR copies the engine's eye targets, so generated frames never reach the display; their extra Presents land between the two eye renders and send the right eye one engine frame late (Hogwarts XeFG X2: 150-260 one-refresh splits per run). The engine frame rate is the same either way (~20 fps). | log `[FrameGen] Native Stereo Fix is on: r.XeFG.Enabled 1 -> 0`; `presents_per_tick` 1.00; games re-enable it at level loads / menus and it is off again within 1 s. |
+| VR: Submit once per engine frame under frame generation | `VR_SubmitOncePerEngineFrame` (default on, OpenXR, not AFR): a Present pass with no new engine frame while the engine produced one in the last 250 ms skips the copy and the xrWaitFrame / xrBeginFrame / xrEndFrame trio; repeats while the engine stalls still submit. | Frame generation the cvars can't turn off would otherwise re-submit every frame and add an xrWaitFrame per generated frame. | Non-FG titles skip only a handful of passes per run (log count); no MENU_FAIL from frozen menus. |
+| D3D12: Experimental per-engine-frame eye-pair snapshot (off by default) | `VR_NativeStereoFixPairSnapshot`: after the engine's first direct-queue submission following the pose callback, both eyes are copied into a 3-slot ring on the engine queue; Present passes off the engine thread submit the newest pair the GPU finished (no GPU wait). | For titles whose frame generation can't be turned off. The first version made XeFG's present queue wait on the snapshot fence and hung Hogwarts (wait cycle with XeFG's own fence). | Hogwarts with frame generation left on: no hang, frozen pairs 100%, 0 one-refresh splits; ~90% of passes take the pair one engine frame older. |
 
 ## Updating to a new joeyhodge release
 
@@ -146,6 +151,19 @@ Before the exit fix the harness couldn't see exit hangs (.NET's `HasExited` turn
 set, and the harness killed the leftover process afterwards), so the earlier 2026-09-30 graceful-exit results
 could have hidden them. The table above replaces them.
 
+Results on 2026-10-02/03 (builds of this branch with the rows above; `-EngineDir ...\engines\mopic-uevr\1.0.5.1`):
+
+- Save ladders (`run-ladder.ps1`, community + own saves): Black Myth: Wukong 30/30 PASS (chapters 1-6, both
+  endings, post-game; the fix active in every rung), Stray tier 1 9/10 PASS (the ending rung's walk to the exit is
+  not reliable yet). Wukong's quit logs `crashhandler64.dll` 0xc0000409 in Application Error with and without UEVR
+  (the game's own).
+- Hogwarts one-eye "tick": measured per eye with monado `MOPIC_MODE=sbs` (`analysis\eyesampler.py`). Cause: Intel
+  XeFG 2x (set by the NVIDIA app's Recommended settings) presenting off the engine's frame boundary while the Native
+  Stereo Fix renders the eyes separately; 93-100% of the splits are the right eye exactly one engine frame late.
+  XeFG off in the game's menu: 0 splits; with the frame-generation rows above: 0 one-refresh splits, same ~20 fps.
+- Regression matrix after them (one run each): TEKKEN 8, Wukong, E33, Dead as Disco, Stray, Sonic 6/6 PASS, the fix
+  active in all six.
+
 ## Known gaps
 
 - TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 12 full
@@ -192,3 +210,12 @@ could have hidden them. The table above replaces them.
   left eye's view state. Watch for an exposure difference between the eyes on UE5.5+ titles.
 - A saved `config.txt` keeps its stored `VR_NativeStereoFix` value, so the new default only applies to titles
   without one (only `VR_UseFMallocSceneViewExtensions` is migrated).
+- Hogwarts, one walking spot (dark interior near the 2026-10-03 save): 10-15 one-eye changes per run where the left
+  eye changes and the right never shows a matching change for 100-480 ms, with frame generation off by the menu as
+  well as by the cvar rows. Not frame generation; possibly per-eye engine decisions under the Native Stereo Fix
+  (LOD / occlusion / exposure per view). Not checked by eye yet.
+- Mopic Hub picks the newest engine folder: the 1.0.5.2 package (commit 8cb40134) fails Dead as Disco's Native Stereo
+  Fix ("found 0 from 1 source-shaped signature match(es)"), which this branch passes.
+- Hogwarts Legacy keeps a second settings copy in `SaveGames\<account>\SavedUserOptions.sav` (Steam Cloud) that
+  overrides `GameUserSettings.ini`, so `-GameIni` can't change its graphics; `recipes\Hogwarts-fgoff.json` sets frame
+  generation through the game's menu instead.
