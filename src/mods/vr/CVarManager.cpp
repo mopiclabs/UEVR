@@ -20,6 +20,7 @@
 #include <sdk/Utility.hpp>
 
 #include "Framework.hpp"
+#include "../VR.hpp"
 
 #include "CVarManager.hpp"
 #include "utility/ImGui.hpp"
@@ -881,6 +882,90 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
         } else if (m_windrose_shadow_runtime_cvar_attempts >= 600) {
             SPDLOG_WARN("[Windrose][UE5.6][ShadowCrash] cvars were not found after {} attempts; giving up", m_windrose_shadow_runtime_cvar_attempts);
             m_windrose_shadow_runtime_cvars_done = true;
+        }
+    }
+
+    enforce_frame_generation_cvars();
+}
+
+// VR_NativeStereoFixDisableFrameGeneration: while the Native Stereo Fix is on, hold the engine's frame generation off.
+// UEVR copies the engine's two eye targets, so generated frames never reach the headset; their extra Presents only add
+// submits, and one landing between the left and right eye renders sends the right eye one engine frame late (Hogwarts
+// Legacy, XeFG X2, 2026-10-03: 14 lone-eye lags/min with it, 0 without, engine ~20 fps either way). Checked once a
+// second because games re-apply their own settings (level loads, the options menu); the values from before are put back
+// once the fix is off.
+void CVarManager::enforce_frame_generation_cvars() {
+    static constexpr std::array<const wchar_t*, 3> frame_generation_cvars{
+        L"r.XeFG.Enabled",            // Intel XeSS frame generation (XeSS UE plugin)
+        L"r.Streamline.DLSSG.Enable", // NVIDIA DLSS frame generation (Streamline UE plugin)
+        L"r.FidelityFX.FI.Enabled",   // AMD FSR frame interpolation (FidelityFX UE plugin)
+    };
+    static_assert(frame_generation_cvars.size() == std::tuple_size_v<decltype(m_frame_generation_cvar_originals)>);
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now < m_next_frame_generation_cvar_check) {
+        return;
+    }
+
+    m_next_frame_generation_cvar_check = now + std::chrono::seconds{1};
+
+    const auto& vr = VR::get();
+    const auto want_off = vr != nullptr && vr->should_disable_frame_generation();
+    const auto any_forced = std::any_of(m_frame_generation_cvar_originals.begin(), m_frame_generation_cvar_originals.end(),
+        [](const auto& original) { return original.has_value(); });
+
+    if (!want_off && !any_forced) {
+        return;
+    }
+
+    const auto console_manager = sdk::FConsoleManager::get();
+
+    if (console_manager == nullptr) {
+        return;
+    }
+
+    for (size_t i = 0; i < frame_generation_cvars.size(); ++i) {
+        const auto name = frame_generation_cvars[i];
+        const auto object = console_manager->find(name);
+
+        if (object == nullptr) {
+            continue;
+        }
+
+        auto variable = (sdk::IConsoleVariable*)object;
+        auto& original = m_frame_generation_cvar_originals[i];
+
+        try {
+            const auto before = variable->GetInt();
+
+            if (want_off) {
+                if (before == 0) {
+                    continue;
+                }
+
+                if (!original.has_value()) {
+                    original = before;
+                }
+
+                const auto ok = variable->Set(L"0");
+                const auto count = ++m_frame_generation_cvar_forced_count[i];
+
+                // The first few, then every 60th: a game that keeps turning it back on would fill the log otherwise.
+                if (count <= 3 || count % 60 == 0) {
+                    SPDLOG_INFO("[FrameGen] Native Stereo Fix is on: {} {} -> {} (ok={}, time {}); generated frames never reach "
+                        "the headset and split the eye pair (VR_NativeStereoFixDisableFrameGeneration)",
+                        utility::narrow(name), before, variable->GetInt(), ok, count);
+                }
+            } else if (original.has_value()) {
+                const auto ok = variable->Set(std::to_wstring(*original).c_str());
+                SPDLOG_INFO("[FrameGen] Native Stereo Fix is off: {} put back {} -> {} (ok={})",
+                    utility::narrow(name), before, variable->GetInt(), ok);
+                original.reset();
+                m_frame_generation_cvar_forced_count[i] = 0;
+            }
+        } catch (...) {
+            SPDLOG_WARN("[FrameGen] reading or setting {} threw", utility::narrow(name));
         }
     }
 }

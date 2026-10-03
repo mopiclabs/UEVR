@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <atomic>
 #include <cstdint>
@@ -272,6 +273,13 @@ private:
     int m_aphelion_framegen_runtime_cvar_attempts{0};
     bool m_windrose_shadow_runtime_cvars_done{false};
     int m_windrose_shadow_runtime_cvar_attempts{0};
+
+    // VR_NativeStereoFixDisableFrameGeneration: the frame generation cvars' values from before they were held at 0
+    // (put back when the fix is off), one entry per name in enforce_frame_generation_cvars().
+    void enforce_frame_generation_cvars();
+    std::array<std::optional<int>, 3> m_frame_generation_cvar_originals{};
+    std::array<uint32_t, 3> m_frame_generation_cvar_forced_count{};
+    std::chrono::steady_clock::time_point m_next_frame_generation_cvar_check{};
 
     static inline std::mutex s_change_mutex{};
     static inline ChangeSnapshot s_change_snapshot{};

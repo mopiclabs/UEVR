@@ -15130,6 +15130,11 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "Recommended for UE5.5 and newer. Keeps the real secondary-eye pass identity for per-eye water, "
                 "post-process, and renderer paths while retaining the Native Fix constructor safety guard. "
                 "Disable only to restore the legacy same-pass behavior.");
+            m_native_stereo_fix_disable_frame_generation->draw("Turn Off Frame Generation");
+            ImGui::TextWrapped(
+                "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "
+                "Native Stereo Fix is on, and puts it back when the fix is off. Generated frames never reach the headset, "
+                "and their extra Presents between the two eye renders make the right eye show the previous frame.");
             m_native_stereo_fix_pair_snapshot->draw("Freeze Eye Pair per Engine Frame (D3D12)");
             ImGui::TextWrapped(
                 "Experimental, default off (hung Hogwarts Legacy with XeSS frame generation). Copies both eyes once per "

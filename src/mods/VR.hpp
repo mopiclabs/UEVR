@@ -719,6 +719,14 @@ public:
             !is_native_stereo_fix_texture_array_submit_enabled();
     }
 
+    // VR_NativeStereoFixDisableFrameGeneration (default on): while the Native Stereo Fix is on, CVarManager holds the
+    // engine's frame generation cvars at 0 (r.XeFG.Enabled, r.Streamline.DLSSG.Enable, r.FidelityFX.FI.Enabled) and puts
+    // them back when it is off. UEVR copies the engine's eye targets, so generated frames never reach the headset, and
+    // their extra Presents between the two eye renders send the right eye one frame late.
+    bool should_disable_frame_generation() const {
+        return m_native_stereo_fix_disable_frame_generation->value() && is_native_stereo_fix_enabled();
+    }
+
     // Render-submission thread, from the frame's pose callback once both eye families are recorded.
     void arm_native_pair_snapshot(uint32_t frame_count) {
         if (is_native_stereo_fix_pair_snapshot_enabled()) {
@@ -1858,6 +1866,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
+    const ModToggle::Ptr m_native_stereo_fix_disable_frame_generation{ ModToggle::create(generate_name("NativeStereoFixDisableFrameGeneration"), true) };
 
     const ModSlider::Ptr m_custom_z_near{ ModSlider::create(generate_name("CustomZNear"), 0.001f, 100.0f, 0.01f, true) };
     const ModToggle::Ptr m_custom_z_near_enabled{ ModToggle::create(generate_name("EnableCustomZNear"), false, true) };
@@ -2334,6 +2343,7 @@ public:
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_native_stereo_fix_pair_snapshot,
+            *m_native_stereo_fix_disable_frame_generation,
             *m_splitscreen_compatibility_mode,
             *m_splitscreen_view_index,
             *m_compatibility_skip_pip,
