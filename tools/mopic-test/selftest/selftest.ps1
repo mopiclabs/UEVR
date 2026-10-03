@@ -3,6 +3,9 @@
 # (nvidia-smi, the PresentMon console app when installed) run around it as in a real run. Never touches the real save folder:
 # every save file lives under runs\selftest\work-<time>\ (gitignored). Stops nothing but its own stand-ins (and, through the
 # harness, UEVRInjector / CrashReportClient, so it refuses to run while one of those is running).
+# -NoWindows skips sections 4-5 (the stand-in with its invisible window, whoami.exe consoles): for a PC someone is using.
+# The -GameIni end-to-end section (5b) still runs: its stand-in never opens a window.
+param([switch]$NoWindows)
 $ErrorActionPreference = "Stop"
 $Repo = "C:\Users\zzong\source\repos\UEVR-jh"
 $Tools = Join-Path $Repo "tools\mopic-test"
@@ -72,7 +75,12 @@ Write-Host "== 2. run-test.ps1 functions (loaded from the script's AST)"
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Tools "run-test.ps1"), [ref]$null, [ref]$null)
 $wanted = @("Get-SteamLibraries", "Find-SteamAppId", "Find-SteamGameDir", "Get-SteamAccountId", "Get-SavePlaceholderValues",
     "Expand-SavePlaceholders", "Resolve-SaveTarget", "Copy-FileRetry", "Install-SaveFile", "Save-SaveEvidence",
-    "ConvertTo-ArgvString", "ConvertFrom-RecipeVars", "ConvertTo-PilotVarArgs")
+    "ConvertTo-ArgvString", "ConvertFrom-RecipeVars", "ConvertTo-PilotVarArgs",
+    "Read-Shared", "Get-ClockPair", "Copy-Shared", "Find-GameSettings", "Find-PresentMon", "Get-FrameGenModules", "Get-PowerContext",
+    "Save-MonadoSlice",
+    "ConvertFrom-GameIniSpec", "ConvertFrom-GameIniBlock", "Resolve-GameIniPath", "Read-IniText", "Write-IniText", "Find-IniSection",
+    "Find-IniKeyLines", "Split-IniLines", "Get-IniValue", "Set-IniValue", "Clear-ReadOnly", "Restore-GameIniFile", "Install-GameIni", "Restore-GameIni",
+    "Restore-PendingGameIni")
 foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
     if ($wanted -contains $fn.Name) { . ([scriptblock]::Create($fn.Extent.Text)) }
 }
@@ -178,6 +186,156 @@ $power = Get-PowerContext
 Check "Get-PowerContext: AC known, battery percent, power scheme" ($power.ac -is [bool] -and $null -ne $power.battery_pct -and "$($power.scheme)" -match '^[0-9a-f-]{36}$') ($power | ConvertTo-Json -Compress)
 Write-Host "      PresentMon console app: $(Find-PresentMon)"
 
+Write-Host "== 2c. -GameIni: the game's settings files changed for a run and put back byte for byte (temp files only)"
+$iniDir = Join-Path $Work "gameini"
+New-Item -ItemType Directory -Force -Path $iniDir | Out-Null
+$pending = Join-Path $iniDir "pending"
+$q = [char]34
+# Restore-PendingGameIni stops the interrupted run's game first; here it only records what it would stop (the real
+# Stop-Leftovers also stops UEVRInjector and CrashReportClient)
+$script:stopped = @()
+function Stop-Leftovers([string]$processName) { $script:stopped += $processName }
+
+# the -GameIni spec
+$spec = @(ConvertFrom-GameIniSpec ("GameUserSettings.ini|/Script/Phoenix.PhoenixGameSettings|FrameGeneration=(Mode=Off,NumFramesInterpolated=0,LocStr=" + $q + "Off" + $q + ");bUseVSync=True;Engine.ini|[SystemSettings]|r.A=1|2=3; ;C:\x\y.ini|S|k= v "))
+Check "spec: four entries" ($spec.Count -eq 4) ($spec | ConvertTo-Json -Compress)
+if ($spec.Count -eq 4) {
+    Check "spec: file|Section|Key=Value, the value with quotes and parentheses kept" ($spec[0].file -eq "GameUserSettings.ini" -and $spec[0].section -eq "/Script/Phoenix.PhoenixGameSettings" -and $spec[0].key -eq "FrameGeneration" -and $spec[0].value -ceq ("(Mode=Off,NumFramesInterpolated=0,LocStr=" + $q + "Off" + $q + ")"))
+    Check "spec: Key=Value keeps the file and section" ($spec[1].file -eq "GameUserSettings.ini" -and $spec[1].section -eq "/Script/Phoenix.PhoenixGameSettings" -and $spec[1].key -eq "bUseVSync" -and $spec[1].value -eq "True")
+    Check "spec: [Section] brackets dropped, the value may hold | and =" ($spec[2].file -eq "Engine.ini" -and $spec[2].section -eq "SystemSettings" -and $spec[2].key -eq "r.A" -and $spec[2].value -eq "1|2=3")
+    Check "spec: a full path, the value trimmed" ($spec[3].file -eq "C:\x\y.ini" -and $spec[3].value -eq "v")
+}
+Check "spec: Section|Key=Value defaults to GameUserSettings.ini" ((@(ConvertFrom-GameIniSpec "S|k=1")[0]).file -eq "GameUserSettings.ini")
+Check "spec: empty" (@(ConvertFrom-GameIniSpec "").Count -eq 0)
+Throws "spec: Key=Value without a section" { ConvertFrom-GameIniSpec "k=1" } "*needs a file and a section*"
+Throws "spec: no =" { ConvertFrom-GameIniSpec "f|S|k" } "*expects*"
+Throws "spec: too many parts" { ConvertFrom-GameIniSpec "a|b|c|k=1" } "*expects*"
+$iniBlock = '{"GameUserSettings.ini": {"[/Script/X]": {"A": "1", "B": true}}, "Engine.ini": {"S": {"C": 2}}}' | ConvertFrom-Json
+$fromBlock = @(ConvertFrom-GameIniBlock $iniBlock)
+Check "recipe game_ini block -> entries (booleans as True/False)" ($fromBlock.Count -eq 3 -and $fromBlock[0].section -eq "/Script/X" -and $fromBlock[1].value -ceq "True" -and $fromBlock[2].file -eq "Engine.ini" -and $fromBlock[2].value -eq "2") ($fromBlock | ConvertTo-Json -Compress)
+Throws "recipe game_ini: not an object" { ConvertFrom-GameIniBlock ('{"a": "b"}' | ConvertFrom-Json) } "*must be an object*"
+
+# paths
+$iniVals = Get-SavePlaceholderValues $null
+Check "path: a file name is in the config folder" ((Resolve-GameIniPath "Engine.ini" $iniDir $iniVals) -eq (Join-Path $iniDir "Engine.ini"))
+Check "path: placeholders" ((Resolve-GameIniPath "{localappdata}\x.ini" $null $iniVals) -eq (Join-Path $env:LOCALAPPDATA "x.ini"))
+Throws "path: a file name without a config folder" { Resolve-GameIniPath "Engine.ini" $null $iniVals } "*no config folder*"
+Throws "path: a relative path" { Resolve-GameIniPath "sub\x.ini" $iniDir $iniVals } "*neither a file name nor an absolute path*"
+Throws "path: a missing folder" { Resolve-GameIniPath (Join-Path $iniDir "nope\x.ini") $null $iniVals } "*folder not found*"
+Throws "path: unknown placeholder, named as -GameIni" { Resolve-GameIniPath "{nope}\x.ini" $null $iniVals } "-GameIni: unknown placeholder {nope}*"
+
+# Set-IniValue / Get-IniValue on text
+$nl = "`r`n"
+$text = "[A]${nl}x=1${nl}Dup=1${nl}y=2${nl}Dup=2${nl}${nl}[B]${nl}x=9${nl}${nl}"
+$r = Set-IniValue $text $nl "a" "DUP" "new"
+Check "set: the first line of the key gets the value (spelling kept), later duplicates go, the rest stays" ($r.text -ceq "[A]${nl}x=1${nl}Dup=new${nl}y=2${nl}${nl}[B]${nl}x=9${nl}${nl}" -and $r.old -eq "1") $r.text
+$r = Set-IniValue $text $nl "B" "z" "3"
+Check "set: a missing key after the section's last line" ($r.text -ceq "[A]${nl}x=1${nl}Dup=1${nl}y=2${nl}Dup=2${nl}${nl}[B]${nl}x=9${nl}z=3${nl}${nl}" -and $null -eq $r.old) $r.text
+$r = Set-IniValue $text $nl "C" "k" "v"
+Check "set: a missing section at the end" ($r.text -ceq "[A]${nl}x=1${nl}Dup=1${nl}y=2${nl}Dup=2${nl}${nl}[B]${nl}x=9${nl}${nl}[C]${nl}k=v${nl}${nl}") $r.text
+$r = Set-IniValue "" $nl "C" "k" "v"
+Check "set: an empty file" ($r.text -ceq "[C]${nl}k=v${nl}") $r.text
+Check "get: a key, case-insensitive; a missing one" ((Get-IniValue $text $nl "b" "X") -eq "9" -and $null -eq (Get-IniValue $text $nl "B" "nope") -and $null -eq (Get-IniValue $text $nl "Z" "x"))
+# UE reads a section that appears twice as one
+$dup = "[A]${nl}k=1${nl}${nl}[B]${nl}x=1${nl}${nl}[a]${nl}k=2${nl}j=3${nl}"
+$r = Set-IniValue $dup $nl "A" "k" "9"
+Check "set: a section twice: the first line of the key gets the value, the one in the second block goes" ($r.text -ceq "[A]${nl}k=9${nl}${nl}[B]${nl}x=1${nl}${nl}[a]${nl}j=3${nl}" -and $r.old -eq "1") $r.text
+$r = Set-IniValue $dup $nl "A" "new" "5"
+Check "set: a section twice: a missing key goes into its first block" ($r.text -ceq "[A]${nl}k=1${nl}new=5${nl}${nl}[B]${nl}x=1${nl}${nl}[a]${nl}k=2${nl}j=3${nl}") $r.text
+Check "get: a key in the section's second block" ((Get-IniValue $dup $nl "A" "j") -eq "3" -and (Get-IniValue $dup $nl "A" "k") -eq "1")
+
+# round trip on files: Install-GameIni / Restore-GameIni
+function New-IniFile([string]$name, [byte[]]$bytes, [switch]$ReadOnly) {
+    $p = Join-Path $iniDir $name
+    if (Test-Path -LiteralPath $p) { Clear-ReadOnly $p }
+    [System.IO.File]::WriteAllBytes($p, $bytes)
+    (Get-Item -LiteralPath $p).LastWriteTimeUtc = [DateTime]::new(2026, 9, 1, 12, 0, 0, [DateTimeKind]::Utc)
+    if ($ReadOnly) { (Get-Item -LiteralPath $p).Attributes = "ReadOnly, Archive" }
+    return $p
+}
+function Get-FileState([string]$p) { $i = Get-Item -LiteralPath $p -Force; return "$((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash)|$($i.Length)|$($i.LastWriteTimeUtc.Ticks)|$($i.Attributes)" }
+$ascii = [System.Text.Encoding]::ASCII
+# a copy of the real Hogwarts GameUserSettings.ini when this PC has one (read only), else a stand-in with its lines
+$realHl = Join-Path $env:LOCALAPPDATA "Hogwarts Legacy\Saved\Config\WindowsNoEditor\GameUserSettings.ini"
+$realHlBefore = $(if (Test-Path -LiteralPath $realHl) { Get-FileState $realHl } else { $null })
+$hlBytes = $(if ($realHlBefore) { [System.IO.File]::ReadAllBytes($realHl) } else { $ascii.GetBytes("[/Script/Phoenix.PhoenixGameSettings]${nl}LatencyMode=Intel_XeLL_LowLatency${nl}FrameGeneration=(Mode=Intel_XeFG,NumFramesInterpolated=1,LocStr=" + $q + "INTEL_XEFG_MODE_X2" + $q + ")${nl}r.ChosenFrameGenProvider=FXeFGDXGISwapChainProvider${nl}${nl}[SystemSettings]${nl}r.GPULUIDLow=1${nl}${nl}") })
+$hl = New-IniFile "GameUserSettings.ini" $hlBytes
+$u16 = New-IniFile "utf16.ini" ([byte[]](@(0xFF, 0xFE) + [System.Text.Encoding]::Unicode.GetBytes("[S]`r`nk=1`r`nname=$Cn`r`n")))
+$u8 = New-IniFile "utf8bom.ini" ([byte[]](@(0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes("[S]`nk=1`n")))
+$ro = New-IniFile "readonly.ini" ($ascii.GetBytes("[S]`r`nk=1")) -ReadOnly
+$absent = Join-Path $iniDir "absent.ini"
+if (Test-Path -LiteralPath $absent) { Remove-Item -LiteralPath $absent -Force }
+$states = @{}
+foreach ($p in @($hl, $u16, $u8, $ro)) { $states[$p] = Get-FileState $p }
+$fgOff = "(Mode=Off,NumFramesInterpolated=0,LocStr=" + $q + "Off" + $q + ")"
+$entries = @(
+    [pscustomobject]@{ path = $hl; section = "/Script/Phoenix.PhoenixGameSettings"; key = "FrameGeneration"; value = $fgOff },
+    [pscustomobject]@{ path = $u16; section = "S"; key = "k"; value = "2" },
+    [pscustomobject]@{ path = $u8; section = "S"; key = "k"; value = "3" },
+    [pscustomobject]@{ path = $ro; section = "S"; key = "new"; value = "4" },
+    [pscustomobject]@{ path = $absent; section = "S"; key = "k"; value = "5" })
+$runA = Join-Path $iniDir "runA"
+New-Item -ItemType Directory -Force -Path $runA | Out-Null
+$st = Install-GameIni $entries $runA $pending "mopicselftest_noproc"
+$hlText = (Read-IniText $hl).text
+$hlLinesBefore = @($ascii.GetString($hlBytes) -split "`r`n")
+$hlLinesAfter = @($hlText -split "`r`n")
+$changed = @(for ($i = 0; $i -lt [math]::Max($hlLinesBefore.Count, $hlLinesAfter.Count); $i++) { if ($hlLinesBefore[$i] -cne $hlLinesAfter[$i]) { $i } })
+Check "install: GameUserSettings.ini$(if ($realHlBefore) { ' (a copy of the real Hogwarts file)' }): exactly the FrameGeneration line changed, to the game's Off entry" ($changed.Count -eq 1 -and $hlLinesAfter[$changed[0]] -ceq "FrameGeneration=$fgOff" -and $hlLinesBefore[$changed[0]] -like "FrameGeneration=(Mode=Intel_XeFG*") ($changed -join ",")
+Check "install: the value before recorded" ($st.entries[0].before -like "(Mode=Intel_XeFG*") $st.entries[0].before
+$u16Bytes = [System.IO.File]::ReadAllBytes($u16)
+Check "install: UTF-16 file stays UTF-16 with its BOM, its other text intact" ($u16Bytes[0] -eq 0xFF -and $u16Bytes[1] -eq 0xFE -and [System.Text.Encoding]::Unicode.GetString($u16Bytes, 2, $u16Bytes.Length - 2) -ceq "[S]`r`nk=2`r`nname=$Cn`r`n")
+$u8Bytes = [System.IO.File]::ReadAllBytes($u8)
+Check "install: UTF-8 BOM and LF line breaks kept" ($u8Bytes[0] -eq 0xEF -and [System.Text.Encoding]::UTF8.GetString($u8Bytes, 3, $u8Bytes.Length - 3) -ceq "[S]`nk=3`n")
+Check "install: a read-only file gets the key and stays read-only for the game" (((Read-IniText $ro).text -ceq "[S]`r`nk=1`r`nnew=4") -and ((Get-Item -LiteralPath $ro).Attributes -band [System.IO.FileAttributes]::ReadOnly))
+Check "install: a missing file is created" ((Test-Path -LiteralPath $absent) -and (Read-IniText $absent).text -ceq "[S]`r`nk=5`r`n")
+Check "install: journal and originals in the pending folder, copies in game-ini-before" ((Test-Path -LiteralPath (Join-Path $pending "journal.json")) -and @(Get-ChildItem -LiteralPath $pending -File).Count -eq 5 -and @(Get-ChildItem -LiteralPath (Join-Path $runA "game-ini-before") -File).Count -eq 4)
+# the game rewrites one file while it runs (UE saves its settings when it quits)
+[System.IO.File]::AppendAllText($hl, "[Extra]`r`nwritten=by the game`r`n")
+$failed = @(Restore-GameIni $st $runA)
+Check "restore: no failures" ($failed.Count -eq 0) ($failed -join "; ")
+$bad = @($states.Keys | Where-Object { (Get-FileState $_) -ne $states[$_] })
+Check "restore: every file byte for byte, with its time and attributes" ($bad.Count -eq 0) (($bad | ForEach-Object { "$_ $(Get-FileState $_) vs $($states[$_])" }) -join "; ")
+Check "restore: the file that wasn't there is gone again" (-not (Test-Path -LiteralPath $absent))
+Check "restore: the files as the game left them in game-ini-after, the values read from them" (@(Get-ChildItem -LiteralPath (Join-Path $runA "game-ini-after") -File).Count -eq 5 -and $st.entries[0].after -ceq $fgOff -and (Get-Content -LiteralPath $st.files[0].after -Raw) -like "*written=by the game*") ($st.entries | ConvertTo-Json -Compress)
+Check "restore: state per file (restored, no error)" (@($st.files | Where-Object { $_.restored -and -not $_.error }).Count -eq 5)
+Check "restore: the pending folder removed" (-not (Test-Path -LiteralPath $pending))
+
+# a harness that dies after the install: the next start puts the files back from the pending folder
+$runB = Join-Path $iniDir "runB"
+New-Item -ItemType Directory -Force -Path $runB | Out-Null
+$st = Install-GameIni $entries $runB $pending "mopicselftest_noproc"
+Remove-Item -LiteralPath $runB -Recurse -Force   # even without the run folder
+[System.IO.File]::AppendAllText($u16, "x")
+$note = Restore-PendingGameIni $pending
+$bad = @($states.Keys | Where-Object { (Get-FileState $_) -ne $states[$_] })
+Check "pending: an interrupted run's files put back at the next start" ($bad.Count -eq 0 -and -not (Test-Path -LiteralPath $absent) -and -not (Test-Path -LiteralPath $pending) -and $note -like "put back the game settings an interrupted run left changed*") "$note | $($bad -join ', ')"
+Check "pending: the interrupted run's game stopped first" (($script:stopped -join ",") -eq "mopicselftest_noproc") ($script:stopped -join ",")
+Check "pending: nothing to do -> empty note" ((Restore-PendingGameIni $pending) -eq "")
+# a value that doesn't read back (a key with a line break): nothing stays changed, the pending folder goes
+Throws "install: a value that doesn't read back fails and puts back what it changed" { Install-GameIni @([pscustomobject]@{ path = $u8; section = "S"; key = "k"; value = "a`nb" }) (Join-Path $iniDir "runC") $pending "mopicselftest_noproc" } "*reads back as*"
+Check "install failure: the file as before, no pending folder" ((Get-FileState $u8) -eq $states[$u8] -and -not (Test-Path -LiteralPath $pending))
+# files it couldn't write back unchanged are refused before anything is copied or changed
+$u16NoBom = New-IniFile "utf16-nobom.ini" ([System.Text.Encoding]::Unicode.GetBytes("[S]`r`nk=1`r`n"))
+$badU8 = New-IniFile "bad-utf8.ini" ([byte[]](@(0xEF, 0xBB, 0xBF) + @($ascii.GetBytes("[S]`r`nk=")) + @(0xC3, 0x28) + @($ascii.GetBytes("`r`n"))))
+foreach ($p in @($u16NoBom, $badU8)) {
+    $pState = Get-FileState $p
+    Throws "install: $(Split-Path -Leaf $p) refused (it wouldn't be written back the same)" { Install-GameIni @([pscustomobject]@{ path = $p; section = "S"; key = "k"; value = "2" }) (Join-Path $iniDir "runF") $pending "mopicselftest_noproc" } "*can't be changed safely*"
+    Check "install refused: $(Split-Path -Leaf $p) as before, no pending folder" ((Get-FileState $p) -eq $pState -and -not (Test-Path -LiteralPath $pending))
+}
+# a run whose files couldn't be put back leaves its journal: the next run's install must not take the changed files for
+# the originals (it refuses; the harness retries the put-back before each install)
+$runD = Join-Path $iniDir "runD"
+New-Item -ItemType Directory -Force -Path $runD | Out-Null
+$st = Install-GameIni @($entries[2]) $runD $pending "mopicselftest_noproc"
+$journalHash = Get-Hash (Join-Path $pending "journal.json")
+Throws "install: refused while an earlier run's originals are pending" { Install-GameIni @($entries[2]) (Join-Path $iniDir "runE") $pending "mopicselftest_noproc" } "*still holds the originals*"
+Check "install refused: the pending journal and original untouched" ((Get-Hash (Join-Path $pending "journal.json")) -eq $journalHash -and (Get-Hash $st.files[0].backup) -eq ($states[$u8] -split "\|")[0])
+$note = Restore-PendingGameIni $pending
+Check "the put-back retried: the file as before, the pending folder gone" ((Get-FileState $u8) -eq $states[$u8] -and -not (Test-Path -LiteralPath $pending) -and $note -like "put back*") $note
+if ($realHlBefore) { Check "the real Hogwarts GameUserSettings.ini untouched" ((Get-FileState $realHl) -eq $realHlBefore) }
+Clear-ReadOnly $ro
+
 Write-Host "== 3. install / evidence against a temp save folder"
 $sg = Join-Path $Work "SaveGames\$($real.sid64)"
 New-Item -ItemType Directory -Force -Path $sg | Out-Null
@@ -245,8 +403,8 @@ function Get-SamplerCount { return @(Get-Process -ErrorAction SilentlyContinue |
 $samplersBefore = Get-SamplerCount
 $busy = @(Get-Process -Name (@("UEVRInjector", "CrashReportClient") + $fakeNames) -ErrorAction SilentlyContinue)
 $persistentDirs = @($fakeNames | ForEach-Object { Join-Path $env:APPDATA "UnrealVRMod\$_" } | Where-Object { -not (Test-Path -LiteralPath $_) })
-if ($busy.Count -gt 0) {
-    Write-Host "SKIP  sections 4-5: $(@($busy | ForEach-Object Name) -join ', ') running (the harness would stop it)"
+if ($busy.Count -gt 0 -or $NoWindows) {
+    Write-Host "SKIP  sections 4-5: $(if ($NoWindows) { '-NoWindows' } else { "$(@($busy | ForEach-Object Name) -join ', ') running (the harness would stop it)" })"
 } else {
     # the stand-in game
     $gameDir = Join-Path $Work "game"
@@ -307,7 +465,7 @@ if ($busy.Count -gt 0) {
         for ($i = 0; $i -lt [math]::Min($dh.Count, $dn.Count); $i++) {
             $added = @($dn[$i].keys | Where-Object { $dh[$i].keys -notcontains $_ })
             $lost = @($dh[$i].keys | Where-Object { $dn[$i].keys -notcontains $_ })
-            Check "cmp $($case.name) r$($i + 1): result.json keys = before + recipe_vars, save" (($added -join ",") -eq "recipe_vars,save" -and $lost.Count -eq 0) "added $($added -join ','); lost $($lost -join ',')"
+            Check "cmp $($case.name) r$($i + 1): result.json keys = before + game_ini, perf, eyes" (($added -join ",") -eq "game_ini,perf,eyes" -and $lost.Count -eq 0) "added $($added -join ','); lost $($lost -join ',')"
             $changed = @($dh[$i].keys | Where-Object { $dh[$i].values[$_] -cne $dn[$i].values[$_] })
             Check "cmp $($case.name) r$($i + 1): result.json values as before" ($changed.Count -eq 0) (($changed | ForEach-Object { "$_ head=$($dh[$i].values[$_]) new=$($dn[$i].values[$_])" }) -join "; ")
             Check "cmp $($case.name) r$($i + 1): recipe_vars empty, save null" ($dn[$i].values["recipe_vars"] -eq '""' -and $dn[$i].values["save"] -eq "null")
@@ -514,6 +672,102 @@ if ($busy.Count -gt 0) {
     Check "e2e: the other save in the folder untouched by all of it" (((Get-Content -LiteralPath (Join-Path $e2eSg "ArchiveSaveFile.2.sav") -Encoding Byte) -join ",") -eq "2,2")
     Check "e2e: config.txt / user_script.txt of the stand-ins cleaned up" (@($fakeNames | Where-Object { (Test-Path (Join-Path $env:APPDATA "UnrealVRMod\$_\config.txt")) -or (Test-Path (Join-Path $env:APPDATA "UnrealVRMod\$_\user_script.txt")) }).Count -eq 0)
 }
+Write-Host "== 5b. -GameIni end to end (the stand-in in its windowless exit mode: no window, no game)"
+$busyNow = @(Get-Process -Name (@("UEVRInjector", "CrashReportClient") + $fakeNames) -ErrorAction SilentlyContinue)
+$pendingReal = Join-Path $Tools "runs\game-ini-pending"
+if ($busyNow.Count -gt 0 -or (Test-Path -LiteralPath $pendingReal)) {
+    Write-Host "SKIP  section 5b: $(if ($busyNow.Count -gt 0) { "$(@($busyNow | ForEach-Object Name) -join ', ') running (the harness would stop it)" } else { "$pendingReal exists (an interrupted harness run: the next harness start puts its files back)" })"
+} else {
+    $e2eIniDir = Join-Path $Work "e2e-gameini"
+    New-Item -ItemType Directory -Force -Path $e2eIniDir | Out-Null
+    $standIn = Join-Path $Work "game\mopicselftest_game.exe"
+    if (-not (Test-Path -LiteralPath $standIn)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $standIn) | Out-Null
+        Add-Type -TypeDefinition (Get-Content -LiteralPath (Join-Path $Here "fakegame.cs") -Raw) -ReferencedAssemblies System.Windows.Forms, System.Drawing -OutputAssembly $standIn -OutputType WindowsApplication
+    }
+    $iniA = Join-Path $e2eIniDir "GameUserSettings.ini"
+    $iniB = Join-Path $e2eIniDir "Engine.ini"
+    [System.IO.File]::WriteAllBytes($iniA, [System.Text.Encoding]::ASCII.GetBytes("[/Script/Game.Settings]`r`nFrameGeneration=(Mode=Intel_XeFG)`r`nOther=1`r`n`r`n"))
+    [System.IO.File]::WriteAllBytes($iniB, [System.Text.Encoding]::ASCII.GetBytes("[SystemSettings]`r`nr.X=0`r`n"))
+    (Get-Item -LiteralPath $iniA).LastWriteTimeUtc = [DateTime]::new(2026, 9, 1, 0, 0, 0, [DateTimeKind]::Utc)
+    $iniState = { "$(Get-Hash $iniA)|$((Get-Item -LiteralPath $iniA).LastWriteTimeUtc.Ticks)|$(Get-Hash $iniB)" }
+    $iniBefore = & $iniState
+    $iniSpec = "$iniA|/Script/Game.Settings|FrameGeneration=(Mode=Off,LocStr=" + [char]34 + "Off" + [char]34 + ");$iniB|SystemSettings|r.X=1"
+    $baseIni = @("-File", (Join-Path $Tools "run-test.ps1"), "-Game", "Custom", "-ProcessName", "mopicselftest_game",
+        "-LaunchTarget", $standIn, "-NoInject", "-NoPerf", "-LaunchTimeout", "30", "-EngineDir", $EngineDirReal)
+    # one harness call; its run folders go into the work folder afterwards
+    function Invoke-IniHarness([string[]]$argv, [string]$label, [string[]]$base = $baseIni) {
+        $start = Get-Date
+        $res = Invoke-PS ($base + $argv + @("-Label", $label))
+        $dirs = @(Get-ChildItem -LiteralPath (Join-Path $Tools "runs") -Directory | Where-Object { $_.Name -like "*-Custom-$label-r*" -and $_.CreationTime -ge $start.AddSeconds(-2) } | Sort-Object Name)
+        $moved = @()
+        foreach ($d in $dirs) { $dest = Join-Path $Work "harness-runs\$($d.Name)"; New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null; Move-Item -LiteralPath $d.FullName -Destination $dest; $moved += $dest }
+        return [pscustomobject]@{ code = $res.code; text = $res.text; flat = $res.flat; dirs = $moved; results = @($moved | ForEach-Object { $rp = Join-Path $_ "result.json"; if (Test-Path -LiteralPath $rp) { Read-Json $rp } }) }
+    }
+
+    # a crash: the "game" also writes the file while it runs (UE saves its settings when it quits)
+    $env:MOPIC_FAKE_GAME = "exit:3:C0000005"
+    $env:MOPIC_FAKE_GAME_TOUCH = $iniA
+    $h = Invoke-IniHarness @("-Seconds", "20", "-GameIni", $iniSpec) "selftest-gameini-crash"
+    Remove-Item Env:\MOPIC_FAKE_GAME, Env:\MOPIC_FAKE_GAME_TOUCH -ErrorAction SilentlyContinue
+    $r = $h.results | Select-Object -First 1
+    Check "e2e -GameIni CRASH: verdict, both files put back byte for byte (time too)" ($r -and $r.verdict -eq "CRASH" -and (& $iniState) -eq $iniBefore) $h.text
+    if ($r) {
+        $ge = @($r.game_ini.entries)
+        Check "e2e -GameIni: result.json game_ini: values before and as the game left them, files restored" ($ge.Count -eq 2 -and $ge[0].before -eq "(Mode=Intel_XeFG)" -and $ge[0].after -eq ("(Mode=Off,LocStr=" + [char]34 + "Off" + [char]34 + ")") -and $ge[1].before -eq "0" -and $ge[1].after -eq "1" -and @($r.game_ini.files | Where-Object { $_.restored }).Count -eq 2) ($r.game_ini | ConvertTo-Json -Compress -Depth 5)
+        $d = $h.dirs[0]
+        Check "e2e -GameIni: game-ini-before (as before) and game-ini-after (with the game's write)" ((Get-Hash (Join-Path $d "game-ini-before\1-GameUserSettings.ini")) -eq ($iniBefore -split "\|")[0] -and (Get-Content -LiteralPath (Join-Path $d "game-ini-after\1-GameUserSettings.ini") -Raw) -like "*Mode=Off*autosave")
+        $sum = @(Get-Content -LiteralPath (Join-Path $d "summary.txt") -Encoding UTF8)
+        $iniLine = @($sum | Where-Object { $_.StartsWith("game ini: GameUserSettings.ini [/Script/Game.Settings] FrameGeneration=(Mode=Off") -and $_.Contains("was (Mode=Intel_XeFG); after the run kept") -and $_.EndsWith("| put back, sha256 ok") })
+        Check "e2e -GameIni: summary.txt game ini lines" ($iniLine.Count -eq 1 -and @($sum | Where-Object { $_.StartsWith("game ini: Engine.ini [SystemSettings] r.X=1 (was 0;") }).Count -eq 1) ($sum -join " / ")
+    }
+    Check "e2e -GameIni: no pending folder left" (-not (Test-Path -LiteralPath $pendingReal))
+    Check "e2e -GameIni with -KeepGame refused before any run" ((Invoke-IniHarness @("-GameIni", $iniSpec, "-KeepGame") "selftest-gameini-keep").flat -like "*can't be combined with -KeepGame*")
+    Check "e2e -GameIni malformed refused before any run" ((Invoke-IniHarness @("-GameIni", "oops") "selftest-gameini-bad").flat -like "*-GameIni expects*")
+
+    # -EyeSampler without a recipe: the sampler reads the Mopic display (whatever it shows) while the stand-in runs,
+    # stops with it, and the report lands in result.json and summary.txt
+    $env:MOPIC_FAKE_GAME = "exit:6:0"
+    $h = Invoke-IniHarness @("-Seconds", "20", "-WaitForExit", "-EyeSampler") "selftest-eyes"
+    Remove-Item Env:\MOPIC_FAKE_GAME -ErrorAction SilentlyContinue
+    $r = $h.results | Select-Object -First 1
+    $mopic = [bool](& $Py -c "import sys; sys.path.insert(0, r'$Tools'); import gamepilot; print(gamepilot.mopic_monitor() or '')" | Where-Object { $_ -match '\d' })
+    if ($r -and $h.dirs.Count -ge 1) {
+        $sum = @(Get-Content -LiteralPath (Join-Path $h.dirs[0] "summary.txt") -Encoding UTF8)
+        $eyesLine = @($sum | Where-Object { $_ -like "eyes*" })
+        if ($mopic) {
+            Check "e2e -EyeSampler: PASS, ~120 samples a second while the stand-in ran, stopped with it, eyes block and line" ($r.verdict -eq "PASS" -and $r.eyes.samples -gt 300 -and $r.eyes.rate_hz -gt 100 -and $r.eyes.stopped_by -in @("game exited", "stop file") -and $eyesLine.Count -eq 1 -and $eyesLine[0].StartsWith("eyes[") -and $eyesLine[0].Contains("no segments")) (($eyesLine -join " / ") + " | " + ($r.eyes | ConvertTo-Json -Compress -Depth 3))
+        } else {
+            Check "e2e -EyeSampler without a Mopic display: no samples, said so" ($r.verdict -eq "PASS" -and $null -eq $r.eyes -and $eyesLine.Count -eq 1 -and $eyesLine[0] -like "eyes: no samples*") ($eyesLine -join " / ")
+        }
+        $leaf = Split-Path -Leaf $h.dirs[0]
+        Check "e2e -EyeSampler: no sampler left running" (@(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -like "*eyesampler.py*$leaf*" }).Count -eq 0)
+    } else {
+        Check "e2e -EyeSampler: a run folder with result.json" $false $h.text
+    }
+
+    # a harness killed while the game runs: its changes stay, the next harness start puts them back (and stops the game)
+    $env:MOPIC_FAKE_GAME = "exit:90:0"
+    $argv = @("-NoProfile", "-ExecutionPolicy", "Bypass") + $baseIni + @("-Seconds", "80", "-GameIni", $iniSpec, "-Label", "selftest-gameini-killed")
+    $killed = Start-Process -FilePath "powershell.exe" -ArgumentList (@($argv | ForEach-Object { ConvertTo-Argv $_ }) -join " ") -WindowStyle Hidden -PassThru
+    Remove-Item Env:\MOPIC_FAKE_GAME -ErrorAction SilentlyContinue
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline -and -not ((Test-Path -LiteralPath (Join-Path $pendingReal "journal.json")) -and (Get-Process -Name "mopicselftest_game" -ErrorAction SilentlyContinue))) { Start-Sleep -Milliseconds 500 }
+    Start-Sleep -Seconds 2
+    $changedWhileRunning = (& $iniState) -ne $iniBefore
+    try { Stop-Process -Id $killed.Id -Force } catch { }
+    $killed.WaitForExit(10000) | Out-Null
+    Check "e2e killed harness: the files were changed and the journal written while the game ran" ($changedWhileRunning -and (Test-Path -LiteralPath (Join-Path $pendingReal "journal.json")) -and @(Get-Process -Name "mopicselftest_game" -ErrorAction SilentlyContinue).Count -eq 1)
+    # the next harness start, without -GameIni: a launch that fails at once (HARNESS_ERROR), after the put-back
+    $baseNext = @($baseIni[0..5]) + @("-LaunchTarget", (Join-Path $Work "nope\missing.exe")) + @($baseIni[8..($baseIni.Count - 1)])
+    $h = Invoke-IniHarness @() "selftest-gameini-next" $baseNext
+    $r = $h.results | Select-Object -First 1
+    Check "e2e next harness start: files put back first, the interrupted run's game stopped, noted in run 1" ((& $iniState) -eq $iniBefore -and -not (Test-Path -LiteralPath $pendingReal) -and @(Get-Process -Name "mopicselftest_game" -ErrorAction SilentlyContinue).Count -eq 0 -and $r -and (@($r.notes) -join ";") -like "*put back the game settings an interrupted run left changed*" -and $h.flat -like "*put back the game settings an interrupted run left changed*") $h.text
+    Get-ChildItem -LiteralPath (Join-Path $Tools "runs") -Directory | Where-Object { $_.Name -like "*-Custom-selftest-gameini-killed-r*" } | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Work "harness-runs\$($_.Name)") }
+    Get-Process -Name "mopicselftest_game" -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); $_.WaitForExit(5000) | Out-Null }
+    # the killed harness never put back the stand-in's UEVR config.txt (only made for this self-test)
+    foreach ($p in $persistentDirs) { foreach ($n in @("config.txt", "user_script.txt")) { $f = Join-Path $p $n; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } } }
+}
 foreach ($p in $persistentDirs) { if ((Test-Path -LiteralPath $p) -and @(Get-ChildItem -LiteralPath $p -Force).Count -eq 0) { Remove-Item -LiteralPath $p } }
 
 Write-Host "== 6. run-ladder.ps1"
@@ -659,6 +913,16 @@ $pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py (Join-Path $Here "self
 $pyOut | Where-Object { $_ -like "FAIL*" -or $_ -like "  line: *" -or $_ -like "Traceback*" -or $_ -match "Error" } | ForEach-Object { Write-Host "  $_" }
 $pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
 Check "frame-rate self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
+
+Write-Host "== 7c. the eye sampler on synthetic side-by-side frames (analysis\eyesampler.py), gamepilot's mopic-sbs crop"
+foreach ($f in @((Join-Path $Tools "analysis\eyesampler.py"), (Join-Path $Here "selftest_eyes.py"))) {
+    & { $ErrorActionPreference = "Continue"; & $Py -W error -m py_compile $f 2>&1 | ForEach-Object { Write-Host "      $_" } }
+    Check "py_compile $(Split-Path -Leaf $f) (warnings as errors)" ($LASTEXITCODE -eq 0)
+}
+$pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py -W error (Join-Path $Here "selftest_eyes.py") (Join-Path $Work "eyes") 2>&1 | ForEach-Object { "$_" } })
+$pyOut | Where-Object { $_ -like "FAIL*" -or $_ -like "  line: *" -or $_ -like "Traceback*" -or $_ -match "Error" } | ForEach-Object { Write-Host "  $_" }
+$pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
+Check "eye sampler self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
 
 Write-Host "== 8. the real save folder"
 Check "real Wukong save folder unchanged by the self-test" ((Get-Listing $RealSaveDir) -join "`n" -eq ($realBefore -join "`n"))

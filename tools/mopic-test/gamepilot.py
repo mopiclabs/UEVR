@@ -346,12 +346,25 @@ def mopic_monitor():
     return None
 
 
+MOPIC_SOURCES = ("mopic", "mopic-sbs")
+
+
+def sbs_left_eye(img, width, height):
+    """A capture of the Mopic display while monado-service runs with MOPIC_MODE=sbs (left eye | right eye, each
+    squeezed into half the width) -> the left eye stretched back to width x height (the full display's shape), so
+    it lines up with what the checkpoints were recorded on (the woven display, where UI at the zero-parallax plane
+    sits where the 2D picture has it)."""
+    from PIL import Image
+    return img.crop((0, 0, img.width // 2, img.height)).resize((width, height), Image.LANCZOS)
+
+
 def grab(hwnd, max_width, source="window"):
-    """(image, meta) of the game window, or of the Mopic display with source="mopic"."""
+    """(image, meta) of the game window, or of the Mopic display with source="mopic" ("mopic-sbs": its left eye
+    while monado-service shows side by side)."""
     import mss
     from PIL import Image
     l, t, r, b = window_rect(hwnd)
-    if source == "mopic":
+    if source in MOPIC_SOURCES:
         m = mopic_monitor()
         if m is None:
             raise SystemExit("no Mopic display found")
@@ -362,6 +375,9 @@ def grab(hwnd, max_width, source="window"):
     scale = 1.0
     if img.width > max_width:
         scale = max_width / img.width
+    if source == "mopic-sbs":
+        img = sbs_left_eye(img, max_width if scale != 1.0 else img.width, int(img.height * scale))
+    elif scale != 1.0:
         img = img.resize((max_width, int(img.height * scale)), Image.LANCZOS)
     meta = {"rect": [l, t, r, b], "scale": scale, "size": [img.width, img.height],
             "source": source, "window": list(window_rect(hwnd)), "time": time.time()}
@@ -487,7 +503,7 @@ def shot_to_screen(x, y, meta=None):
             meta = json.load(f)
     l, t, r, b = meta["rect"]
     sx, sy = l + x / meta["scale"], t + y / meta["scale"]
-    if meta.get("source") != "mopic":
+    if meta.get("source") not in MOPIC_SOURCES:
         return int(sx), int(sy)
     wl, wt_, wr, wb = meta["window"]
     ww, wh, dw, dh = wr - wl, wb - wt_, r - l, b - t
@@ -1266,7 +1282,8 @@ def main():
     sub.add_parser("focus")
     sub.add_parser("status")
     s = sub.add_parser("shot"); s.add_argument("--out", default=os.path.join(STATE_DIR, "shot.png")); s.add_argument("--max-width", type=int, default=1280)
-    s.add_argument("--source", choices=["window", "mopic"], default="window", help="mopic: capture the Mopic display (what the viewer sees)")
+    s.add_argument("--source", choices=["window", "mopic", "mopic-sbs"], default="window",
+                   help="mopic: capture the Mopic display (what the viewer sees); mopic-sbs: its left eye while monado-service runs with MOPIC_MODE=sbs")
     s = sub.add_parser("key"); s.add_argument("name"); s.add_argument("--times", type=int, default=1); s.add_argument("--hold", type=int, default=80); s.add_argument("--gap", type=int, default=250)
     s = sub.add_parser("keys"); s.add_argument("names"); s.add_argument("--hold", type=int, default=80); s.add_argument("--gap", type=int, default=350)
     s = sub.add_parser("click"); s.add_argument("x", type=float); s.add_argument("y", type=float); s.add_argument("--button", default="left"); s.add_argument("--double", action="store_true")
@@ -1276,7 +1293,8 @@ def main():
     s = sub.add_parser("run", help="replay a recipe"); s.add_argument("recipe"); s.add_argument("--out", default=os.path.join(STATE_DIR, "run"))
     s.add_argument("--status", default="", help="JSON status file for the harness")
     s.add_argument("--steps", default="", help="only these steps, e.g. 9-12 or 9- (1-based, as in pilot.log)")
-    s.add_argument("--source", choices=["window", "mopic"], default=None, help="override the recipe's capture source (window: the game without UEVR)")
+    s.add_argument("--source", choices=["window", "mopic", "mopic-sbs"], default=None,
+                   help="override the recipe's capture source (window: the game without UEVR; mopic-sbs: a mopic recipe while monado-service runs with MOPIC_MODE=sbs)")
     s.add_argument("--var", action="append", default=[], metavar="NAME=VALUE", help="value for ${NAME} in the recipe's steps (repeatable)")
     s.add_argument("--dry-run", action="store_true", help="print the steps after --var substitution and exit (no game needed)")
     s = sub.add_parser("matrix", help="score all checkpoints against screenshots (each screen should match one)")
@@ -1287,8 +1305,8 @@ def main():
     s.add_argument("--from", dest="src", default="", help="screenshot to crop/test (default: save uses the last shot, test grabs the screen)")
     s.add_argument("--threshold", type=float, default=0.8)
     s.add_argument("--mode", choices=["shape", "highlight"], default="shape", help="highlight: a menu cursor, decided by the bar's colour")
-    s.add_argument("--source", choices=["window", "mopic"], default=None,
-                   help="test: capture source (window: the game without UEVR); save: the source of a new recipe")
+    s.add_argument("--source", choices=["window", "mopic", "mopic-sbs"], default=None,
+                   help="test: capture source (window: the game without UEVR; mopic-sbs: monado-service in MOPIC_MODE=sbs); save: the source of a new recipe")
     args = ap.parse_args()
 
     if args.cmd == "matrix":

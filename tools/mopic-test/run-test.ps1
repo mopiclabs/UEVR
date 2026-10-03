@@ -24,6 +24,14 @@
 #   # A/B without rebuilding: config overrides / console commands for this run only
 #   ... -Set "VR_NativeStereoFix=false" -UserScript "r.ScreenPercentage 100" -Label nsf-off
 #
+#   # the game's own settings for this run only (GameUserSettings.ini in its config folder; put back byte for byte
+#   # afterwards, also after a crash or a killed harness: runs\game-ini-pending\ until then)
+#   ... -Game Hogwarts -GameIni 'GameUserSettings.ini|/Script/Phoenix.PhoenixGameSettings|FrameGeneration=(Mode=Off,NumFramesInterpolated=0,LocStr="Off")'
+#
+#   # each eye on the Mopic display during the recipe's measured segments (monado-service started with MOPIC_MODE=sbs;
+#   # the pilot then reads the left eye: -MopicSbs)
+#   ... -Game Hogwarts -Recipe Hogwarts-eyes -EyeSampler
+#
 #   # start from a given save: copied over the recipe's "save_slot" before each run (the game's copy after the
 #   # run lands in <run>\save-after\); -RecipeVars fills the recipe's "vars" (${name} in its steps, gamepilot run --var)
 #   ... -Game Wukong -Recipe Wukong-save -SaveFile saves\wukong\x.sav -RecipeVars "play_s=180" -Label ladder
@@ -49,6 +57,7 @@
 # and allowed) sample while the game runs; UEVR's perf.csv / perf-frames.csv, monado-service's app frame stats for the
 # run and the game's GameUserSettings.ini are copied into the run folder, and perfreport.py cuts them to the measured
 # gameplay into perf.json: a "perf" block in result.json and a "perf[...]" line in summary.txt. Never a verdict.
+# -EyeSampler adds eyes.csv / eyes-report.json: an "eyes" block and an "eyes[...]" line, never a verdict either.
 #
 # Exit code: 0 if every run passed, 1 otherwise.
 #
@@ -86,6 +95,10 @@ param(
     [switch]$NoPerf,                  # no frame-rate measurement: no nvidia-smi / PresentMon sampling, no VR_PerfLog override, no perf.json
     [ValidateSet("auto", "off")]
     [string]$PresentMon = "auto",     # auto: also capture the game's Presents with the PresentMon console app when it is installed and allowed (admin or Performance Log Users)
+    [string]$GameIni = "",            # the game's own settings for this run only, "file|Section|Key=Value;Key2=Value2" (file: GameUserSettings.ini, Engine.ini... in its config folder, or a full path); put back byte for byte afterwards
+    [switch]$MopicSbs,                # monado-service runs with MOPIC_MODE=sbs: the pilot reads a "mopic" recipe's screens from the left eye (gamepilot --source mopic-sbs)
+    [switch]$EyeSampler,              # sample each eye on the Mopic display (analysis\eyesampler.py) during the recipe's measured segments (the whole observation without a recipe); needs MOPIC_MODE=sbs, implies -MopicSbs
+    [string]$EyeSamplerArgs = "",     # more eyesampler.py sample arguments, e.g. "--hz 90 --y 0.4"
     [string]$EyeLumaLog = "",         # optional log with lines like "eye_luma left=0.183 right=0.179"
     [string]$EyeLumaPattern = 'eye_luma\s+left=([0-9.]+)\s+right=([0-9.]+)'
 )
@@ -244,15 +257,15 @@ function Get-SavePlaceholderValues([string]$gameDir) {
     }
 }
 
-function Expand-SavePlaceholders([string]$text, [hashtable]$values) {
+function Expand-SavePlaceholders([string]$text, [hashtable]$values, [string]$what = "save_slot") {
     $out = $text
     foreach ($m in [regex]::Matches($text, '\{([A-Za-z0-9_]+)\}')) {
         $name = $m.Groups[1].Value
-        if (-not $values.ContainsKey($name)) { throw "save_slot: unknown placeholder {$name} in '$text' (known: $((@($values.Keys) | Sort-Object | ForEach-Object { "{$_}" }) -join ' '))" }
+        if (-not $values.ContainsKey($name)) { throw "${what}: unknown placeholder {$name} in '$text' (known: $((@($values.Keys) | Sort-Object | ForEach-Object { "{$_}" }) -join ' '))" }
         $value = $values[$name]
         if ($null -eq $value -or [string]$value -eq "") {
             $why = $(if ($name -in @("sid64", "accountid")) { "no Steam user is logged in" } else { "the game's install folder was not found" })
-            throw "save_slot: {$name} in '$text' has no value ($why)"
+            throw "${what}: {$name} in '$text' has no value ($why)"
         }
         $out = $out.Replace($m.Value, [string]$value)
     }
@@ -381,6 +394,322 @@ function Set-ConfigValues([string]$path, [hashtable]$values) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
     # no BOM: UEVR's config parser would read it as part of the first key
     [System.IO.File]::WriteAllLines($path, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# --- the game's own settings files for one run (-GameIni, a recipe's "game_ini"): changed with the game gone, put
+# back byte for byte once it is gone again (also after crashes, hangs and HARNESS_ERROR). The files as they were
+# also go to runs\game-ini-pending\ with a journal before anything changes, so a harness that dies before its
+# restore (killed, closed, power loss) is undone by the next harness start.
+
+# -GameIni "file|Section|Key=Value;Key2=Value2;file2|Section2|Key=Value" -> entries {file, section, key, value}. An
+# entry without "file|" keeps the previous file (the first one defaults to GameUserSettings.ini), one with only
+# Key=Value the previous section too. The value is everything after the first "=" (it may hold "|", "=", quotes,
+# parentheses), but no ";".
+function ConvertFrom-GameIniSpec([string]$text) {
+    $out = @()
+    $file = ""
+    $section = ""
+    foreach ($part in ($text -split ";")) {
+        if ($part.Trim() -eq "") { continue }
+        $eq = $part.IndexOf("=")
+        $head = @()
+        if ($eq -gt 0) { $head = @($part.Substring(0, $eq).Split("|") | ForEach-Object { $_.Trim() }) }
+        if ($eq -le 0 -or $head.Count -gt 3 -or $head[-1] -eq "") { throw "-GameIni expects [file|][Section|]Key=Value entries separated by ';', got '$part'" }
+        if ($head.Count -eq 3) { $file = $head[0]; $section = $head[1] }
+        elseif ($head.Count -eq 2) { $section = $head[0]; if ($file -eq "") { $file = "GameUserSettings.ini" } }
+        $section = $section.Trim().TrimStart("[").TrimEnd("]")
+        if ($file -eq "" -or $section -eq "") { throw "-GameIni: '$part' needs a file and a section (file|Section|Key=Value)" }
+        $out += [pscustomobject][ordered]@{ file = $file; section = $section; key = $head[-1]; value = $part.Substring($eq + 1).Trim() }
+    }
+    return $out
+}
+
+# A recipe's "game_ini": {"<file>": {"<Section>": {"<Key>": "<Value>"}}} -> the same entries
+function ConvertFrom-GameIniBlock($block) {
+    $out = @()
+    if ($block -isnot [System.Management.Automation.PSCustomObject]) { throw "`"game_ini`" must be an object {file: {Section: {Key: Value}}}" }
+    foreach ($f in $block.PSObject.Properties) {
+        if ($f.Value -isnot [System.Management.Automation.PSCustomObject]) { throw "`"game_ini`".`"$($f.Name)`" must be an object {Section: {Key: Value}}" }
+        foreach ($s in $f.Value.PSObject.Properties) {
+            if ($s.Value -isnot [System.Management.Automation.PSCustomObject]) { throw "`"game_ini`".`"$($f.Name)`".`"$($s.Name)`" must be an object {Key: Value}" }
+            foreach ($k in $s.Value.PSObject.Properties) {
+                # UE writes booleans as True / False
+                $v = $k.Value; if ($v -is [bool]) { $v = $(if ($v) { "True" } else { "False" }) }
+                $out += [pscustomobject][ordered]@{ file = $f.Name; section = $s.Name.Trim().TrimStart("[").TrimEnd("]"); key = $k.Name; value = [string]$v }
+            }
+        }
+    }
+    return $out
+}
+
+# The file an entry names: a bare file name is in the game's config folder (next to its GameUserSettings.ini: Engine.ini,
+# Scalability.ini, ...), anything else an absolute path, with save_slot's placeholders ({localappdata}, {gamedir}, ...)
+function Resolve-GameIniPath([string]$file, [string]$configDir, [hashtable]$values) {
+    $p = Expand-SavePlaceholders $file $values "-GameIni"
+    if ($p -eq [System.IO.Path]::GetFileName($p)) {
+        if (-not $configDir) { throw "-GameIni: '$file' is a file name, but this game has no config folder with a GameUserSettings.ini (give the full path)" }
+        $p = Join-Path $configDir $p
+    } elseif (-not [System.IO.Path]::IsPathRooted($p)) {
+        throw "-GameIni: '$file' is neither a file name nor an absolute path"
+    }
+    $p = [System.IO.Path]::GetFullPath($p)
+    if (-not (Test-Path -LiteralPath (Split-Path -Parent $p) -PathType Container)) { throw "-GameIni: folder not found: $(Split-Path -Parent $p)" }
+    if (Test-Path -LiteralPath $p -PathType Container) { throw "-GameIni: $p is a folder" }
+    return $p
+}
+
+# An ini file's text and how to write it back the same way: its encoding and byte order mark (UE writes UTF-16 LE with
+# a BOM once a value needs it, else plain ASCII / UTF-8) and its line breaks
+function Read-IniText([string]$path) {
+    $b = [System.IO.File]::ReadAllBytes($path)
+    $skip = 0
+    if ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { $enc = New-Object System.Text.UTF8Encoding($true); $skip = 3 }
+    elseif ($b.Length -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) { $enc = New-Object System.Text.UnicodeEncoding($false, $true); $skip = 2 }
+    elseif ($b.Length -ge 2 -and $b[0] -eq 0xFE -and $b[1] -eq 0xFF) { $enc = New-Object System.Text.UnicodeEncoding($true, $true); $skip = 2 }
+    else {
+        $enc = New-Object System.Text.UTF8Encoding($false, $true)
+        try { $null = $enc.GetString($b) } catch { $enc = [System.Text.Encoding]::Default }   # not UTF-8: the ANSI code page
+    }
+    $text = $enc.GetString($b, $skip, $b.Length - $skip)
+    $nl = $(if ($text.Contains("`r`n")) { "`r`n" } elseif ($text.Contains("`n")) { "`n" } else { "`r`n" })
+    # written back unchanged, the text has to give the same bytes, or "every other line stays" can't hold (UTF-16
+    # without its BOM reads as text with NULs; a code page that doesn't map every byte back)
+    $back = [byte[]](@($enc.GetPreamble()) + @($enc.GetBytes($text)))
+    $why = $(if ($text.IndexOf([char]0) -ge 0) { "it has NUL characters (UTF-16 without a byte order mark?)" }
+        elseif ([Convert]::ToBase64String($back) -cne [Convert]::ToBase64String($b)) { "its text doesn't encode back to the same bytes ($($enc.WebName))" }
+        else { $null })
+    return [pscustomobject]@{ text = $text; encoding = $enc; nl = $nl; roundtrip = ($null -eq $why); why = $why }
+}
+
+function Write-IniText([string]$path, $ini) {
+    $bytes = [byte[]]@($ini.encoding.GetPreamble()) + $ini.encoding.GetBytes($ini.text)
+    [System.IO.File]::WriteAllBytes($path, [byte[]]$bytes)
+}
+
+# The line index ranges of [Section]'s blocks, in file order: {start = the header's index, end = the next header or
+# the end}, none when the file has no such section. UE reads a section that appears twice as one. Sections and keys
+# compare without case, as UE's config does.
+function Find-IniSection([System.Collections.Generic.List[string]]$lines, [string]$section) {
+    $blocks = @()
+    $start = -1
+    for ($i = 0; $i -le $lines.Count; $i++) {
+        $header = $i -lt $lines.Count -and $lines[$i].TrimStart().StartsWith("[")
+        if (-not $header -and $i -lt $lines.Count) { continue }
+        if ($start -ge 0) { $blocks += [pscustomobject]@{ start = $start; end = $i }; $start = -1 }
+        if ($header -and $lines[$i].Trim() -ieq "[$section]") { $start = $i }
+    }
+    return $blocks
+}
+
+# The line indexes of Key in [Section] (every block), in file order
+function Find-IniKeyLines([System.Collections.Generic.List[string]]$lines, $blocks, [string]$key) {
+    $hits = @()
+    foreach ($blk in $blocks) {
+        for ($i = $blk.start + 1; $i -lt $blk.end; $i++) {
+            $eq = $lines[$i].IndexOf("=")
+            if ($eq -gt 0 -and $lines[$i].Substring(0, $eq).Trim() -ieq $key) { $hits += $i }
+        }
+    }
+    return $hits
+}
+
+function Split-IniLines([string]$text, [string]$nl) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.AddRange([string[]]$text.Split([string[]]@($nl), [StringSplitOptions]::None))
+    return , $lines
+}
+
+# Key's value in [Section] (its first line there), $null when the file has no such key
+function Get-IniValue([string]$text, [string]$nl, [string]$section, [string]$key) {
+    $lines = Split-IniLines $text $nl
+    $hits = @(Find-IniKeyLines $lines @(Find-IniSection $lines $section) $key)
+    if ($hits.Count -eq 0) { return $null }
+    return $lines[$hits[0]].Substring($lines[$hits[0]].IndexOf("=") + 1)
+}
+
+# Key=Value in [Section]: the key's first line there gets the value and further lines of the same key are dropped,
+# also in a second block of the section (it ends up with this one value); a missing key goes after the section's last
+# line, a missing section to the end of the file. Every other line stays as it was. -> the new text and the value
+# before ($null: there was none)
+function Set-IniValue([string]$text, [string]$nl, [string]$section, [string]$key, [string]$value) {
+    $lines = Split-IniLines $text $nl
+    $blocks = @(Find-IniSection $lines $section)
+    $old = $null
+    if ($blocks.Count -eq 0) {
+        $at = $lines.Count
+        while ($at -gt 0 -and $lines[$at - 1].Trim() -eq "") { $at-- }
+        $add = @("[$section]", "$key=$value")
+        if ($at -gt 0) { $add = @("") + $add }
+        $lines.InsertRange($at, [string[]]$add)
+    } else {
+        $hits = @(Find-IniKeyLines $lines $blocks $key)
+        if ($hits.Count -gt 0) {
+            $eq = $lines[$hits[0]].IndexOf("=")
+            $old = $lines[$hits[0]].Substring($eq + 1)
+            $lines[$hits[0]] = $lines[$hits[0]].Substring(0, $eq) + "=" + $value
+            # the later lines from the back, so the indexes still to go stay valid
+            for ($h = $hits.Count - 1; $h -ge 1; $h--) { $lines.RemoveAt($hits[$h]) }
+        } else {
+            $start = $blocks[0].start
+            $at = $blocks[0].end
+            while ($at -gt $start + 1 -and $lines[$at - 1].Trim() -eq "") { $at-- }
+            $lines.Insert($at, "$key=$value")
+        }
+    }
+    return [pscustomobject]@{ text = ($lines -join $nl); old = $old }
+}
+
+function Clear-ReadOnly([string]$path) {
+    $item = Get-Item -LiteralPath $path -Force
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReadOnly) { $item.Attributes = $item.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly) }
+}
+
+# Puts one file back as it was before the run: its bytes, time and attributes (a file that wasn't there is removed
+# again), then checks its sha256. -> $null, or why it failed
+function Restore-GameIniFile($f) {
+    try {
+        if ($f.existed) {
+            if (Test-Path -LiteralPath $f.path -PathType Leaf) { Clear-ReadOnly $f.path }
+            Copy-FileRetry $f.backup $f.path 30
+            Clear-ReadOnly $f.path
+            (Get-Item -LiteralPath $f.path -Force).LastWriteTimeUtc = [DateTime]::new([int64]$f.modified, [DateTimeKind]::Utc)
+            (Get-Item -LiteralPath $f.path -Force).Attributes = [System.IO.FileAttributes]([string]$f.attributes)
+            $hash = (Get-FileHash -LiteralPath $f.path -Algorithm SHA256).Hash
+            if ($hash -ne $f.sha256) { return "sha256 $hash after the restore, $($f.sha256) before the run" }
+        } elseif (Test-Path -LiteralPath $f.path -PathType Leaf) {
+            Clear-ReadOnly $f.path
+            Remove-Item -LiteralPath $f.path -Force
+        }
+        return $null
+    } catch {
+        return $_.Exception.Message
+    }
+}
+
+# Changes the files for a run. Each file as it was goes to <pendingDir> (with journal.json, written before the first
+# byte changes) and to <runDir>\game-ini-before\; then its keys are set and read back. A failure puts back what was
+# changed and throws. -> the run's state (files, entries with their values before) for Restore-GameIni and result.json
+function Install-GameIni($entries, [string]$runDir, [string]$pendingDir, [string]$processName) {
+    # the originals of an earlier run that couldn't be put back exist only in the pending folder: never copied over
+    if (Test-Path -LiteralPath (Join-Path $pendingDir "journal.json")) { throw "$pendingDir still holds the originals of an earlier run that were not put back" }
+    $paths = @($entries | ForEach-Object { $_.path } | Select-Object -Unique)
+    $runEntries = @($entries | ForEach-Object { [pscustomobject][ordered]@{ path = $_.path; section = $_.section; key = $_.key; value = $_.value; before = $null; after = $null } })
+    # every file has to be text that is written back the same way (checked before anything is copied or changed)
+    foreach ($path in $paths) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $probe = Read-IniText $path
+            if (-not $probe.roundtrip) { throw "$path can't be changed safely: $($probe.why)" }
+        }
+    }
+    $beforeDir = Join-Path $runDir "game-ini-before"
+    $files = @()
+    $n = 0
+    try {
+        New-Item -ItemType Directory -Force -Path $pendingDir | Out-Null
+        foreach ($path in $paths) {
+            $n++
+            $f = [pscustomobject][ordered]@{ path = $path; existed = (Test-Path -LiteralPath $path -PathType Leaf); sha256 = $null; size = $null
+                modified = $null; attributes = $null; backup = $null; run_copy = $null; after = $null; after_sha256 = $null; restored = $null; error = $null }
+            if ($f.existed) {
+                $item = Get-Item -LiteralPath $path -Force
+                $f.sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+                $f.size = $item.Length
+                $f.modified = $item.LastWriteTimeUtc.Ticks
+                $f.attributes = [string]$item.Attributes
+                $f.backup = Join-Path $pendingDir ("$n-" + $item.Name)
+                Copy-FileRetry $path $f.backup 30
+                Clear-ReadOnly $f.backup
+                if ((Get-FileHash -LiteralPath $f.backup -Algorithm SHA256).Hash -ne $f.sha256) { throw "the copy of $path in $pendingDir differs from it" }
+                New-Item -ItemType Directory -Force -Path $beforeDir | Out-Null
+                $f.run_copy = Join-Path $beforeDir ("$n-" + $item.Name)
+                Copy-Item -LiteralPath $f.backup -Destination $f.run_copy -Force
+            }
+            $files += $f
+        }
+        $journal = [ordered]@{ run = $runDir; process = $processName; written = (Get-Date).ToString("s")
+            files = @($files | ForEach-Object { [ordered]@{ path = $_.path; existed = $_.existed; sha256 = $_.sha256; modified = $_.modified; attributes = $_.attributes; backup = $_.backup } }) }
+        $tmp = Join-Path $pendingDir "journal.json.tmp"
+        [System.IO.File]::WriteAllText($tmp, (ConvertTo-Json $journal -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination (Join-Path $pendingDir "journal.json") -Force
+    } catch {
+        # nothing changed yet: the copies (and a journal, if it got written) are of no use
+        Remove-Item -LiteralPath $pendingDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    try {
+        foreach ($f in $files) {
+            $ini = $(if ($f.existed) { Read-IniText $f.path } else { [pscustomobject]@{ text = ""; encoding = (New-Object System.Text.UTF8Encoding($false)); nl = "`r`n"; roundtrip = $true; why = $null } })
+            if (-not $ini.roundtrip) { throw "$($f.path) can't be changed safely: $($ini.why)" }
+            foreach ($e in @($runEntries | Where-Object { $_.path -eq $f.path })) {
+                $r = Set-IniValue $ini.text $ini.nl $e.section $e.key $e.value
+                $e.before = $r.old
+                $ini.text = $r.text
+            }
+            if ($f.existed) { Clear-ReadOnly $f.path }
+            Write-IniText $f.path $ini
+            # a read-only file stays read-only for the game
+            if ($f.existed) { (Get-Item -LiteralPath $f.path -Force).Attributes = [System.IO.FileAttributes]([string]$f.attributes) }
+            $check = Read-IniText $f.path
+            foreach ($e in @($runEntries | Where-Object { $_.path -eq $f.path })) {
+                $got = Get-IniValue $check.text $check.nl $e.section $e.key
+                if ($got -cne $e.value) { throw "$($f.path) [$($e.section)] $($e.key) reads back as '$got', not '$($e.value)'" }
+            }
+        }
+    } catch {
+        $why = $_.Exception.Message
+        $left = @($files | ForEach-Object { $err = Restore-GameIniFile $_; if ($err) { "$($_.path): $err" } })
+        if ($left.Count -eq 0) { Remove-Item -LiteralPath $pendingDir -Recurse -Force -ErrorAction SilentlyContinue }
+        else { $why += " (and putting back failed: $($left -join '; '); $pendingDir keeps the originals)" }
+        throw $why
+    }
+    return [pscustomobject][ordered]@{ files = $files; entries = $runEntries; pending = $pendingDir }
+}
+
+# After the run, with the game gone: each file as the game left it goes to <runDir>\game-ini-after\ (did it keep the
+# values?), then the original goes back. The pending folder is removed once every file is back. -> the failures
+function Restore-GameIni($state, [string]$runDir) {
+    $afterDir = Join-Path $runDir "game-ini-after"
+    $failed = @()
+    $n = 0
+    foreach ($f in $state.files) {
+        $n++
+        if (Test-Path -LiteralPath $f.path -PathType Leaf) {
+            try {
+                New-Item -ItemType Directory -Force -Path $afterDir | Out-Null
+                $dest = Join-Path $afterDir ("$n-" + (Split-Path -Leaf $f.path))
+                Copy-FileRetry $f.path $dest 10
+                Clear-ReadOnly $dest
+                $f.after = $dest
+                $f.after_sha256 = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+                $ini = Read-IniText $dest
+                foreach ($e in @($state.entries | Where-Object { $_.path -eq $f.path })) { $e.after = Get-IniValue $ini.text $ini.nl $e.section $e.key }
+            } catch { }
+        }
+        $err = Restore-GameIniFile $f
+        $f.restored = ($null -eq $err)
+        $f.error = $err
+        if ($err) { $failed += "$($f.path): $err" }
+    }
+    if ($failed.Count -eq 0) { Remove-Item -LiteralPath $state.pending -Recurse -Force -ErrorAction SilentlyContinue }
+    return $failed
+}
+
+# The journal of a harness that died before its restore: its game is stopped (it would write its settings when it
+# quits) and its files go back before anything else runs. -> a note, or "" when there was nothing to do; throws
+# when a file can't be put back (nothing should run on settings left changed)
+function Restore-PendingGameIni([string]$pendingDir) {
+    $journalPath = Join-Path $pendingDir "journal.json"
+    if (-not (Test-Path -LiteralPath $journalPath -PathType Leaf)) { return "" }
+    $doc = Get-Content -LiteralPath $journalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($doc.process) { Stop-Leftovers ([string]$doc.process) }
+    $failed = @()
+    foreach ($f in @($doc.files)) {
+        $err = Restore-GameIniFile $f
+        if ($err) { $failed += "$($f.path): $err" }
+    }
+    if ($failed.Count -gt 0) { throw "could not put back the game settings an interrupted run changed ($($doc.run)): $($failed -join '; ') (originals and journal in $pendingDir)" }
+    Remove-Item -LiteralPath $pendingDir -Recurse -Force
+    return "put back the game settings an interrupted run left changed ($($doc.run)): $((@($doc.files) | ForEach-Object { $_.path }) -join ', ')"
 }
 
 function Get-GameProcess([string]$processName) {
@@ -620,6 +949,36 @@ function Invoke-PerfReport([string]$runDir) {
     return [pscustomobject]@{ summary = $null; line = "perf: perfreport.py failed ($why)" }
 }
 
+# --- each eye on the Mopic display (-EyeSampler: analysis\eyesampler.py, monado-service in MOPIC_MODE=sbs)
+
+# Asks the sampler to stop through its stop file (it then writes eyes-meta.json); killed after 10 s
+function Stop-EyeSampler($proc, [string]$stopFile) {
+    if (-not $proc -or $proc.HasExited) { return }
+    try { [System.IO.File]::WriteAllText($stopFile, "stop") } catch { }
+    if (-not $proc.WaitForExit(10000)) { try { $proc.Kill() } catch { } }
+}
+
+# eyesampler.py report over the run folder (eyes-report.json) -> its summary (result.json's "eyes") and summary.txt line
+function Invoke-EyeReport([string]$runDir) {
+    if (-not (Test-Path -LiteralPath (Join-Path $runDir "eyes.csv"))) {
+        $err = @((Read-Shared (Join-Path $runDir "eyes.err.txt")) -split "\r?\n" | Where-Object { $_.Trim() -ne "" }) | Select-Object -Last 1
+        return [pscustomobject]@{ summary = $null; line = "eyes: no samples (the sampler wrote no eyes.csv$(if ($err) { ": $err" }))" }
+    }
+    $output = @()
+    try { $output = @(& { $ErrorActionPreference = "Continue"; & $PilotPython $EyeScript "report" $runDir 2>&1 | ForEach-Object { "$_" } }) } catch { $output = @($_.Exception.Message) }
+    $reportPath = Join-Path $runDir "eyes-report.json"
+    if (Test-Path -LiteralPath $reportPath) {
+        try {
+            $doc = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            return [pscustomobject]@{ summary = $doc.summary; line = [string]$doc.line }
+        } catch {
+            $output += "eyes-report.json: $($_.Exception.Message)"
+        }
+    }
+    $why = @($output | Where-Object { "$_".Trim() -ne "" }) | Select-Object -Last 1
+    return [pscustomobject]@{ summary = $null; line = "eyes: eyesampler.py report failed ($why)" }
+}
+
 # ---------------------------------------------------------------------------------------------------------------
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -679,7 +1038,10 @@ $RecipeConfig = [ordered]@{}
 $PilotPython = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 $PilotScript = Join-Path $ScriptDir "gamepilot.py"
 $PerfScript = Join-Path $ScriptDir "perfreport.py"
+$EyeScript = Join-Path $ScriptDir "analysis\eyesampler.py"
 $MonadoStatsDir = Join-Path $env:LOCALAPPDATA "monado"
+$GameIniPending = Join-Path $RunsRoot "game-ini-pending"
+$RecipeGameIni = @()
 if ($Recipe -ne "") {
     if (-not (Test-Path $Recipe)) { $Recipe = Join-Path $ScriptDir "recipes\$Recipe.json" }
     if (-not (Test-Path $Recipe)) { throw "Recipe not found: $Recipe" }
@@ -696,6 +1058,10 @@ if ($Recipe -ne "") {
             $val = $p.Value; if ($val -is [bool]) { $val = $val.ToString().ToLowerInvariant() }
             $RecipeConfig[$p.Name] = [string]$val
         }
+    }
+    # the game's own settings the route depends on, applied like -GameIni for each run
+    if ($null -ne $recipeJson.game_ini) {
+        try { $RecipeGameIni = @(ConvertFrom-GameIniBlock $recipeJson.game_ini) } catch { throw "Recipe $Recipe`: $($_.Exception.Message)" }
     }
     $WaitForExit = $true
     # the recipe decides how long the game runs; -Seconds is only the upper bound
@@ -752,6 +1118,31 @@ if ($SaveFile -ne "") {
     throw "-SaveAs and -SaveSlot need -SaveFile"
 }
 
+# The game's settings files for each run: the recipe's "game_ini", then -GameIni (the later of two values for one key
+# wins), each file resolved and checked here, before any run
+$GameIniEntries = @()
+$iniEntries = @($RecipeGameIni) + @(ConvertFrom-GameIniSpec $GameIni)
+if ($iniEntries.Count -gt 0) {
+    if ($KeepGame) { throw "-GameIni / a recipe's game_ini can't be combined with -KeepGame: the kept game writes its settings when it quits, after the harness put them back" }
+    $settingsFile = Find-GameSettings $SettingsDir
+    $configDir = $(if ($settingsFile) { Split-Path -Parent $settingsFile } else { $null })
+    $placeholders = Get-SavePlaceholderValues (Find-SteamGameDir $SteamInstallDir)
+    $byKey = [ordered]@{}
+    foreach ($e in $iniEntries) {
+        $path = Resolve-GameIniPath $e.file $configDir $placeholders
+        $byKey["$path|$($e.section)|$($e.key)".ToLowerInvariant()] = [pscustomobject][ordered]@{ path = $path; section = $e.section; key = $e.key; value = $e.value }
+    }
+    $GameIniEntries = @($byKey.Values)
+}
+if ($EyeSampler) {
+    $MopicSbs = $true
+    if (-not (Test-Path $PilotPython) -or -not (Test-Path $EyeScript)) { throw "-EyeSampler needs $PilotPython and $EyeScript" }
+}
+# what makes these runs' frame rates incomparable with plain runs (perf-context.json "variant": perfreport.py compares a
+# run only with runs of the same variant): the eye sampler's load, the game's own settings changed for the run
+$RunVariant = [ordered]@{ eye_sampler = [bool]$EyeSampler
+    game_ini = ((@($GameIniEntries | ForEach-Object { "$(Split-Path -Leaf $_.path)|$($_.section)|$($_.key)=$($_.value)".ToLowerInvariant() } | Sort-Object)) -join ";") }
+
 Write-Host "Game:     $Game ($ProcessName) via $LaunchTarget"
 Write-Host "Engine:   $EngineDir"
 Write-Host "DLL:      $DllHash $DllCommit"
@@ -759,11 +1150,21 @@ Write-Host "Window:   $Seconds s after injection, $Runs run(s)"
 if ($Recipe -ne "") { Write-Host "Recipe:   $Recipe" }
 if ($RecipeVars -ne "") { Write-Host "Vars:     $RecipeVars" }
 if ($SaveSource) { Write-Host "Save:     $SaveSource -> $SaveTarget" }
+foreach ($e in $GameIniEntries) { Write-Host "Game ini: $($e.path) [$($e.section)] $($e.key)=$($e.value)" }
+if ($MopicSbs -and $Recipe -ne "" -and $recipeJson.source -eq "mopic" -and -not $NoInject) { Write-Host "Pilot:    left eye of the side-by-side Mopic display (monado-service must run with MOPIC_MODE=sbs)" }
+if ($EyeSampler) {
+    Write-Host "Eyes:     $(if ($Recipe -ne '') { "sampled during the recipe's measured segments" } else { 'sampled for the whole observation' }) (analysis\eyesampler.py)"
+    if ($NoInject) { Write-Warning "-EyeSampler with -NoInject: the Mopic display shows no VR, the sampler reads whatever is on it" }
+}
 if ($NoInject) { Write-Host "Baseline: UEVR is not injected" }
 if ($NoPerf) { Write-Host "Perf:     not measured (-NoPerf)" }
 if ($KeepGame -and ($Set -ne "" -or $UserScript -ne "" -or $RecipeConfig.Count -gt 0)) {
     Write-Warning "-KeepGame with config overrides: the kept game still has them loaded and UEVR saves its config on later changes (menu toggles...), so they can end up in config.txt. Close the game and check config.txt afterwards."
 }
+
+# game settings an interrupted harness left changed go back before anything runs (whatever this run's options)
+$pendingNote = Restore-PendingGameIni $GameIniPending
+if ($pendingNote) { Write-Warning $pendingNote }
 
 $results = @()
 
@@ -812,6 +1213,23 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
     }
 
+    # the game's own settings files for this run (-GameIni, the recipe's "game_ini"), with the game gone; put back in
+    # finally once it is gone again. A failure is this run's HARNESS_ERROR, with every file as it was.
+    $runIni = $null
+    $runIniError = $null
+    $iniRetryNote = $null
+    if ($GameIniEntries.Count -gt 0 -and -not $saveError) {
+        try {
+            # an earlier run's files that couldn't be put back (pending folder) are retried first, with the game gone;
+            # while they fail this run changes nothing (its install would take the changed files for the originals)
+            $iniRetryNote = Restore-PendingGameIni $GameIniPending
+            $runIni = Install-GameIni $GameIniEntries $runDir $GameIniPending $ProcessName
+            foreach ($e in $runIni.entries) { Write-Host "Game ini set: $(Split-Path -Leaf $e.path) [$($e.section)] $($e.key)=$($e.value) (was $(if ($null -ne $e.before) { $e.before } else { 'not set' }))" }
+        } catch {
+            $runIniError = "could not change the game's settings: $($_.Exception.Message)"
+        }
+    }
+
     # the game's graphics settings as the run starts (frame generation, caps, upscaler, monitor: perf.json's context)
     $settingsPath = $null
     if (-not $NoPerf) {
@@ -851,9 +1269,14 @@ for ($run = 1; $run -le $Runs; $run++) {
     $presentMonCapture = $null
     $frameGenModules = $null
     $observeEnd = $null
+    $eyeProc = $null
+    $eyeStop = Join-Path $runDir "eyes.stop"
+    if ($run -eq 1 -and $pendingNote) { $notes += $pendingNote }
+    if ($iniRetryNote) { $notes += $iniRetryNote }
 
     try {
         if ($saveError) { $verdict = "HARNESS_ERROR"; $notes += $saveError; throw "stop" }
+        if ($runIniError) { $verdict = "HARNESS_ERROR"; $notes += $runIniError; throw "stop" }
         if ($InjectDelay -le 0 -and -not $NoInject) {
             $injectorProc = Start-Process -FilePath $Injector -ArgumentList "--attach=$ProcessName" -WorkingDirectory $EngineDir -PassThru
             Start-Sleep -Seconds 2
@@ -920,9 +1343,18 @@ for ($run = 1; $run -le $Runs; $run++) {
         if ($Recipe -ne "") {
             $pilotArgs = @("`"$PilotScript`"", $ProcessName, "run", "`"$Recipe`"", "--out", "`"$pilotOut`"", "--status", "`"$pilotStatusPath`"")
             if ($NoInject) { $pilotArgs += @("--source", "window") }
+            elseif ($MopicSbs -and $recipeJson.source -eq "mopic") { $pilotArgs += @("--source", "mopic-sbs") }
             $pilotArgs += $PilotVarArgs
             $pilotProc = Start-Process -FilePath $PilotPython -ArgumentList $pilotArgs -WindowStyle Hidden -PassThru
             Write-Host "Pilot started (pid $($pilotProc.Id)), status: $pilotStatusPath"
+        }
+        # each eye on the Mopic display: during the pilot's measured segments, or the whole observation
+        if ($EyeSampler) {
+            $eyeArgs = @("`"$EyeScript`"", "sample", "--out", "`"$runDir`"", "--pid", "$($gameProc.Id)", "--seconds", "$($Seconds + 300)", "--stop-file", "`"$eyeStop`"")
+            if ($Recipe -ne "") { $eyeArgs += @("--status", "`"$pilotStatusPath`"") }
+            if ($EyeSamplerArgs -ne "") { $eyeArgs += $EyeSamplerArgs }
+            $eyeProc = Start-Process -FilePath $PilotPython -ArgumentList $eyeArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runDir "eyes.out.txt") -RedirectStandardError (Join-Path $runDir "eyes.err.txt")
+            Write-Host "Eye sampler started (pid $($eyeProc.Id))"
         }
         $end = (Get-Date).AddSeconds($Seconds)
         $unresponsiveSince = $null
@@ -1042,6 +1474,8 @@ for ($run = 1; $run -le $Runs; $run++) {
         if ($_.Exception.Message -ne "stop") { $verdict = "HARNESS_ERROR"; $notes += $_.Exception.Message }
     } finally {
         if ($pilotProc -and -not $pilotProc.HasExited) { try { $pilotProc.Kill() } catch { } }
+        # (nothing before the settings files are put back below may throw)
+        try { Stop-EyeSampler $eyeProc $eyeStop } catch { }
         # the frame-rate sampling ends with the observation, before the game is closed
         Stop-PresentMon $presentMonCapture $runDir
         Stop-GpuLog $gpuLog
@@ -1065,7 +1499,20 @@ for ($run = 1; $run -le $Runs; $run++) {
             }
         }
 
+        # the game's settings files back as they were, with the game gone (as it left them: game-ini-after\)
         $settingsAfter = $settingsPath
+        if ($runIni) {
+            $iniFailed = @(Restore-GameIni $runIni $runDir)
+            foreach ($f in $iniFailed) { $notes += "ERROR: could not put back the game's settings file $f ($GameIniPending keeps the original; the next harness start retries)" }
+            foreach ($e in $runIni.entries) {
+                if (@($runIni.files | Where-Object { $_.path -eq $e.path -and $_.after }).Count -gt 0 -and $e.after -cne $e.value) {
+                    $notes += "WARN: the game changed $($e.key) during the run: $(if ($null -ne $e.after) { $e.after } else { 'removed' }) instead of $($e.value)"
+                }
+            }
+            # perf.json's settings "after" are the file as the game left it, not the one put back
+            $hit = @($runIni.files | Where-Object { $settingsPath -and $_.path -ieq $settingsPath })
+            if ($hit.Count -gt 0) { $settingsAfter = $hit[0].after }
+        }
 
         # collect
         $logText = Read-Shared $LogPath
@@ -1166,6 +1613,7 @@ for ($run = 1; $run -le $Runs; $run++) {
                     copy_errors        = @($copyErrors)
                     modules            = $frameGenModules
                     power              = (Get-PowerContext)
+                    variant            = $RunVariant
                 }
                 $perfContext | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $runDir "perf-context.json") -Encoding UTF8
                 $report = Invoke-PerfReport $runDir
@@ -1178,6 +1626,17 @@ for ($run = 1; $run -le $Runs; $run++) {
             if ($prevBuild -and $prevBuild.regression) {
                 $notes += "WARN: perf regression vs build $(([string]$prevBuild.dll_sha256) -replace '^(.{12}).*$', '$1'): $(@($prevBuild.regression) -join '; ')"
             }
+        }
+
+        # each eye on the Mopic display (informational, never a verdict)
+        $eyes = $null
+        $eyesLine = $null
+        if ($EyeSampler -and $gameProc) {
+            $eyeReport = Invoke-EyeReport $runDir
+            $eyes = $eyeReport.summary
+            $eyesLine = $eyeReport.line
+            # alternate-eye rendering updates one eye per engine frame: one-eye changes are its design, not a fault
+            if ($eyes -and $perf -and $perf.mode -and $perf.mode.afr) { $eyesLine += " | AFR: one eye per engine frame by design, lags expected" }
         }
 
         $result = [ordered]@{
@@ -1206,8 +1665,10 @@ for ($run = 1; $run -le $Runs; $run++) {
                     [ordered]@{ source = $SaveSource; source_sha256 = $SaveSourceHash; target = $SaveTarget; error = $saveError
                         target_before = $(if (Test-Path -LiteralPath $beforeCopy) { $beforeCopy } else { $null }); after = $saveAfter }
                 } else { $null })
+            game_ini            = $(if ($runIni) { [ordered]@{ entries = $runIni.entries; files = $runIni.files } } elseif ($runIniError) { [ordered]@{ error = $runIniError } } else { $null })
             pilot               = $pilot
             perf                = $perf
+            eyes                = $eyes
             notes               = $notes
         }
         $result | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $runDir "result.json") -Encoding UTF8
@@ -1234,7 +1695,14 @@ for ($run = 1; $run -le $Runs; $run++) {
             }
         }
         if ($RecipeVars -ne "") { $summary += "vars: $RecipeVars" }
+        if ($runIni) {
+            foreach ($e in $runIni.entries) {
+                $f = @($runIni.files | Where-Object { $_.path -eq $e.path })[0]
+                $summary += "game ini: $(Split-Path -Leaf $e.path) [$($e.section)] $($e.key)=$($e.value) (was $(if ($null -ne $e.before) { $e.before } else { 'not set' }); after the run $(if (-not $f.after) { 'no file' } elseif ($e.after -ceq $e.value) { 'kept' } else { $e.after })) | $(if (-not $f.restored) { "NOT put back: $($f.error)" } elseif ($f.existed) { 'put back, sha256 ok' } else { 'removed again (it was not there)' })"
+            }
+        }
         if ($perfLine) { $summary += $perfLine }
+        if ($eyesLine) { $summary += $eyesLine }
         $summary += ($notes | ForEach-Object { "  - $_" })
         $summary | Set-Content -Path (Join-Path $runDir "summary.txt") -Encoding UTF8
 

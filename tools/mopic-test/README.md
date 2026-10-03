@@ -8,6 +8,8 @@
 - `recipes\<Game>.json` (+ checkpoint images in `recipes\<Game>\`): a recorded route through a game's menus.
 - `perfreport.py`: the frame rate of a run (VR fps, lows, hitches, pacing, frame generation), cut to the gameplay the
   pilot measured (see "Frame rate").
+- `analysis\eyesampler.py`: whether both eyes on the Mopic display change together, and one-eye black frames
+  (monado-service in `MOPIC_MODE=sbs`; see "Each eye").
 - `analysis\`: also scripts for the hang dumps the harness writes.
 
 Setup (Python 3.10+), in `tools\mopic-test`:
@@ -44,6 +46,9 @@ powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game <pr
 | `-SaveFile <path> [-SaveAs <name>]` | before each run, copy this save over the file the recipe's `save_slot` names (`-SaveAs`: another file name in that folder), stamped with the current time so Steam Cloud keeps it. The file there before goes to `<run>\save-before\`, the file after the run (also after a crash or a hang) to `<run>\save-after\`; source, sha256 and target are in result.json / summary.txt. Nothing in the save folder is deleted. A relative path is tried from the current folder, then from `tools\mopic-test`. A failed install makes that run `HARNESS_ERROR` without launching the game. |
 | `-SaveSlot <file>` | with `-SaveFile`: the file it replaces, with `save_slot`'s placeholders (`"{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"`), instead of the recipe's `save_slot`; also works without a recipe (discovery with `-WaitForExit`) |
 | `-RecipeVars "k=v;k2=v2"` | values for the recipe's `vars` (`${k}` in its steps; gamepilot `run --var k=v`). A name the recipe doesn't declare, or a declared var without a default that isn't given, stops the harness before the first run. Values can't contain `;`. |
+| `-GameIni "file\|Section\|Key=Value;Key2=Value2"` | the game's own settings for this run only (frame generation, a cvar in Engine.ini): `file` is a file name in the game's config folder (where its GameUserSettings.ini is), or a full path with `save_slot`'s placeholders; an entry without `file\|` keeps the previous file (the first defaults to GameUserSettings.ini), one with only `Key=Value` the previous section too; the value is everything after the first `=` (quotes, `\|`, parentheses), no `;`. A recipe's `game_ini` does the same. Each file is copied to `runs\game-ini-pending\` (with a journal) and `<run>\game-ini-before\` before it changes, keeps its encoding, line breaks and every other line, and goes back byte for byte once the game is gone (also after a crash or a hang; its time and attributes too, sha256 checked); the file as the game left it is in `<run>\game-ini-after\`. A harness that dies in between is undone by the next harness start, which stops that run's game first; a file that couldn't be put back is retried before the next run's change, and while that fails the run is `HARNESS_ERROR` without touching anything (the pending copies are the only originals). A file that wouldn't be written back byte for byte unchanged (UTF-16 without its BOM, bytes its encoding doesn't map back) is refused before anything is copied. A section that appears twice counts as one, as in UE. result.json `game_ini` has each key's value before and after the run; a value the game changed is a WARN note. Not with `-KeepGame`. |
+| `-MopicSbs` | monado-service runs with `MOPIC_MODE=sbs`: the pilot reads a `"source": "mopic"` recipe's screens from the left eye (gamepilot `--source mopic-sbs`) |
+| `-EyeSampler [-EyeSamplerArgs "--hz 90"]` | sample each eye on the Mopic display during the recipe's measured segments (the whole observation without a recipe): `eyes.csv`, `eyes-report.json`, result.json `eyes`, an `eyes[...]` line in summary.txt (see "Each eye"). Needs `MOPIC_MODE=sbs`; implies `-MopicSbs`. Never a verdict |
 | `-NoPerf` | no frame-rate measurement (see "Frame rate"): no nvidia-smi / PresentMon, no `VR_PerfLog` override, no perf.json |
 | `-PresentMon auto` / `off` | `auto` (default): also capture the game's Presents with the PresentMon console app when it is installed and allowed |
 | `-Runs <n>`, `-Label <text>`, `-KeepGame`, `-Screenshot` | |
@@ -74,10 +79,14 @@ defaults to 1 and `-Tier N` runs the rungs with tier <= N. A rung's `vars` becom
 objects as JSON; a `null` var is left out, so the recipe's default applies). Run folders are
 `<time>-<game>-<Label>-<rung>-r<n>`.
 
-After changing run-test.ps1, run-ladder.ps1 or gamepilot.py, run `selftest\selftest.ps1` (about 7 minutes, no game:
-a stand-in process compiled from `selftest\fakegame.cs` plays the game; it compares runs without `-SaveFile`
-against the committed run-test.ps1 and never touches a real save folder). Work folders go to
-`runs\selftest\work-<time>\`.
+After changing run-test.ps1, run-ladder.ps1, gamepilot.py, perfreport.py or eyesampler.py, run `selftest\selftest.ps1` (about 9
+minutes, no game: a stand-in process compiled from `selftest\fakegame.cs` plays the game; it compares runs without
+`-SaveFile` against the committed run-test.ps1, never touches a real save folder or game settings file, round-trips
+`-GameIni` on temp files (and on a copy of Hogwarts' GameUserSettings.ini when there is one), checks perfreport.py on
+synthetic runs with `selftest\selftest_perf.py` and the eye sampler on synthetic side-by-side frames with
+`selftest\selftest_eyes.py`). `-NoWindows` skips the sections whose stand-in has a window (invisible, but a window) or
+that start whoami.exe in a console, for a PC someone is using; the `-GameIni` end-to-end runs (a crash, a killed
+harness) use the stand-in without a window and still run. Work folders go to `runs\selftest\work-<time>\`.
 
 Verdicts:
 
@@ -164,11 +173,66 @@ Cost: UEVR does a few atomic adds per frame and writes once a second from its ow
 second; PresentMon reads ETW events. Not measured on this PC yet: compare a game's numbers with `VR_PerfLog`
 on and off (`-Set "VR_PerfLog=false"`) before trusting small differences.
 
+## Each eye
+
+With monado-service started with `MOPIC_MODE=sbs` (ask first: it changes what the Mopic display shows), the display
+shows the left eye in its left half and the right eye in its right half, and a screen capture sees both. Both eyes
+come from one submitted frame, so they normally change in the same refresh. `analysis\eyesampler.py` checks that:
+
+```
+.venv\Scripts\python analysis\eyesampler.py shot --out strip.png          # the strip it samples (check its place first)
+.venv\Scripts\python analysis\eyesampler.py sample --out <dir> --seconds 30
+.venv\Scripts\python analysis\eyesampler.py report <dir> [--threshold 1.0] [--print]
+```
+
+- `sample` grabs one strip across the whole display (96 px around the middle: `--y`, `--height`) about 120 times a
+  second (`--hz`; a grab takes about 3 ms here, the sampler about a third of one CPU core, mostly the grab: every
+  arm of an A/B should run it, and frame rates with and without it are not comparable). Both halves come from the
+  same grab, so from the same composed desktop frame. Per sample (`eyes.csv`, QPC ns like the frame-rate files): each eye's mean luminance, how much it
+  changed since the previous sample (mean absolute luma difference, 0-255), and the left/right match (normalized
+  correlation of the halves' column profiles at the best shift: the strip's parallax in px). With `--status
+  <pilot-status.json>` (the harness's `-EyeSampler`) it samples only while one of the recipe's measured segments is
+  open (it looks for a new one every 50 ms); it stops with the pilot, the game (`--pid`), `--seconds` or a stop file.
+  `eyes-shots\` keeps up to 40 candidate frames (previous sample over current, left | right) of one eye changing
+  alone or going black. Its picture is from somewhere inside the grab, so each sample's `grab_us` is kept.
+- `report` writes `eyes-report.json` (summary, events with QPC and wall-clock times and their segment) and a line:
+  `eyes[120.0 Hz, 7 segment(s) 141.3 s, moving 91%]: one-eye lag 3 (max 50 ms = 3.0 refreshes) + 2 of 1 refresh,
+  one-eye only 0, one-eye black 1 (max 50 ms) | L/R corr 0.95 shift 24 px`.
+  - one-eye lag: one eye changed (its diff over `--threshold` and 4 times the other's) and the other followed more
+    than 1.5 refreshes later with a change about as big (1/3 to 3 times: a lagging eye makes the same step later),
+    while the scene was moving (3+ samples within +-0.5 s where both eyes changed). A one-refresh lag measures 8-25
+    ms (the samples come every ~8 ms) and is counted apart, "of 1 refresh". The eye named is the one that changed
+    first. A follower of another size is "unmatched" (`one_eye_change`, not counted as a lag): a small change only
+    one eye's strip shows (an animation near the strip's edge, parallax), then the camera moving.
+  - one-eye only: the other eye didn't change at all within `--max-lag-ms` (500) while the first kept changing (or
+    changed by 5 x the threshold or more); one event per freeze (`frozen_ms`: until the other eye changed again). A
+    single small change of one eye followed by a still scene is dropped.
+  - one-eye black: one eye's mean under 8 while the other's is 20 or more, grouped per stretch.
+  - `uniform` on an event: most of the change was the whole strip's brightness (one view's auto exposure stepping
+    alone), not a different frame; counted as "brightness step(s)" in the line.
+  - `uncertain` on an event: a sampler gap inside it (the pilot's own 4K captures, `pilot_capture`, can stall it) or
+    a grab longer than half a refresh; the summary has the grab times (`grab_ms`), the line "slow grabs" when their
+    p95 is over half a refresh.
+  - `L/R corr` under 0.6: not side by side (monado-service without `MOPIC_MODE=sbs`?), a WARN in the line.
+  - With alternate-eye rendering (AFR in perf.json `mode`) one eye changes per engine frame by design: the harness
+    adds that to the line.
+- What it can't see: one eye showing an old picture for a refresh while the camera moves (both eyes still change;
+  only a left/right comparison of every sample would, and `lr_corr` is computed on every 12th). Not checked yet: what
+  the halves show in the Mopic merged state (a tracked viewer left; one view on the woven display). If both halves
+  came from one eye there, a fault of the other eye would not show; an L/R `shift` near 0 px would be the hint.
+- The checkpoints of `"source": "mopic"` recipes were recorded on the woven display; under `MOPIC_MODE=sbs` the
+  pilot reads the left eye stretched back to the full width (`--source mopic-sbs`, the harness's `-MopicSbs`). UI at
+  the zero-parallax plane sits where it was, but each eye appears about 3.7% magnified in SBS (MOPIC.md), so test
+  a recipe's checkpoints on a live side-by-side screen first (`checkpoint test ... all --source mopic-sbs`).
+- `selftest\selftest_eyes.py` runs the sampler on a fake clock against synthetic side-by-side frames with known
+  faults (a two-refresh and a one-refresh lag, three black refreshes, a one-eye change in a still scene, a sampler
+  stall, a closed segment, jittery grabs).
+
 ## gamepilot
 
 ```
 .venv\Scripts\python gamepilot.py <process> status                        # locked? window? foreground?
-.venv\Scripts\python gamepilot.py <process> shot [--source mopic|window] [--out PATH] [--max-width 1280]
+.venv\Scripts\python gamepilot.py <process> shot [--source mopic|mopic-sbs|window] [--out PATH] [--max-width 1280]
 .venv\Scripts\python gamepilot.py <process> key <name> [--times N] [--hold MS] [--gap MS]    # enter, esc, down, j, alt+f4, shift+w, lmb, look:600,0, wheel:-5, ...
 .venv\Scripts\python gamepilot.py <process> keys "down down enter"
 .venv\Scripts\python gamepilot.py <process> click <x> <y>                  # in the last screenshot's pixels
@@ -182,6 +246,8 @@ on and off (`-Set "VR_PerfLog=false"`) before trusting small differences.
 
 - `--source mopic` captures the Mopic display (what the viewer sees). Use it with UEVR: the joeyhodge-based build
   leaves the desktop game window black for most games while it renders. Clicks are mapped back to the game window.
+  `--source mopic-sbs`: the same while monado-service runs with `MOPIC_MODE=sbs` (its left eye, stretched back to
+  the full width; see "Each eye").
 - While Windows shows the lock screen, input and capture don't reach the desktop: the screen and input commands
   exit with code 3 and `{"error":"locked"}`, and `run` stops with `error_kind` "locked". Ask the user to unlock;
   auto-lock stays on.
@@ -208,6 +274,9 @@ on and off (`-Set "VR_PerfLog=false"`) before trusting small differences.
   checkpoint regions are in those pixels.
 - `config`: UEVR config.txt values (as in config.txt: `"true"`, `"1.000000"`) the route depends on, applied for each harness run like `-Set` (Sonic: the UEVR
   menu must stay closed at start).
+- `game_ini`: `{"GameUserSettings.ini": {"/Script/Game.Section": {"Key": "Value"}}}`, the game's own settings the
+  route depends on, applied for each harness run like `-GameIni` (and put back the same way; booleans become
+  `True` / `False`). `-GameIni` overrides a key it also names.
 - `window_fit` / `height`: lets a recipe recorded on the Mopic display also drive the game without UEVR
   (`-NoInject`, or `run --source window`): the desktop window's image is scaled into that rectangle of a canvas of
   `max_width` x `height`, where the game image sits in the Mopic capture, so the same checkpoints apply.
@@ -312,6 +381,16 @@ can be stale. Check the top system function before concluding a thread is blocke
   store) > walk > Esc (field guide) > 설정 > 게임 종료 > Space. The process ends about 30 s after the quit (the same
   without UEVR; right after an update it can take over a minute).
   It ignores WM_CLOSE, so `-GracefulExit` reports EXIT_HANG for it: use the recipe.
+  Frame generation is `FrameGeneration=(...)` in `[/Script/Phoenix.PhoenixGameSettings]` of
+  `%LOCALAPPDATA%\Hogwarts Legacy\Saved\Config\WindowsNoEditor\GameUserSettings.ini` (the NVIDIA app set
+  `(Mode=Intel_XeFG,NumFramesInterpolated=1,LocStr="INTEL_XEFG_MODE_X2")`). The game's Off entry is
+  `(Mode=Off,NumFramesInterpolated=0,LocStr="Off")` (EFrameGenerationMode Off / Nvidia_DLSSG / Intel_XeFG /
+  AMD_FFXFI, read from HogwartsLegacy.exe); choosing Off leaves `r.ChosenFrameGenProvider` (the DXGI swapchain
+  provider the game registers at startup) as it was. For one run:
+  `-GameIni 'GameUserSettings.ini|/Script/Phoenix.PhoenixGameSettings|FrameGeneration=(Mode=Off,NumFramesInterpolated=0,LocStr="Off")'`.
+  Steam Cloud syncs that folder (`steam_autocloud.vdf` in it): the game's copy with the run's value can reach the
+  cloud when it quits, before the harness puts the original back; whether Steam ever brings it back down is
+  untested, so check the setting a run quit with (`<run>\game-settings\GameUserSettings.after.ini`).
 - Black Myth: Wukong: mouse-driven menus that highlight under the mouse (the recipe hovers first). The first start
   after an update compiles shaders for about a minute. Title > 게임 계속하기 (never 새 게임) > shrine > walk (never E
   there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인. A config saved by this line can have
