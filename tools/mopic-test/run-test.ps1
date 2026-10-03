@@ -45,6 +45,11 @@
 #   LAUNCH_FAILED  game process never appeared
 # Warnings flag a LocalPlayer bootstrap that never completed (right eye would have no view state).
 #
+# Frame rate (unless -NoPerf; README "Frame rate"): nvidia-smi (1 Hz) and the PresentMon console app (when installed
+# and allowed) sample while the game runs; UEVR's perf.csv / perf-frames.csv, monado-service's app frame stats for the
+# run and the game's GameUserSettings.ini are copied into the run folder, and perfreport.py cuts them to the measured
+# gameplay into perf.json: a "perf" block in result.json and a "perf[...]" line in summary.txt. Never a verdict.
+#
 # Exit code: 0 if every run passed, 1 otherwise.
 #
 # Prerequisites: Steam running and logged in, UEVRInjector's saved settings already set to OpenXR (and
@@ -78,27 +83,33 @@ param(
     [string]$SaveSlot = "",           # with -SaveFile: the file it replaces, with save_slot's placeholders ("{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"); instead of the recipe's save_slot, also without a recipe (discovery)
     [string]$SaveAs = "",             # with -SaveFile: the target file name instead of the recipe's save_slot "file"
     [string]$RecipeVars = "",         # "k=v;k2=v2": values for the recipe's "vars" (${k} in its steps; passed to gamepilot run as --var k=v)
+    [switch]$NoPerf,                  # no frame-rate measurement: no nvidia-smi / PresentMon sampling, no VR_PerfLog override, no perf.json
+    [ValidateSet("auto", "off")]
+    [string]$PresentMon = "auto",     # auto: also capture the game's Presents with the PresentMon console app when it is installed and allowed (admin or Performance Log Users)
     [string]$EyeLumaLog = "",         # optional log with lines like "eye_luma left=0.183 right=0.179"
     [string]$EyeLumaPattern = 'eye_luma\s+left=([0-9.]+)\s+right=([0-9.]+)'
 )
 
 $ErrorActionPreference = "Stop"
 
+# SettingsDir: the game's folder under %LOCALAPPDATA% (<SettingsDir>\Saved\Config\Windows[NoEditor]\GameUserSettings.ini)
 $Presets = @{
-    Tekken8Demo  = @{ Process = "Polaris-Win64-Shipping";  InstallDir = "TEKKEN 8 Demo" }
-    Expedition33 = @{ Process = "SandFall-Win64-Shipping"; InstallDir = "Expedition 33" }
-    Wukong       = @{ Process = "b1-Win64-Shipping";       InstallDir = "BlackMythWukong" }
-    DeadAsDisco  = @{ Process = "PagodaSteamDemo-Win64-Shipping"; InstallDir = "Dead as Disco Demo" }
-    Hogwarts     = @{ Process = "HogwartsLegacy";          InstallDir = "Hogwarts Legacy" }
-    Stray        = @{ Process = "Stray-Win64-Shipping";    InstallDir = "Stray" }
-    Hozy         = @{ Process = "CozyGame-Win64-Shipping"; InstallDir = "Hozy" }
-    ACC          = @{ Process = "AC2-Win64-Shipping";      InstallDir = "Assetto Corsa Competizione" }
-    SonicDemo    = @{ Process = "SonicRacingCrossWorldsSteam"; InstallDir = "SonicRacingCrossWorldsDemo" }
+    Tekken8Demo  = @{ Process = "Polaris-Win64-Shipping";  InstallDir = "TEKKEN 8 Demo"; SettingsDir = "TEKKEN 8 Demo" }
+    Expedition33 = @{ Process = "SandFall-Win64-Shipping"; InstallDir = "Expedition 33"; SettingsDir = "Sandfall" }
+    Wukong       = @{ Process = "b1-Win64-Shipping";       InstallDir = "BlackMythWukong"; SettingsDir = "b1" }
+    DeadAsDisco  = @{ Process = "PagodaSteamDemo-Win64-Shipping"; InstallDir = "Dead as Disco Demo"; SettingsDir = "Pagoda" }
+    Hogwarts     = @{ Process = "HogwartsLegacy";          InstallDir = "Hogwarts Legacy"; SettingsDir = "Hogwarts Legacy" }
+    Stray        = @{ Process = "Stray-Win64-Shipping";    InstallDir = "Stray"; SettingsDir = "Hk_project" }
+    Hozy         = @{ Process = "CozyGame-Win64-Shipping"; InstallDir = "Hozy"; SettingsDir = "CozyGame" }
+    ACC          = @{ Process = "AC2-Win64-Shipping";      InstallDir = "Assetto Corsa Competizione"; SettingsDir = "AC2" }
+    SonicDemo    = @{ Process = "SonicRacingCrossWorldsSteam"; InstallDir = "SonicRacingCrossWorldsDemo"; SettingsDir = "UNION" }
 }
 
+$SettingsDir = ""
 if ($Game -ne "Custom") {
     if ($ProcessName -eq "") { $ProcessName = $Presets[$Game].Process }
     if ($SteamInstallDir -eq "") { $SteamInstallDir = $Presets[$Game].InstallDir }
+    $SettingsDir = $Presets[$Game].SettingsDir
 }
 if ($ProcessName -eq "") { throw "-ProcessName is required for -Game Custom" }
 
@@ -426,6 +437,189 @@ function Get-EyeLuma([string]$path, [string]$pattern) {
     return [ordered]@{ samples = $samples.Count; left = [math]::Round($left, 4); right = [math]::Round($right, 4); right_over_left = [math]::Round($ratio, 3) }
 }
 
+# --- frame rate (perfreport.py) ---
+
+# QueryPerformanceCounter in ns, the clock of UEVR's perf files, monado's stats and gamepilot's segments, with the
+# Unix time read next to it, so perfreport.py can put wall-clock data (nvidia-smi, log lines) on the same time line
+function Get-ClockPair {
+    $ticks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+    $unixMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    # scaled like MSVC's steady_clock and Python's time.perf_counter_ns()
+    $ns = [int64][math]::Floor([decimal]$ticks * 1000000000 / [System.Diagnostics.Stopwatch]::Frequency)
+    return [ordered]@{ qpc_ns = $ns; unix_ms = $unixMs }
+}
+
+# Copies a file another process still writes to (UEVR's perf log with -KeepGame)
+function Copy-Shared([string]$from, [string]$to) {
+    $src = [System.IO.File]::Open($from, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]"ReadWrite, Delete")
+    try {
+        $dst = [System.IO.File]::Create($to)
+        try { $src.CopyTo($dst) } finally { $dst.Dispose() }
+    } finally {
+        $src.Dispose()
+    }
+}
+
+# The game's GameUserSettings.ini, $null when the preset names no folder or it isn't there
+function Find-GameSettings([string]$settingsDir) {
+    if ($settingsDir -eq "") { return $null }
+    foreach ($platform in @("Windows", "WindowsNoEditor")) {
+        $path = Join-Path $env:LOCALAPPDATA "$settingsDir\Saved\Config\$platform\GameUserSettings.ini"
+        if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+    }
+    return $null
+}
+
+# nvidia-smi writing GPU load, clocks, temperature, power and its limit once a second to <run>\gpu.csv (no admin
+# rights needed; a laptop GPU's clocks move with its power limit and temperature). Its stdout, not -f: it flushes
+# stdout after every sample, while -f buffers and loses everything when it is stopped.
+function Start-GpuLog([string]$runDir) {
+    $exe = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $exe) { return [ordered]@{ status = "not_found"; error = $null; proc = $null } }
+    $query = "timestamp,utilization.gpu,clocks.gr,clocks.mem,temperature.gpu,power.draw,enforced.power.limit,pstate,clocks_event_reasons.active"
+    try {
+        $proc = Start-Process -FilePath $exe.Source -ArgumentList @("--query-gpu=$query", "--format=csv,nounits", "-lms", "1000") -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runDir "gpu.csv")
+        return [ordered]@{ status = "ok"; error = $null; proc = $proc }
+    } catch {
+        return [ordered]@{ status = "failed"; error = $_.Exception.Message; proc = $null }
+    }
+}
+
+function Stop-GpuLog($log) {
+    if (-not $log -or -not $log.proc) { return }
+    if ($log.proc.HasExited) { $log.status = "exited"; return }
+    try { $log.proc.Kill(); $log.proc.WaitForExit(3000) | Out-Null } catch { }
+}
+
+$PresentMonSession = "MopicTest"
+
+# The newest PresentMon console app of the Intel install, $null when there is none
+function Find-PresentMon {
+    $dir = Join-Path $env:ProgramFiles "Intel\PresentMon\PresentMonConsoleApplication"
+    $exe = Get-ChildItem -LiteralPath $dir -Filter "PresentMon-*-x64.exe" -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+    if ($exe) { return $exe.FullName }
+    return $null
+}
+
+# PresentMon capturing the game's Presents (and monado-service's) with raw QPC times into
+# <run>\presentmon-<exe>-<pid>.csv. It needs admin rights or the Performance Log Users group; without either it ends
+# at once with "access denied" (Stop-PresentMon tells), and the run goes on without it. --stop_existing_session ends
+# a capture an aborted run left behind.
+function Start-PresentMon([string]$runDir, [string]$processName) {
+    $exe = Find-PresentMon
+    if (-not $exe) { return [ordered]@{ status = "not_found"; exe = $null; error = $null; proc = $null } }
+    $pmArgs = @("--process_name", "$processName.exe", "--process_name", "monado-service.exe", "--multi_csv",
+        "--output_file", (ConvertTo-ArgvString (Join-Path $runDir "presentmon.csv")), "--qpc_time", "--track_pc_latency",
+        "--track_frame_type", "--no_track_input", "--no_console_stats", "--session_name", $PresentMonSession, "--stop_existing_session")
+    try {
+        $proc = Start-Process -FilePath $exe -ArgumentList $pmArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runDir "presentmon.out.txt") -RedirectStandardError (Join-Path $runDir "presentmon.err.txt")
+        return [ordered]@{ status = "ok"; exe = $exe; error = $null; proc = $proc }
+    } catch {
+        return [ordered]@{ status = "failed"; exe = $exe; error = $_.Exception.Message; proc = $null }
+    }
+}
+
+# Ends the capture. One that already ended is classified from what it printed; a running one is told to stop its
+# trace session, then it writes out its CSV and exits.
+function Stop-PresentMon($pm, [string]$runDir) {
+    if (-not $pm -or -not $pm.proc) { return }
+    if ($pm.proc.HasExited) {
+        $lines = @(((Read-Shared (Join-Path $runDir "presentmon.err.txt")) + "`n" + (Read-Shared (Join-Path $runDir "presentmon.out.txt"))) -split "\r?\n" | Where-Object { $_.Trim() -ne "" })
+        $pm.status = $(if (($lines -join " ") -match "access denied") { "access_denied" } else { "failed" })
+        $pm.error = (@($lines | Where-Object { $_ -match "error" }) + $lines | Select-Object -First 1)
+        return
+    }
+    try {
+        $stop = Start-Process -FilePath $pm.exe -ArgumentList @("--terminate_existing_session", "--session_name", $PresentMonSession) -WindowStyle Hidden -PassThru
+        $stop.WaitForExit(15000) | Out-Null
+    } catch { }
+    if (-not $pm.proc.WaitForExit(15000)) {
+        try { $pm.proc.Kill() } catch { }
+        $pm.status = "killed"
+    }
+}
+
+# Frame generation modules loaded in the game: nvngx_dlssg.dll (DLSS Frame Generation is set up) and others by name.
+# $null when the module list can't be read (the game is gone).
+function Get-FrameGenModules($proc) {
+    try {
+        $proc.Refresh()
+        if ($proc.HasExited) { return $null }
+        # (a Modules getter that fails reads as $null here, not as an exception)
+        $names = @($proc.Modules | Where-Object { $_ } | ForEach-Object { $_.ModuleName })
+    } catch { return $null }
+    if ($names.Count -eq 0) { return $null }
+    return [ordered]@{
+        nvngx_dlssg = [bool]($names -contains "nvngx_dlssg.dll")
+        fg_modules  = @($names | Where-Object { $_ -match 'dlssg|dlss_g|xess_fg|xefg|frameinterpolation|fsr3' } | Sort-Object -Unique)
+    }
+}
+
+# AC or battery and the Windows power mode (a laptop GPU's power limit moves with both)
+function Get-PowerContext {
+    $out = [ordered]@{ ac = $null; battery_pct = $null; scheme = $null; overlay_ac = $null; overlay_dc = $null }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $ps = [System.Windows.Forms.SystemInformation]::PowerStatus
+        if ([string]$ps.PowerLineStatus -ne "Unknown") { $out.ac = ([string]$ps.PowerLineStatus -eq "Online") }
+        if ($ps.BatteryLifePercent -le 1) { $out.battery_pct = [int][math]::Round($ps.BatteryLifePercent * 100) }
+    } catch { }
+    try {
+        $k = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" -ErrorAction Stop
+        $out.scheme = $k.ActivePowerScheme
+        $out.overlay_ac = $k.ActiveOverlayAcPowerScheme
+        $out.overlay_dc = $k.ActiveOverlayDcPowerScheme
+    } catch { }
+    return $out
+}
+
+# monado-service's per-second app frame stats (comp_window_mopic.c: <statsDir>\app_frame_stats.csv, the generation
+# before it in app_frame_stats.1.csv) with qpc_ns from fromQpcNs to toQpcNs -> <run>\monado-frames.csv. -> rows copied.
+# QPC restarts at every boot and the file keeps hours of sessions across boots, so with fromUnixMs/toUnixMs a row must
+# also have its unix_ms within a minute of them: an earlier boot's row of the same game can carry the same qpc_ns.
+function Save-MonadoSlice([string]$statsDir, [string]$runDir, [int64]$fromQpcNs, [int64]$toQpcNs, [int64]$fromUnixMs = 0, [int64]$toUnixMs = 0) {
+    $header = $null
+    $rows = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @("app_frame_stats.1.csv", "app_frame_stats.csv")) {
+        foreach ($line in ((Read-Shared (Join-Path $statsDir $name)) -split "\r?\n")) {
+            if ($line -like "qpc_ns,*") { if (-not $header) { $header = $line }; continue }
+            $f = $line.Split(",", 3)
+            if ($f.Count -lt 3) { continue }
+            $q = [int64]0
+            $u = [int64]0
+            if (-not [int64]::TryParse($f[0], [ref]$q) -or $q -lt $fromQpcNs -or $q -gt $toQpcNs) { continue }
+            if ($fromUnixMs -gt 0 -and $toUnixMs -gt 0 -and
+                (-not [int64]::TryParse($f[1], [ref]$u) -or $u -lt $fromUnixMs - 60000 -or $u -gt $toUnixMs + 60000)) { continue }
+            $rows.Add($line)
+        }
+    }
+    if (-not $header -or $rows.Count -eq 0) { return 0 }
+    [System.IO.File]::WriteAllLines((Join-Path $runDir "monado-frames.csv"), [string[]](@($header) + $rows.ToArray()), (New-Object System.Text.UTF8Encoding($false)))
+    return $rows.Count
+}
+
+# perfreport.py over the run folder (perf.json, perf-summary.json) -> its summary (result.json's "perf") and its
+# summary.txt line, or why there is none
+function Invoke-PerfReport([string]$runDir) {
+    if (-not (Test-Path $PilotPython) -or -not (Test-Path $PerfScript)) {
+        return [pscustomobject]@{ summary = $null; line = "perf: not measured (no .venv or no perfreport.py)" }
+    }
+    $output = @()
+    # EAP Stop would turn any stderr line of the script into an exception (and the run into HARNESS_ERROR)
+    try { $output = @(& { $ErrorActionPreference = "Continue"; & $PilotPython $PerfScript "run" $runDir 2>&1 | ForEach-Object { "$_" } }) } catch { $output = @($_.Exception.Message) }
+    $summaryPath = Join-Path $runDir "perf-summary.json"
+    if (Test-Path $summaryPath) {
+        try {
+            $doc = Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            return [pscustomobject]@{ summary = $doc.summary; line = [string]$doc.line }
+        } catch {
+            $output += "perf-summary.json: $($_.Exception.Message)"
+        }
+    }
+    $why = @($output | Where-Object { "$_".Trim() -ne "" }) | Select-Object -Last 1
+    return [pscustomobject]@{ summary = $null; line = "perf: perfreport.py failed ($why)" }
+}
+
 # ---------------------------------------------------------------------------------------------------------------
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -484,6 +678,8 @@ $RunsRoot = Join-Path $ScriptDir "runs"
 $RecipeConfig = [ordered]@{}
 $PilotPython = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 $PilotScript = Join-Path $ScriptDir "gamepilot.py"
+$PerfScript = Join-Path $ScriptDir "perfreport.py"
+$MonadoStatsDir = Join-Path $env:LOCALAPPDATA "monado"
 if ($Recipe -ne "") {
     if (-not (Test-Path $Recipe)) { $Recipe = Join-Path $ScriptDir "recipes\$Recipe.json" }
     if (-not (Test-Path $Recipe)) { throw "Recipe not found: $Recipe" }
@@ -564,6 +760,7 @@ if ($Recipe -ne "") { Write-Host "Recipe:   $Recipe" }
 if ($RecipeVars -ne "") { Write-Host "Vars:     $RecipeVars" }
 if ($SaveSource) { Write-Host "Save:     $SaveSource -> $SaveTarget" }
 if ($NoInject) { Write-Host "Baseline: UEVR is not injected" }
+if ($NoPerf) { Write-Host "Perf:     not measured (-NoPerf)" }
 if ($KeepGame -and ($Set -ne "" -or $UserScript -ne "" -or $RecipeConfig.Count -gt 0)) {
     Write-Warning "-KeepGame with config overrides: the kept game still has them loaded and UEVR saves its config on later changes (menu toggles...), so they can end up in config.txt. Close the game and check config.txt afterwards."
 }
@@ -585,6 +782,8 @@ for ($run = 1; $run -le $Runs; $run++) {
     $hadConfig = Test-Path $ConfigPath
     if ($hadConfig) { Copy-Item $ConfigPath $configBackup -Force }
     $overrides = @{ "FrameworkConfig_LogLevel" = "2" }
+    # UEVR's frame-rate log (perf.csv, perf-frames.csv next to log.txt; on by default, unless a user turned it off)
+    if (-not $NoPerf -and -not $NoInject) { $overrides["VR_PerfLog"] = "true" }
     foreach ($key in $RecipeConfig.Keys) { $overrides[$key] = $RecipeConfig[$key] }
     foreach ($kv in $SetPairs) { $overrides[$kv[0]] = $kv[1] }
     Set-ConfigValues $ConfigPath $overrides
@@ -613,7 +812,18 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
     }
 
+    # the game's graphics settings as the run starts (frame generation, caps, upscaler, monitor: perf.json's context)
+    $settingsPath = $null
+    if (-not $NoPerf) {
+        $settingsPath = Find-GameSettings $SettingsDir
+        if ($settingsPath) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $runDir "game-settings") | Out-Null
+            try { Copy-Shared $settingsPath (Join-Path $runDir "game-settings\GameUserSettings.ini") } catch { $settingsPath = $null }
+        }
+    }
+
     $t0 = Get-Date
+    $t0Pair = Get-ClockPair
     $dumpBefore = Get-MTime $DumpPath
 
     $verdict = ""
@@ -636,6 +846,11 @@ for ($run = 1; $run -le $Runs; $run++) {
     $pilotProc = $null
     $pilotOut = Join-Path $runDir "pilot"
     $pilotStatusPath = Join-Path $runDir "pilot-status.json"
+    $gamePids = @()
+    $gpuLog = $null
+    $presentMonCapture = $null
+    $frameGenModules = $null
+    $observeEnd = $null
 
     try {
         if ($saveError) { $verdict = "HARNESS_ERROR"; $notes += $saveError; throw "stop" }
@@ -657,6 +872,12 @@ for ($run = 1; $run -le $Runs; $run++) {
         try { $null = $gameProc.Handle } catch { }
         try { $gameStart = $gameProc.StartTime } catch { $gameStart = Get-Date }
         Write-Host "Game process $($gameProc.Id) started $($gameStart.ToString('HH:mm:ss.fff'))"
+        $gamePids += $gameProc.Id
+        # frame-rate sampling while the game runs (PresentMon follows the exe name, also through a restart)
+        if (-not $NoPerf) {
+            $gpuLog = Start-GpuLog $runDir
+            if ($PresentMon -ne "off") { $presentMonCapture = Start-PresentMon $runDir $ProcessName }
+        }
 
         if ($InjectDelay -gt 0 -and -not $NoInject) {
             Write-Host "Late injection: waiting $InjectDelay s before starting the injector"
@@ -681,6 +902,7 @@ for ($run = 1; $run -le $Runs; $run++) {
                 $gameProc = $next
                 try { $null = $gameProc.Handle } catch { }
                 try { $gameStart = $gameProc.StartTime } catch { $gameStart = Get-Date }
+                $gamePids += $gameProc.Id
                 $notes += "game process restarted before injection (now pid $($gameProc.Id))"
             }
             Start-Sleep -Milliseconds 500
@@ -704,6 +926,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
         $end = (Get-Date).AddSeconds($Seconds)
         $unresponsiveSince = $null
+        $nextModuleProbe = (Get-Date).AddSeconds(15)
         while ((Get-Date) -lt $end) {
             if ($gameProc.HasExited) { $exitTime = Get-Date; break }
             if ((Get-MTime $DumpPath) -gt $dumpBefore) { $notes += "crash.dmp written"; break }
@@ -715,8 +938,21 @@ for ($run = 1; $run -le $Runs; $run++) {
             if ($responding) { $unresponsiveSince = $null }
             elseif (-not $unresponsiveSince) { $unresponsiveSince = Get-Date }
             elseif (((Get-Date) - $unresponsiveSince).TotalSeconds -ge $HangSeconds) { $frozen = $true; break }
+            # frame generation is measured, never changed: which of its DLLs the game has loaded (every 30 s)
+            if (-not $NoPerf -and (Get-Date) -ge $nextModuleProbe) {
+                $nextModuleProbe = (Get-Date).AddSeconds(30)
+                $probe = Get-FrameGenModules $gameProc
+                if ($probe) {
+                    if (-not $frameGenModules) { $frameGenModules = [ordered]@{ nvngx_dlssg = $false; fg_modules = @(); probes = 0 } }
+                    $frameGenModules.nvngx_dlssg = $frameGenModules.nvngx_dlssg -or $probe.nvngx_dlssg
+                    $frameGenModules.fg_modules = @(@($frameGenModules.fg_modules) + @($probe.fg_modules) | Sort-Object -Unique)
+                    $frameGenModules.probes++
+                }
+            }
             Start-Sleep -Seconds 1
         }
+        # the end of the observation for perfreport.py ("observe" runs without a recipe), before the screenshot
+        $observeEnd = Get-ClockPair
         if ($frozen) {
             $dumpNote = $(if (Save-HangDump (Join-Path $runDir "freeze.dmp")) { "stacks in freeze.dmp" } else { "no dump" })
             $notes += "game window not responding for $HangSeconds s, $dumpNote"
@@ -806,6 +1042,10 @@ for ($run = 1; $run -le $Runs; $run++) {
         if ($_.Exception.Message -ne "stop") { $verdict = "HARNESS_ERROR"; $notes += $_.Exception.Message }
     } finally {
         if ($pilotProc -and -not $pilotProc.HasExited) { try { $pilotProc.Kill() } catch { } }
+        # the frame-rate sampling ends with the observation, before the game is closed
+        Stop-PresentMon $presentMonCapture $runDir
+        Stop-GpuLog $gpuLog
+        $perfEnd = Get-ClockPair
         $crashReporter = [bool](Get-Process -Name "CrashReportClient" -ErrorAction SilentlyContinue)
         if (-not ($KeepGame -and $run -eq $Runs)) { Stop-Leftovers $ProcessName }
 
@@ -824,6 +1064,8 @@ for ($run = 1; $run -le $Runs; $run++) {
                 $notes += "could not copy the save after the run: $($_.Exception.Message)"
             }
         }
+
+        $settingsAfter = $settingsPath
 
         # collect
         $logText = Read-Shared $LogPath
@@ -884,6 +1126,60 @@ for ($run = 1; $run -le $Runs; $run++) {
             if ($hadUserScript) { Copy-Item $userScriptBackup $userScriptPath -Force } elseif (Test-Path $userScriptPath) { Remove-Item $userScriptPath -Force }
         }
 
+        # frame rate: UEVR's perf log, monado's stats during the run and the game's settings after it, then
+        # perfreport.py (informational: a regression against the previous build is a WARN note, never a verdict)
+        $perf = $null
+        $perfLine = $null
+        if (-not $NoPerf -and $gameProc) {
+            try {
+                # each input on its own: one that can't be copied leaves its part of perf.json null, not all of it
+                $copyErrors = @()
+                if (-not $NoInject) {
+                    foreach ($name in @("perf.csv", "perf-frames.csv")) {
+                        $src = Join-Path $PersistentDir $name
+                        try { if ((Get-MTime $src) -gt $t0) { Copy-Shared $src (Join-Path $runDir $name) } } catch { $copyErrors += "${name}: $($_.Exception.Message)" }
+                    }
+                }
+                $monadoRows = 0
+                try { $monadoRows = Save-MonadoSlice $MonadoStatsDir $runDir $t0Pair.qpc_ns $perfEnd.qpc_ns $t0Pair.unix_ms $perfEnd.unix_ms } catch { $copyErrors += "monado-frames.csv: $($_.Exception.Message)" }
+                if ($settingsAfter) {
+                    try { Copy-Shared $settingsAfter (Join-Path $runDir "game-settings\GameUserSettings.after.ini") } catch { $copyErrors += "GameUserSettings.after.ini: $($_.Exception.Message)" }
+                }
+                $pmFiles = @(Get-ChildItem -LiteralPath $runDir -Filter "presentmon*.csv" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+                $perfContext = [ordered]@{
+                    game               = $Game
+                    process            = $ProcessName
+                    label              = $Label
+                    recipe             = $Recipe
+                    recipe_vars        = $RecipeVars
+                    injected           = (-not $NoInject)
+                    dll_sha256         = $DllHash
+                    qpc_freq           = [System.Diagnostics.Stopwatch]::Frequency
+                    t0                 = $t0Pair
+                    observe_end        = $observeEnd
+                    end                = $perfEnd
+                    game_start_unix_ms = $(if ($gameStart) { ([DateTimeOffset]$gameStart).ToUnixTimeMilliseconds() } else { $null })
+                    game_pids          = @($gamePids)
+                    presentmon         = $(if ($presentMonCapture) { [ordered]@{ status = $presentMonCapture.status; exe = $presentMonCapture.exe; error = $presentMonCapture.error; files = $pmFiles } } else { [ordered]@{ status = "off" } })
+                    nvidia_smi         = $(if ($gpuLog) { [ordered]@{ status = $gpuLog.status; error = $gpuLog.error } } else { $null })
+                    monado_rows        = $monadoRows
+                    copy_errors        = @($copyErrors)
+                    modules            = $frameGenModules
+                    power              = (Get-PowerContext)
+                }
+                $perfContext | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $runDir "perf-context.json") -Encoding UTF8
+                $report = Invoke-PerfReport $runDir
+                $perf = $report.summary
+                $perfLine = $report.line
+            } catch {
+                $perfLine = "perf: not measured ($($_.Exception.Message))"
+            }
+            $prevBuild = $(if ($perf -and $perf.compare) { $perf.compare.prev_build } else { $null })
+            if ($prevBuild -and $prevBuild.regression) {
+                $notes += "WARN: perf regression vs build $(([string]$prevBuild.dll_sha256) -replace '^(.{12}).*$', '$1'): $(@($prevBuild.regression) -join '; ')"
+            }
+        }
+
         $result = [ordered]@{
             verdict             = $verdict
             game                = $Game
@@ -911,9 +1207,10 @@ for ($run = 1; $run -le $Runs; $run++) {
                         target_before = $(if (Test-Path -LiteralPath $beforeCopy) { $beforeCopy } else { $null }); after = $saveAfter }
                 } else { $null })
             pilot               = $pilot
+            perf                = $perf
             notes               = $notes
         }
-        $result | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $runDir "result.json") -Encoding UTF8
+        $result | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $runDir "result.json") -Encoding UTF8
 
         $summary = @(
             "$verdict  $Game/$Label run $run  inject@$($result.inject_after_s)s  exit@$($result.exit_after_s)s  $exitCode"
@@ -937,6 +1234,7 @@ for ($run = 1; $run -le $Runs; $run++) {
             }
         }
         if ($RecipeVars -ne "") { $summary += "vars: $RecipeVars" }
+        if ($perfLine) { $summary += $perfLine }
         $summary += ($notes | ForEach-Object { "  - $_" })
         $summary | Set-Content -Path (Join-Path $runDir "summary.txt") -Encoding UTF8
 

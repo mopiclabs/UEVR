@@ -1,5 +1,6 @@
-# Self-test of the save-install / recipe vars / ladder harness changes. Launches no game: where a run needs a game
-# process, a stand-in (fakegame.cs, compiled into the work folder) plays it. Never touches the real save folder:
+# Self-test of the save-install / recipe vars / ladder / frame-rate harness changes. Launches no game: where a run
+# needs a game process, a stand-in (fakegame.cs, compiled into the work folder) plays it; the frame-rate samplers
+# (nvidia-smi, the PresentMon console app when installed) run around it as in a real run. Never touches the real save folder:
 # every save file lives under runs\selftest\work-<time>\ (gitignored). Stops nothing but its own stand-ins (and, through the
 # harness, UEVRInjector / CrashReportClient, so it refuses to run while one of those is running).
 $ErrorActionPreference = "Stop"
@@ -121,6 +122,62 @@ Check "-RecipeVars names are case-sensitive" ($rv.PSBase.Count -eq 2 -and $rv["a
 $pv = ConvertTo-PilotVarArgs "Keys=w a s d;Count=2;Values=3"
 Check "vars named Keys / Count / Values" (($pv -join " ") -eq '--var "Keys=w a s d" --var "Count=2" --var "Values=3"') ($pv -join " ")
 
+Write-Host "== 2b. run-test.ps1's frame-rate helpers"
+# QPC in ns as Python's time.perf_counter_ns() counts it (gamepilot's segments; UEVR's steady_clock alike)
+$c1 = Get-ClockPair
+$pyNs = [int64](& $Py -c "import time; print(time.perf_counter_ns())")
+$c2 = Get-ClockPair
+Check "Get-ClockPair: QPC ns on Python's perf_counter_ns clock, Unix ms now" ($c1.qpc_ns -le $pyNs -and $pyNs -le $c2.qpc_ns -and [math]::Abs($c2.unix_ms - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -lt 5000) "$($c1.qpc_ns) <= $pyNs <= $($c2.qpc_ns)"
+
+# monado's app frame stats: the run's rows of both generations under one header, nothing outside the window
+$statsDir = Join-Path $Work "monado"
+New-Item -ItemType Directory -Force -Path $statsDir | Out-Null
+$mh = "qpc_ns,unix_ms,window_ms,pid,exe,mode,presents,new,repeated,no_layer,present_fps,new_fps,gap_avg_ms,gap_max_ms,dts_avg_ms,dts_max_ms,dropped,rebased"
+[System.IO.File]::WriteAllLines((Join-Path $statsDir "app_frame_stats.1.csv"), [string[]]@($mh, "100,1,1000,7,g.exe,sbs,60,60,0,0,60,60,16,17,16,17,0,0", "200,1,1000,7,g.exe,sbs,60,60,0,0,60,60,16,17,16,17,0,0"))
+[System.IO.File]::WriteAllText((Join-Path $statsDir "app_frame_stats.csv"), "$mh`r`n300,1,1000,7,g.exe,sbs,60,30,30,0,60,30,33,34,33,34,1,0`r`n400,1,1000,7,g.exe,sbs,60,30,30,0,60,30,33,34,33,34,0,0`r`n500,1,10")
+$sliceDir = Join-Path $Work "slice"
+New-Item -ItemType Directory -Force -Path $sliceDir | Out-Null
+$n = Save-MonadoSlice $statsDir $sliceDir 150 450
+$slice = @(Get-Content -LiteralPath (Join-Path $sliceDir "monado-frames.csv"))
+Check "Save-MonadoSlice: rows 200-400 of both files under one header" ($n -eq 3 -and $slice.Count -eq 4 -and $slice[0] -eq $mh -and $slice[1] -like "200,*" -and $slice[3] -like "400,*") ($slice -join " / ")
+Check "Save-MonadoSlice: nothing in the window -> no file, 0" ((Save-MonadoSlice $statsDir (Join-Path $Work "slice-none") 1000 2000) -eq 0 -and -not (Test-Path (Join-Path $Work "slice-none")))
+
+# UEVR keeps perf.csv open for writing while the game runs (-KeepGame)
+$held = Join-Path $Work "held.csv"
+$writer = [System.IO.File]::Open($held, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]"ReadWrite, Delete")
+try {
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes("qpc_ns,kind`n1,P`n")
+    $writer.Write($bytes, 0, $bytes.Length)
+    $writer.Flush()
+    try { Copy-Shared $held (Join-Path $Work "held-copy.csv"); $copied = [System.IO.File]::ReadAllText((Join-Path $Work "held-copy.csv")) } catch { $copied = "error: $_" }
+} finally { $writer.Dispose() }
+Check "Copy-Shared copies a file another handle still writes" ($copied -eq "qpc_ns,kind`n1,P`n") $copied
+
+$realLocal = $env:LOCALAPPDATA
+try {
+    $env:LOCALAPPDATA = Join-Path $Work "localappdata"
+    $iniDir = Join-Path $env:LOCALAPPDATA "Hk_project\Saved\Config\WindowsNoEditor"
+    New-Item -ItemType Directory -Force -Path $iniDir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $iniDir "GameUserSettings.ini"), "[/Script/Engine.GameUserSettings]`r`nbUseVSync=False")
+    $found = Find-GameSettings "Hk_project"
+    Check "Find-GameSettings: a UE4 game's WindowsNoEditor; nothing for an unknown folder or no preset" ($found -eq (Join-Path $iniDir "GameUserSettings.ini") -and $null -eq (Find-GameSettings "NoSuchGame-selftest") -and $null -eq (Find-GameSettings "")) $found
+} finally {
+    $env:LOCALAPPDATA = $realLocal
+}
+$presetAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$Presets' }, $true)
+$presets = Invoke-Expression $presetAst.Right.Extent.Text
+$noSettings = @($presets.Keys | Where-Object { -not (Find-GameSettings $presets[$_].SettingsDir) } | Sort-Object)
+Check "every preset's GameUserSettings.ini is on this PC ($($presets.Count) presets)" ($presets.Count -ge 9 -and $noSettings.Count -eq 0) ($noSettings -join ", ")
+
+$fgm = Get-FrameGenModules (Get-Process -Id $PID)
+Check "Get-FrameGenModules: this PowerShell has no frame generation module" ($fgm -and $fgm.nvngx_dlssg -eq $false -and @($fgm.fg_modules).Count -eq 0) ($fgm | ConvertTo-Json -Compress)
+$gone = Start-Process -FilePath "cmd.exe" -ArgumentList "/c exit" -WindowStyle Hidden -PassThru
+$gone.WaitForExit()
+Check "Get-FrameGenModules: a process that is gone -> null" ($null -eq (Get-FrameGenModules $gone))
+$power = Get-PowerContext
+Check "Get-PowerContext: AC known, battery percent, power scheme" ($power.ac -is [bool] -and $null -ne $power.battery_pct -and "$($power.scheme)" -match '^[0-9a-f-]{36}$') ($power | ConvertTo-Json -Compress)
+Write-Host "      PresentMon console app: $(Find-PresentMon)"
+
 Write-Host "== 3. install / evidence against a temp save folder"
 $sg = Join-Path $Work "SaveGames\$($real.sid64)"
 New-Item -ItemType Directory -Force -Path $sg | Out-Null
@@ -183,6 +240,9 @@ Check "evidence of a vanished target: missing, no throw" ($gone.missing -eq $tru
 
 $runsRoot = Join-Path $Tools "runs"
 $fakeNames = @("mopicselftest_noproc", "mopicselftest_game")
+# the harness's frame-rate samplers (nvidia-smi, the PresentMon console app); every run has to end its own
+function Get-SamplerCount { return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq "nvidia-smi" -or $_.ProcessName -like "PresentMon-*" }).Count }
+$samplersBefore = Get-SamplerCount
 $busy = @(Get-Process -Name (@("UEVRInjector", "CrashReportClient") + $fakeNames) -ErrorAction SilentlyContinue)
 $persistentDirs = @($fakeNames | ForEach-Object { Join-Path $env:APPDATA "UnrealVRMod\$_" } | Where-Object { -not (Test-Path -LiteralPath $_) })
 if ($busy.Count -gt 0) {
@@ -251,13 +311,22 @@ if ($busy.Count -gt 0) {
             $changed = @($dh[$i].keys | Where-Object { $dh[$i].values[$_] -cne $dn[$i].values[$_] })
             Check "cmp $($case.name) r$($i + 1): result.json values as before" ($changed.Count -eq 0) (($changed | ForEach-Object { "$_ head=$($dh[$i].values[$_]) new=$($dn[$i].values[$_])" }) -join "; ")
             Check "cmp $($case.name) r$($i + 1): recipe_vars empty, save null" ($dn[$i].values["recipe_vars"] -eq '""' -and $dn[$i].values["save"] -eq "null")
-            Check "cmp $($case.name) r$($i + 1): summary.txt as before" (($dh[$i].summary -join "`n") -ceq ($dn[$i].summary -join "`n")) ("head: " + ($dh[$i].summary -join " / ") + " | new: " + ($dn[$i].summary -join " / "))
-            Check "cmp $($case.name) r$($i + 1): same files in the run folder" (($dh[$i].files -join ",") -eq ($dn[$i].files -join ",")) ("head: " + ($dh[$i].files -join ",") + " | new: " + ($dn[$i].files -join ","))
+            # this copy has no perfreport.py next to it (and an empty python.exe): no numbers, the reason in summary.txt
+            $perfLines = @($dn[$i].summary | Where-Object { $_ -like "perf*" })
+            $launched = $null -ne $case.game
+            Check "cmp $($case.name) r$($i + 1): perf null, $(if ($launched) { 'one perf line (not measured)' } else { 'no perf line (no game)' })" ($dn[$i].values["perf"] -eq "null" -and $(if ($launched) { $perfLines.Count -eq 1 -and $perfLines[0] -eq "perf: not measured (no .venv or no perfreport.py)" } else { $perfLines.Count -eq 0 })) ($perfLines -join " / ")
+            $sumNew = @($dn[$i].summary | Where-Object { $_ -notlike "perf*" })
+            Check "cmp $($case.name) r$($i + 1): summary.txt as before (but the perf line)" (($dh[$i].summary -join "`n") -ceq ($sumNew -join "`n")) ("head: " + ($dh[$i].summary -join " / ") + " | new: " + ($dn[$i].summary -join " / "))
+            # the samplers' files: nvidia-smi's gpu.csv, PresentMon's output (or its "access denied"), perf-context.json,
+            # monado's stats when a VR session happened to run
+            $filesNew = @($dn[$i].files | Where-Object { $_ -notmatch '^\\(gpu\.csv|presentmon[^\\]*|perf-context\.json|monado-frames\.csv)$' })
+            Check "cmp $($case.name) r$($i + 1): same files in the run folder (but the perf samplers')" (($dh[$i].files -join ",") -eq ($filesNew -join ",")) ("head: " + ($dh[$i].files -join ",") + " | new: " + ($dn[$i].files -join ","))
+            if ($launched) { Check "cmp $($case.name) r$($i + 1): perf-context.json written" ($dn[$i].files -contains "\perf-context.json") ($dn[$i].files -join ",") }
         }
         $norm = @{}
-        # times and pids differ between two runs (exit@3s / exit@3.1s)
-        foreach ($k in $cmp.Keys) { $norm[$k] = @($outputs[$k].out | ForEach-Object { ($_.Replace($cmp[$k], "<dir>")) -replace '@-?[\d.]+s', '@s' -replace '\d+', '#' }) -join "`n" }
-        Check "cmp $($case.name): console output as before" ($norm.head -ceq $norm.new) ("head:`n" + $norm.head + "`nnew:`n" + $norm.new)
+        # times and pids differ between two runs (exit@3s / exit@3.1s); the new harness adds its perf line
+        foreach ($k in $cmp.Keys) { $norm[$k] = @($outputs[$k].out | Where-Object { $_ -notlike "perf*" } | ForEach-Object { ($_.Replace($cmp[$k], "<dir>")) -replace '@-?[\d.]+s', '@s' -replace '\d+', '#' }) -join "`n" }
+        Check "cmp $($case.name): console output as before (but the perf line)" ($norm.head -ceq $norm.new) ("head:`n" + $norm.head + "`nnew:`n" + $norm.new)
     }
     Remove-Item Env:\MOPIC_FAKE_GAME -ErrorAction SilentlyContinue
 
@@ -386,6 +455,31 @@ if ($busy.Count -gt 0) {
     }
     Check "e2e pilot: save installed before the launch (the game's autosave is in save-after)" ($r -and $r.save.after.changed -and $r.save.after.size -eq 65544) ($r.save | ConvertTo-Json -Compress -Depth 4)
 
+    # frame rate around the same run: nvidia-smi and PresentMon sampled while the stand-in ran, perfreport.py found no
+    # measured segment (the recipe has no play step) and said so
+    if ($h.dirs.Count -ge 1) {
+        $d = $h.dirs[0]
+        $pc = $(if (Test-Path -LiteralPath (Join-Path $d "perf-context.json")) { Read-Json (Join-Path $d "perf-context.json") } else { $null })
+        Check "e2e perf: perf-context.json (game pid, clock pairs, not injected)" ($pc -and @($pc.game_pids).Count -eq 1 -and $pc.t0.qpc_ns -gt 0 -and $pc.end.qpc_ns -gt $pc.t0.qpc_ns -and $pc.injected -eq $false -and $pc.process -eq "mopicselftest_game") ($pc | ConvertTo-Json -Compress -Depth 4)
+        $smi = [bool](Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue)
+        $gpuRows = @(Get-Content -LiteralPath (Join-Path $d "gpu.csv") -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d{4}/' })
+        Check "e2e perf: nvidia-smi sampled once a second into gpu.csv" ((-not $smi -and $pc.nvidia_smi.status -eq "not_found") -or ($pc.nvidia_smi.status -eq "ok" -and $gpuRows.Count -ge 5)) "status $($pc.nvidia_smi.status), $($gpuRows.Count) rows"
+        $pmStatus = $pc.presentmon.status
+        Write-Host "      PresentMon: $pmStatus $($pc.presentmon.error)"
+        Check "e2e perf: PresentMon ran, or its refusal was recognized" ($pmStatus -in @("ok", "not_found") -or ($pmStatus -eq "access_denied" -and (Get-Content -LiteralPath (Join-Path $d "presentmon.err.txt") -Raw) -match "access denied")) "status $pmStatus, error $($pc.presentmon.error)"
+        $sum = @(Get-Content -LiteralPath (Join-Path $d "summary.txt") -Encoding UTF8)
+        $perfLine = @($sum | Where-Object { $_ -like "perf*" })
+        Check "e2e perf: result.json perf = no measured segment, the sources, and its summary.txt line" ($r.perf -and $r.perf.note -eq "no measured segment" -and $null -eq $r.perf.headline -and $r.perf.sources.uevr -eq "not injected" -and $r.perf.sources.presentmon -eq $(if ($pmStatus -eq "ok") { "no_rows" } else { $pmStatus }) -and $perfLine.Count -eq 1 -and $perfLine[0] -like "perf: no measured segment (uevr not injected, presentmon *") (($perfLine -join " / ") + " | " + ($r.perf | ConvertTo-Json -Compress -Depth 4))
+        Check "e2e perf: perf.json and perf-summary.json written" ((Test-Path -LiteralPath (Join-Path $d "perf.json")) -and (Test-Path -LiteralPath (Join-Path $d "perf-summary.json")))
+    }
+    $h = Invoke-Harness $baseGame @("-Seconds", "2", "-NoPerf") "selftest-e2e-noperf" "window:8"
+    $r = $h.results | Select-Object -First 1
+    $files = $(if ($h.dirs.Count -ge 1) { @(Get-ChildItem -LiteralPath $h.dirs[0] -Recurse | ForEach-Object { $_.Name }) } else { @() })
+    Check "e2e -NoPerf: PASS, perf null, no perf line, no sampler files" ($r -and $r.verdict -eq "PASS" -and $null -eq $r.perf -and $h.flat -like "*Perf:     not measured (-NoPerf)*" -and @($files | Where-Object { $_ -match '^(gpu\.csv|presentmon|perf)' }).Count -eq 0 -and @(Get-Content -LiteralPath (Join-Path $h.dirs[0] "summary.txt") | Where-Object { $_ -like "perf*" }).Count -eq 0) (($files -join ",") + " | " + (Show-Out $h))
+    $h = Invoke-Harness $baseGame @("-Seconds", "6", "-PresentMon", "off") "selftest-e2e-pmoff" "window:15"
+    $r = $h.results | Select-Object -First 1
+    Check "e2e -PresentMon off: no capture, an observation too short to measure" ($r -and $r.verdict -eq "PASS" -and $r.perf.sources.presentmon -eq "off" -and $r.perf.note -eq "observation too short or not timed" -and -not (Test-Path -LiteralPath (Join-Path $h.dirs[0] "presentmon.err.txt"))) ($r.perf | ConvertTo-Json -Compress -Depth 4)
+
     $h = Invoke-Harness $baseGame @("-SaveFile", $src, "-SaveSlot", "$e2eSgDir\ArchiveSaveFile.8.sav", "-Runs", "2", "-Seconds", "20") "selftest-e2e-crash" "exit:3:C0000005" $slot8
     Check "e2e CRASH: two runs, both CRASH 0xC0000005" ($h.results.Count -eq 2 -and @($h.results | Where-Object { $_.verdict -eq "CRASH" -and $_.exit_code -eq "0xC0000005" }).Count -eq 2) (Show-Out $h)
     foreach ($i in 0..1) {
@@ -416,6 +510,7 @@ if ($busy.Count -gt 0) {
     $r = $h.results | Select-Object -First 1
     Check "e2e EXIT_HANG (-GracefulExit, WM_CLOSE refused): verdict, save-after copied" ($r -and $r.verdict -eq "EXIT_HANG" -and $r.save.after.size -eq 65544) (Show-Out $h)
     Check "e2e: no stand-in game left running" (@(Get-Process -Name $fakeNames -ErrorAction SilentlyContinue).Count -eq 0)
+    Check "e2e: no nvidia-smi / PresentMon left running by the harness" ((Get-SamplerCount) -eq $samplersBefore) "before $samplersBefore, now $(Get-SamplerCount)"
     Check "e2e: the other save in the folder untouched by all of it" (((Get-Content -LiteralPath (Join-Path $e2eSg "ArchiveSaveFile.2.sav") -Encoding Byte) -join ",") -eq "2,2")
     Check "e2e: config.txt / user_script.txt of the stand-ins cleaned up" (@($fakeNames | Where-Object { (Test-Path (Join-Path $env:APPDATA "UnrealVRMod\$_\config.txt")) -or (Test-Path (Join-Path $env:APPDATA "UnrealVRMod\$_\user_script.txt")) }).Count -eq 0)
 }
@@ -510,6 +605,7 @@ if ($md.Count -eq 1) {
     Check "ladder: tier-2 rung row" ($rowsMd[1] -like "| ch2 two | 2 | 1 | PASS | 0 | 0x00000000 | 2 | 40 B (changed) | 3 |*") $rowsMd[1]
     Check "ladder: HARNESS_ERROR row, harness exit 1" ($rowsMd[2] -like "| ch3-three | 1 | 1 | HARNESS_ERROR | 1 |*") $rowsMd[2]
     Check "ladder: pipes in notes escaped, PostInitProperties warning filtered" ($rowsMd[0] -like "*fake note / with a pipe |*" -and $rowsMd[0] -notlike "*PostInitProperties*") $rowsMd[0]
+    Check "ladder: VR fps / 1% low / hitches from result.json's perf headline, empty without one" ($rowsMd[0] -like "*| 40 B (changed) | 3 | 47.8 | 30.0 | 2 | fake note*" -and $rowsMd[2] -like "*| HARNESS_ERROR | 1 | *(changed) | 3 |  |  |  | fake note*") ($rowsMd[0] + " / " + $rowsMd[2])
     Check "ladder: stop noted, exit 1" ((($mdText -join "`n") -like "*Stopped early: ch3-three ended with HARNESS_ERROR.*") -and $l.code -eq 1) ($mdText -join " / ")
     $js = Read-Json ([System.IO.Path]::ChangeExtension($md[0].FullName, ".json"))
     Check "ladder json: 3 rows" (@($js).Count -eq 3)
@@ -552,6 +648,17 @@ $pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py (Join-Path $Here "self
 $pyOut | Where-Object { $_ -notlike "ok *" } | ForEach-Object { Write-Host "  $_" }
 $pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
 Check "gamepilot --var self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
+
+Write-Host "== 7b. frame rate: gamepilot's measured segments, perfreport.py on synthetic runs"
+foreach ($f in @((Join-Path $Tools "perfreport.py"), (Join-Path $Here "selftest_perf.py"))) {
+    & { $ErrorActionPreference = "Continue"; & $Py -W error -m py_compile $f 2>&1 | ForEach-Object { Write-Host "      $_" } }
+    Check "py_compile $(Split-Path -Leaf $f) (warnings as errors)" ($LASTEXITCODE -eq 0)
+}
+$pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py (Join-Path $Here "selftest_perf.py") (Join-Path $Work "perf") 2>&1 | ForEach-Object { "$_" } })
+# (the stubbed pilot logs its steps to stdout too: only the failures and the two example lines)
+$pyOut | Where-Object { $_ -like "FAIL*" -or $_ -like "  line: *" -or $_ -like "Traceback*" -or $_ -match "Error" } | ForEach-Object { Write-Host "  $_" }
+$pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
+Check "frame-rate self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
 
 Write-Host "== 8. the real save folder"
 Check "real Wukong save folder unchanged by the self-test" ((Get-Listing $RealSaveDir) -join "`n" -eq ($realBefore -join "`n"))

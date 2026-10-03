@@ -23,7 +23,7 @@
     {"click": [926, 577]},
     {"wait_for": "in_room", "timeout": 60},
     {"phase": "play"},
-    {"wait": 45},
+    {"wait": 45, "measure": true},
     {"key": "esc"},
     {"wait_for": "pause_menu", "timeout": 30, "press": "esc", "every": 5},
     {"phase": "leave"},

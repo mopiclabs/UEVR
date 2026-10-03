@@ -26,7 +26,7 @@
     {"click": [89, 192]},
     {"wait_for": "in_car", "timeout": 60},
     {"phase": "play"},
-    {"wait": 20},
+    {"wait": 20, "measure": true},
     {"key": "esc"},
     {"wait_for": "pause_menu", "timeout": 30, "press": "esc", "every": 6},
     {"phase": "leave"},

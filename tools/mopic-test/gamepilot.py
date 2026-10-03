@@ -349,6 +349,108 @@ def grab(hwnd, max_width, source="window"):
             "source": source, "window": list(window_rect(hwnd)), "time": time.time()}
     return img, meta
 
+# ---------------------------------------------------------------------------------------------------------------
+# measurement: the segments perfreport.py cuts the frame-rate data to. Every source is timed in
+# QueryPerformanceCounter time scaled to nanoseconds ("QPC ns"): time.perf_counter_ns() here, steady_clock in UEVR,
+# os_monotonic_get_ns in monado, PresentMon's --qpc_time (raw ticks, converted with the frequency stored below).
+
+def qpc_ns():
+    return time.perf_counter_ns()
+
+
+def qpc_freq():
+    freq = ctypes.c_int64()
+    kernel32.QueryPerformanceFrequency(ctypes.byref(freq))
+    return freq.value
+
+
+class DISPLAY_DEVICEW(ctypes.Structure):
+    _fields_ = [("cb", wt.DWORD), ("DeviceName", wt.WCHAR * 32), ("DeviceString", wt.WCHAR * 128),
+                ("StateFlags", wt.DWORD), ("DeviceID", wt.WCHAR * 128), ("DeviceKey", wt.WCHAR * 128)]
+
+
+class DEVMODEW(ctypes.Structure):
+    # the display variant of the union after dmFields (dmPosition, dmDisplayOrientation, dmDisplayFixedOutput)
+    _fields_ = [("dmDeviceName", wt.WCHAR * 32), ("dmSpecVersion", wt.WORD), ("dmDriverVersion", wt.WORD),
+                ("dmSize", wt.WORD), ("dmDriverExtra", wt.WORD), ("dmFields", wt.DWORD),
+                ("dmPositionX", wt.LONG), ("dmPositionY", wt.LONG), ("dmDisplayOrientation", wt.DWORD),
+                ("dmDisplayFixedOutput", wt.DWORD), ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short),
+                ("dmYResolution", ctypes.c_short), ("dmTTOption", ctypes.c_short), ("dmCollate", ctypes.c_short),
+                ("dmFormName", wt.WCHAR * 32), ("dmLogPixels", wt.WORD), ("dmBitsPerPel", wt.DWORD),
+                ("dmPelsWidth", wt.DWORD), ("dmPelsHeight", wt.DWORD), ("dmDisplayFlags", wt.DWORD),
+                ("dmDisplayFrequency", wt.DWORD), ("dmICMMethod", wt.DWORD), ("dmICMIntent", wt.DWORD),
+                ("dmMediaType", wt.DWORD), ("dmDitherType", wt.DWORD), ("dmReserved1", wt.DWORD),
+                ("dmReserved2", wt.DWORD), ("dmPanningWidth", wt.DWORD), ("dmPanningHeight", wt.DWORD)]
+
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD),
+                ("szDevice", wt.WCHAR * 32)]
+
+
+class SYSTEM_POWER_STATUS(ctypes.Structure):
+    _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte), ("BatteryLifePercent", ctypes.c_ubyte),
+                ("SystemStatusFlag", ctypes.c_ubyte), ("BatteryLifeTime", wt.DWORD), ("BatteryFullLifeTime", wt.DWORD)]
+
+
+# monitor handles are pointer-sized
+user32.MonitorFromWindow.restype = ctypes.c_void_p
+user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+
+def displays():
+    """Every display on the desktop: GDI name, the adapter that scans it out (on this laptop the Mopic display and
+    the internal panel hang off the Intel iGPU, the 240 Hz monitor off the NVIDIA GPU), monitor id (EDID: MPL0291 is
+    the Mopic display), current mode."""
+    out = []
+    i = 0
+    while True:
+        dev = DISPLAY_DEVICEW()
+        dev.cb = ctypes.sizeof(dev)
+        if not user32.EnumDisplayDevicesW(None, i, ctypes.byref(dev), 0):
+            break
+        i += 1
+        if not dev.StateFlags & 0x1:  # DISPLAY_DEVICE_ATTACHED_TO_DESKTOP
+            continue
+        entry = {"device": dev.DeviceName, "adapter": dev.DeviceString, "monitor": "", "primary": bool(dev.StateFlags & 0x4)}
+        mon = DISPLAY_DEVICEW()
+        mon.cb = ctypes.sizeof(mon)
+        if user32.EnumDisplayDevicesW(dev.DeviceName, 0, ctypes.byref(mon), 0):
+            parts = mon.DeviceID.split("\\")  # MONITOR\MPL0291\{4d36e96e-...}\0006
+            entry["monitor"] = parts[1] if len(parts) > 1 else mon.DeviceID
+        mode = DEVMODEW()
+        mode.dmSize = ctypes.sizeof(mode)
+        if user32.EnumDisplaySettingsW(dev.DeviceName, ctypes.c_uint32(0xFFFFFFFF), ctypes.byref(mode)):  # ENUM_CURRENT_SETTINGS
+            entry.update(width=mode.dmPelsWidth, height=mode.dmPelsHeight, refresh_hz=mode.dmDisplayFrequency,
+                         left=mode.dmPositionX, top=mode.dmPositionY)
+        out.append(entry)
+    return out
+
+
+def window_display(hwnd):
+    """The display (see displays()) that has most of the window, plus the window's rect; None if unknown."""
+    try:
+        hmon = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(info)
+        if not hmon or not user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+            return None
+        found = next((d for d in displays() if d["device"] == info.szDevice), {"device": info.szDevice})
+        return dict(found, window=list(window_rect(hwnd)))
+    except Exception:  # noqa: BLE001 - context only, never fail a step over it
+        return None
+
+
+def power_status():
+    """AC or battery (a laptop: the GPU's power limit moves with it)."""
+    s = SYSTEM_POWER_STATUS()
+    if not kernel32.GetSystemPowerStatus(ctypes.byref(s)):
+        return None
+    return {"ac": None if s.ACLineStatus == 255 else s.ACLineStatus == 1,
+            "battery_pct": None if s.BatteryLifePercent == 255 else s.BatteryLifePercent,
+            "saver": s.SystemStatusFlag == 1}
+
 
 def shot(hwnd, out, max_width, source="window"):
     img, meta = grab(hwnd, max_width, source)
@@ -637,10 +739,22 @@ class Pilot:
         os.makedirs(out_dir, exist_ok=True)
         self.status_path = status_path
         self.logf = open(os.path.join(out_dir, "pilot.log"), "a", encoding="utf-8")
+        # clock: a QPC / wall-clock pair taken together, so perfreport.py can place wall-clock data (nvidia-smi)
+        # on the QPC time line; phases and segments carry QPC times (segments: the measured steps, see do())
+        unix_ns = time.time_ns()
         self.status = {"state": "running", "recipe": self.recipe_path, "step": 0, "desc": "", "phase": "",
                        "exit_expected": False, "reached": [], "error": None, "error_kind": None,
-                       "vars": self.variables, "started": time.time(), "updated": time.time()}
-        self.rng = random.Random(0)
+                       "vars": self.variables, "started": time.time(), "updated": time.time(),
+                       "clock": {"qpc_ns": qpc_ns(), "unix_ns": unix_ns, "qpc_freq": qpc_freq()},
+                       "phases": [], "segments": [], "displays": []}
+        try:
+            self.status["displays"] = displays()
+        except Exception:  # noqa: BLE001 - context only
+            pass
+        self.rng = random.Random(0)  # re-seeded per step in run()
+        self.segment = None       # the open segment (a dict in status["segments"])
+        self.segment_spans = []    # its screen captures: (start, end) QPC ns, written to captures.csv at its end
+        self.segment_cpu = 0.0
         self.write_status()
 
     def log(self, msg):
@@ -685,7 +799,69 @@ class Pilot:
         return hwnd
 
     def grab(self):
-        return recipe_grab(self.window(), self.recipe, self.source)
+        hwnd = self.window()
+        if self.segment is None:
+            return recipe_grab(hwnd, self.recipe, self.source)
+        # a capture inside a measured segment (play_until grabs the whole 4K Mopic display every loop): its time
+        # goes to captures.csv so perfreport.py can tell hitches that overlap one
+        start = qpc_ns()
+        try:
+            return recipe_grab(hwnd, self.recipe, self.source)
+        finally:
+            self.segment_spans.append((start, qpc_ns()))
+
+    def measure_label(self, step):
+        """The segment label of a step, or None. play / play_until steps are measured as "gameplay" unless
+        "measure": false; "measure": true or "<label>" makes any other step a segment too (a wait during a movie)."""
+        if "phase" in step:
+            return None
+        m = step.get("measure", "play" in step or "play_until" in step)
+        if m is None or m is False:
+            return None
+        if m is True:
+            return "gameplay"
+        if isinstance(m, str):
+            return m.strip() or None
+        raise Failed("recipe", f"\"measure\" must be true, false or a label, got {m!r}")
+
+    def segment_begin(self, label):
+        """Open a measured segment: start time, the window's display and the power source, written at once so a
+        crash in the middle still leaves the start in the status."""
+        hwnd = find_window(self.proc)
+        seg = {"label": label, "phase": self.status["phase"], "step": self.status["step"], "start_qpc_ns": None,
+               "end_qpc_ns": None, "ok": None, "captures": 0, "capture_s": 0.0, "cpu_s": None,
+               "window": window_display(hwnd) if hwnd else None, "power": power_status()}
+        self.status["segments"].append(seg)
+        self.segment, self.segment_spans, self.segment_cpu = seg, [], time.process_time()
+        seg["start_qpc_ns"] = qpc_ns()
+        self.write_status()
+        self.log(f"  measuring ({label})")
+
+    def segment_end(self, ok):
+        """Close the open segment (no-op when none is open)."""
+        seg = self.segment
+        if seg is None:
+            return
+        seg["end_qpc_ns"] = qpc_ns()
+        self.segment = None
+        seg["ok"] = ok
+        seg["cpu_s"] = round(time.process_time() - self.segment_cpu, 3)  # the pilot's own CPU use (GPU power budget)
+        spans = self.segment_spans
+        seg["captures"] = len(spans)
+        seg["capture_s"] = round(sum(e - s for s, e in spans) / 1e9, 3)
+        if spans:
+            index = self.status["segments"].index(seg)
+            path = os.path.join(self.out_dir, "captures.csv")
+            try:
+                new = not os.path.exists(path)
+                with open(path, "a", encoding="utf-8", newline="\n") as f:
+                    f.write(("segment,start_qpc_ns,end_qpc_ns\n" if new else "")
+                            + "".join(f"{index},{s},{e}\n" for s, e in spans))
+            except OSError as e:
+                self.log(f"  warning: could not write {path}: {e}")
+        self.write_status()
+        self.log(f"  measured {(seg['end_qpc_ns'] - seg['start_qpc_ns']) / 1e9:.1f} s ({seg['label']}"
+                 f"{'' if ok else ', failed'}, {len(spans)} captures)")
 
     def save_shot(self, name, img=None):
         if img is None:
@@ -751,6 +927,7 @@ class Pilot:
         while True:
             img, _ = self.grab()
             if self.matches(name, img):
+                self.segment_end(True)  # gameplay ended at this capture (saving the shot isn't part of it)
                 self.reached(name, img, f" after {presses} gameplay keys")
                 return
             if time.time() >= end:
@@ -768,7 +945,10 @@ class Pilot:
 
     def to_screen(self, hwnd, x, y):
         """Recipe coordinates (the screenshot the checkpoints are in) -> screen pixels."""
+        start = qpc_ns()
         _, meta = grab(hwnd, self.max_width, self.source)
+        if self.segment is not None:
+            self.segment_spans.append((start, qpc_ns()))
         if self.fit:  # recipe coordinates -> the unfitted window screenshot
             fx, fy, fw, fh = self.fit
             x, y = (x - fx) * meta["size"][0] / fw, (y - fy) * meta["size"][1] / fh
@@ -842,7 +1022,21 @@ class Pilot:
             if not self.matches(step["if"], img):
                 self.log(f"  skipped ({step['if']} not showing)")
                 return
+        label = self.measure_label(step)
+        if label is None:
+            self.do_step(step)
+            return
+        self.segment_begin(label)
+        ok = False
+        try:
+            self.do_step(step)
+            ok = True
+        finally:
+            self.segment_end(ok)
+
+    def do_step(self, step):
         if "phase" in step:
+            self.status["phases"].append({"name": step["phase"], "step": self.status["step"], "qpc_ns": qpc_ns()})
             self.write_status(phase=step["phase"], exit_expected=self.status["exit_expected"] or step["phase"] == "exit")
             self.log(f"phase {step['phase']}")
         elif "wait_for" in step:
@@ -879,6 +1073,7 @@ class Pilot:
                 if keys and self.input_ready(strict=False):
                     press(self.rng.choice(keys), step.get("hold", 80))
                 self.sleep(every)
+            self.segment_end(True)  # the screenshot after the play isn't part of it
             self.save_shot("play")
         elif "expect_exit" in step:
             start = time.time()
@@ -926,6 +1121,9 @@ class Pilot:
                 desc = json.dumps(step, ensure_ascii=False)
                 self.write_status(step=i, desc=desc)
                 self.log(f"[{i}/{len(steps)}] {desc}")
+                # the random gameplay keys of each step start from the same seed in every run (one seed for the
+                # whole recipe would drift: play_until draws as many keys as the game's timing allows)
+                self.rng = random.Random(f"{os.path.basename(self.recipe_path)}:{i}")
                 try:
                     self.do(step)
                 except GameExiting:
