@@ -61,12 +61,12 @@ function Get-Hash([string]$path) { return (Get-FileHash -LiteralPath $path -Algo
 $realBefore = Get-Listing $RealSaveDir
 
 Write-Host "== 1. parse"
-foreach ($f in @("run-test.ps1", "run-ladder.ps1", "run-matrix.ps1", "runs\selftest\fake-harness.ps1", "runs\selftest\selftest.ps1")) {
+foreach ($f in @("run-test.ps1", "run-ladder.ps1", "run-matrix.ps1", "selftest\fake-harness.ps1", "selftest\selftest.ps1", "plans\hogwarts-fg-nsf.ps1")) {
     $tokens = $null; $errs = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Tools $f), [ref]$tokens, [ref]$errs)
     Check "parse $f ($(@($errs).Count) errors)" (@($errs).Count -eq 0) ((@($errs) | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Message)" }) -join "; ")
 }
-foreach ($f in @("run-test.ps1", "run-ladder.ps1", "runs\selftest\selftest.ps1", "runs\selftest\fake-harness.ps1")) {
+foreach ($f in @("run-test.ps1", "run-ladder.ps1", "run-matrix.ps1", "selftest\selftest.ps1", "selftest\fake-harness.ps1", "plans\hogwarts-fg-nsf.ps1")) {
     $bytes = [System.IO.File]::ReadAllBytes((Join-Path $Tools $f))
     Check "$f is ASCII (PowerShell 5.1 reads BOM-less scripts as ANSI)" (@($bytes | Where-Object { $_ -gt 127 }).Count -eq 0)
 }
