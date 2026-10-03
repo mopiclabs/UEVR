@@ -9,7 +9,7 @@
     "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
     "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
     "mode_select": {"image": "mode_select.png", "region": [488, 118, 290, 62], "threshold": 0.8},
-    "song_select": {"image": "song_select.png", "region": [700, 75, 440, 195], "threshold": 0.8},
+    "song_select": {"image": "song_select.png", "region": [686, 36, 132, 28], "threshold": 0.8},
     "song_play": {"image": "song_play.png", "region": [545, 74, 80, 34], "threshold": 0.8},
     "result": {"image": "result.png", "region": [60, 365, 250, 250], "threshold": 0.8},
     "exit_screen": {"image": "exit_screen.png", "region": [30, 540, 300, 120], "threshold": 0.8}

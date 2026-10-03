@@ -26,9 +26,10 @@
     {"name": "song-11", "tier": 1, "vars": {"song": "song11", "scroll": -10, "row": 3, "row_y": 202}, "story_point": "Free Play: Untitled Mixtape - Charlie Disco, 125 BPM (song 11 of 11, after scrolling)"},
     {"name": "encore", "recipe": "DeadAsDisco-encore", "tier": 2, "story_point": "Skill Trees screen and The Encore bar hub (walk, look; nothing bought)"},
     {"name": "infinite", "tier": 2, "vars": {"song": "maniac", "row": 1, "row_y": 95, "infinite": 1, "play_s": 240}, "story_point": "Infinite Disco with the Infinite (loop / survival) box ticked, 4 min"},
-    {"name": "arena-2", "tier": 2, "vars": {"song": "mission", "row": 3, "row_y": 202, "arena_next": 1, "arena_pick": 1}, "story_point": "Free Play on arena page 2"},
-    {"name": "arena-3", "tier": 2, "vars": {"song": "hyper-sunrise", "row": 5, "row_y": 308, "arena_next": 2, "arena_pick": 1}, "story_point": "Free Play on arena page 3"},
-    {"name": "arena-4", "tier": 2, "vars": {"song": "magazine", "row": 7, "row_y": 415, "arena_next": 3, "arena_pick": 1}, "story_point": "Free Play on arena page 4 (the arena choice is saved: put Static / Disco Floor 1 back afterwards, TODO)"},
+    {"name": "arena-2", "tier": 2, "vars": {"song": "mission", "row": 3, "row_y": 202, "arena_open": 1, "arena_xy": [640, 175]}, "story_point": "Free Play on Disco Floor 2"},
+    {"name": "arena-3", "tier": 2, "vars": {"song": "hyper-sunrise", "row": 5, "row_y": 308, "arena_open": 1, "arena_xy": [985, 175]}, "story_point": "Free Play on Bubblepop 1"},
+    {"name": "arena-4", "tier": 2, "vars": {"song": "magazine", "row": 7, "row_y": 415, "arena_open": 1, "arena_xy": [640, 360]}, "story_point": "Free Play on Astral Waters 1"},
+    {"name": "arena-reset", "tier": 2, "vars": {"song": "maniac", "row": 1, "row_y": 95, "arena_open": 1, "arena_xy": [295, 175]}, "story_point": "Free Play on Disco Floor 1: puts back the arena the other rungs expect (the choice is saved with the game)"},
     {"name": "tutorial", "recipe": "DeadAsDisco-tutorial", "tier": 2, "story_point": "Tutorial through NEW GAME (probably resets slot 0: last rung; baseline copy to restore)"}
   ]
 }
