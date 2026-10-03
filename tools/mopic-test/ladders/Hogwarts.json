@@ -659,6 +659,7 @@
       "tier": 2,
       "vars": {"settle_s": 300},
       "vars_note": "the save starts in the carriage cutscene, during which Esc opens nothing (2026-10-03: MENU_FAIL at the quit after 2 min of play)",
+      "status": "UNPROVEN (2026-10-04): after the carriage cutscene the prologue stops on tutorial prompts (치유하려면 G) that block Esc; random play can't follow them. The prologue is covered by prologue-ancient-path (tier 1).",
       "story_point": "Prologue (The Path to Hogwarts): the first autosave of a new game, game time 0:00 on RootLevel, no quest yet; most likely the opening cinematic (Fig, the carriage)",
       "desc_ko": "프롤로그: 새 게임의 첫 자동 저장 (플레이 0:00, 오프닝 시네마틱 추정)",
       "character": "3 Gen Z Unaffiliated L1 (card GEN Z)",
