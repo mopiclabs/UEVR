@@ -246,6 +246,7 @@ bool NativePairSnapshot::configure(ID3D12Device* device, const D3D12_RESOURCE_DE
         std::scoped_lock _{m_mutex};
         m_ring = std::move(ring);
         m_published = -1;
+        m_previous_published = -1;
         m_cursor = 0;
         m_checked_queue = nullptr;
     }
@@ -265,6 +266,7 @@ void NativePairSnapshot::suspend() {
     std::scoped_lock _{m_mutex};
     m_suspended = true;
     m_published = -1;
+    m_previous_published = -1;
     m_armed.store(false, std::memory_order_release);
 }
 
@@ -289,6 +291,7 @@ void NativePairSnapshot::retire() {
         ring = std::move(m_ring);
         m_ring.reset();
         m_published = -1;
+        m_previous_published = -1;
         // A lease still out on the old ring is tracked by that ring (release() waits for its copy), not here.
         m_pinned = -1;
         m_sources = {};
@@ -542,11 +545,13 @@ void NativePairSnapshot::take_snapshot(ID3D12CommandQueue* queue) {
             return;
         }
 
-        // Never the slot a Present pass may copy from (published) or is copying from (pinned).
+        // Never a slot a Present pass may copy from (published, or the one before it while the newest is still being
+        // written on the GPU) or is copying from (pinned).
         bool found = false;
         for (uint32_t step = 1; step <= SLOT_COUNT && !found; ++step) {
             const auto candidate = (m_cursor + step) % SLOT_COUNT;
-            if (static_cast<int32_t>(candidate) == m_published || static_cast<int32_t>(candidate) == m_pinned ||
+            if (static_cast<int32_t>(candidate) == m_published || static_cast<int32_t>(candidate) == m_previous_published ||
+                static_cast<int32_t>(candidate) == m_pinned ||
                 !ring->slot_free(candidate))
             {
                 continue;
@@ -635,6 +640,7 @@ void NativePairSnapshot::take_snapshot(ID3D12CommandQueue* queue) {
     slot.time = std::chrono::steady_clock::now();
 
     if (ring == m_ring && !m_suspended && sources == m_sources) {
+        m_previous_published = m_published;
         m_published = static_cast<int32_t>(index);
         m_cursor = index;
         ++m_stats.snapshots;
@@ -686,7 +692,20 @@ std::optional<NativePairSnapshot::Lease> NativePairSnapshot::acquire(std::chrono
         return fail("no eye pair frozen at an engine frame boundary yet");
     }
 
-    auto& slot = m_ring->slots[m_published];
+    // Only a pair the GPU has finished writing. Making the Present pass's queue wait for the snapshot fence instead hung
+    // Hogwarts Legacy (XeFG): the snapshot sits on the engine queue behind the engine's wait for XeFG's present queue,
+    // which then waited for the snapshot. While the newest pair is still being copied, the one before it is used.
+    auto pick = m_published;
+    if (!reached(m_ring->fence.Get(), m_ring->slots[pick].written)) {
+        if (m_previous_published < 0 || !reached(m_ring->fence.Get(), m_ring->slots[m_previous_published].written)) {
+            ++m_stats.unfinished;
+            return fail("the newest frozen eye pair is still being copied on the GPU");
+        }
+        pick = m_previous_published;
+        ++m_stats.previous_pair;
+    }
+
+    auto& slot = m_ring->slots[pick];
     if (slot.left.Get() != m_sources.left.Get() || slot.right.Get() != m_sources.right.Get() ||
         slot.capture_generation != m_sources.right_generation)
     {
@@ -705,7 +724,7 @@ std::optional<NativePairSnapshot::Lease> NativePairSnapshot::acquire(std::chrono
         return fail("the engine rendered newer frames than the last frozen pair");
     }
 
-    m_pinned = m_published;
+    m_pinned = pick;
 
     if (m_armed.load(std::memory_order_relaxed)) {
         ++m_stats.pending_at_acquire;
@@ -717,7 +736,7 @@ std::optional<NativePairSnapshot::Lease> NativePairSnapshot::acquire(std::chrono
     lease.fence = m_ring->fence.Get();
     lease.fence_value = slot.written;
     lease.queue = slot.queue.Get();
-    lease.slot = static_cast<uint32_t>(m_published);
+    lease.slot = static_cast<uint32_t>(pick);
     lease.frame = slot.frame;
     lease.width = static_cast<uint32_t>(m_ring->desc.Width);
     lease.height = m_ring->desc.Height;
@@ -738,10 +757,8 @@ bool NativePairSnapshot::record_copy(const Lease& lease, CommandContext& command
         return false;
     }
 
-    // On the snapshot's own queue the copy already runs after it.
-    if (consumer_queue != lease.queue && !reached(lease.fence, lease.fence_value) &&
-        FAILED(consumer_queue->Wait(lease.fence, lease.fence_value)))
-    {
+    // acquire() only lends a finished pair: never make this queue wait on the GPU for the engine queue (see acquire).
+    if (consumer_queue != lease.queue && !reached(lease.fence, lease.fence_value)) {
         return false;
     }
 
