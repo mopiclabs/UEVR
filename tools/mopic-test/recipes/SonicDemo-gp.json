@@ -34,7 +34,9 @@
     "ready_text": {"image": "ready_text.png", "region": [755, 418, 192, 76], "threshold": 0.6},
     "leave_confirm": {"image": "leave_confirm.png", "region": [420, 290, 440, 60], "threshold": 0.8},
     "leave_yes_selected": {"image": "leave_yes_selected.png", "region": [680, 388, 210, 48], "threshold": 0.8, "mode": "highlight"},
-    "gadget_progress": {"image": "gadget_progress.png", "region": [460, 196, 360, 40], "threshold": 0.8}
+    "gadget_progress": {"image": "gadget_progress.png", "region": [460, 196, 360, 40], "threshold": 0.8},
+    "class_normal_selected": {"image": "class_normal_selected.png", "region": [128, 256, 200, 114], "threshold": 0.8, "mode": "highlight"},
+    "class_sonic_selected": {"image": "class_sonic_selected.png", "region": [522, 256, 200, 114], "threshold": 0.8, "mode": "highlight"}
   },
   "steps": [
     {"phase": "boot"},
