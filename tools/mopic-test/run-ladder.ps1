@@ -12,11 +12,13 @@
 #    "rungs": [{"name": "...", "save": "<path relative to tools\mopic-test>", "vars": {"k": "v"}, "tier": 1}]}
 # "game" is the run-test.ps1 preset (default: -Game). A rung may name its own "recipe". "tier" defaults to 1;
 # -Tier N runs the rungs with tier <= N. A rung's "vars" go to run-test.ps1 -RecipeVars (null: the recipe's
-# default). Before the first launch every selected rung is checked: its save exists (and matches its "sha256",
-# when it has one), its recipe exists, has a "save_slot" and declares the rung's vars, and every var the recipe
-# needs is given. Other fields (notes...) are ignored. Stops after the first rung whose verdict is in -StopOn
-# (HARNESS_ERROR, NO_VR: nothing after it would be a valid test). The VR fps / 1% low / Hitches columns are each run's
-# perf headline (result.json "perf", README "Frame rate"; " FG" = frame generation on).
+# default). A rung without "save" runs without -SaveFile: it plays the game's own progress as it is (demos, games
+# whose progress is several files). Before the first launch every selected rung is checked: its save exists (and
+# matches its "sha256", when it has one), its recipe exists, has a "save_slot" (rungs with a save) and declares the
+# rung's vars, and every var the recipe needs is given. Other fields (notes...) are ignored. Stops after the
+# first rung whose verdict is in -StopOn (HARNESS_ERROR, NO_VR: nothing after it would be a valid test). The VR fps /
+# 1% low / Hitches columns are each run's perf headline (result.json "perf", README "Frame rate"; " FG" = frame
+# generation on).
 # Keep the PC unlocked and unused meanwhile.
 
 param(
@@ -131,14 +133,18 @@ for ($i = $startAt; $i -lt $allRungs.Count; $i++) {
     if ($Only.Count -gt 0 -and $Only -notcontains $rung.name) { continue }
     $recipe = $(if ($rung.recipe) { [string]$rung.recipe } elseif ($ladderJson.recipe) { [string]$ladderJson.recipe } else { "" })
     if ($recipe -eq "") { throw "rung $($rung.name): no recipe (set the ladder's or the rung's `"recipe`")" }
-    if (-not $rung.save) { throw "rung $($rung.name) has no save" }
-    $save = [string]$rung.save
-    if (-not [System.IO.Path]::IsPathRooted($save)) { $save = Join-Path $ScriptDir $save }
-    if (-not (Test-Path -LiteralPath $save -PathType Leaf)) { throw "rung $($rung.name): save not found: $save" }
-    if ($rung.sha256) {
-        $hash = (Get-FileHash -LiteralPath $save -Algorithm SHA256).Hash
-        if ($hash -ne [string]$rung.sha256) { throw "rung $($rung.name): $save has sha256 $hash, the ladder says $($rung.sha256)" }
-    }
+    # no "save": the rung plays the game's own progress as it is (no -SaveFile, the recipe needs no save_slot)
+    $save = ""
+    if ($rung.save) {
+        $save = [string]$rung.save
+        if (-not [System.IO.Path]::IsPathRooted($save)) { $save = Join-Path $ScriptDir $save }
+        if (-not (Test-Path -LiteralPath $save -PathType Leaf)) { throw "rung $($rung.name): save not found: $save" }
+        if ($rung.sha256) {
+            $hash = (Get-FileHash -LiteralPath $save -Algorithm SHA256).Hash
+            if ($hash -ne [string]$rung.sha256) { throw "rung $($rung.name): $save has sha256 $hash, the ladder says $($rung.sha256)" }
+        }
+        $save = (Resolve-Path -LiteralPath $save).ProviderPath
+    } elseif ($rung.sha256) { throw "rung $($rung.name) has a sha256 but no save" }
     $vars = Get-RungVars $rung.vars
     $recipePath = $(if (Test-Path -LiteralPath $recipe -PathType Leaf) { $recipe } else { Join-Path $ScriptDir "recipes\$recipe.json" })
     if (-not (Test-Path -LiteralPath $recipePath -PathType Leaf)) {
@@ -146,7 +152,7 @@ for ($i = $startAt; $i -lt $allRungs.Count; $i++) {
     } else {
         # what run-test.ps1 checks before its first run, here before the ladder's first launch
         $ri = Get-RecipeInfo ((Resolve-Path -LiteralPath $recipePath).ProviderPath)
-        if (-not $ri.has_slot) { throw "rung $($rung.name): recipe $recipePath has no `"save_slot`" (where -SaveFile installs the save)" }
+        if ($save -ne "" -and -not $ri.has_slot) { throw "rung $($rung.name): recipe $recipePath has no `"save_slot`" (where -SaveFile installs the save)" }
         $unknown = @($vars.PSBase.Keys | Where-Object { $ri.declared -cnotcontains $_ })
         if ($unknown.Count -gt 0) { throw "rung $($rung.name): recipe $recipePath declares no var $($unknown -join ', ') (its `"vars`": $(if ($ri.declared.Count -gt 0) { $ri.declared -join ', ' } else { 'none' }))" }
         $unset = @($ri.required | Where-Object { -not $vars.Contains($_) })
@@ -156,7 +162,7 @@ for ($i = $startAt; $i -lt $allRungs.Count; $i++) {
         name   = [string]$rung.name
         tier   = $rungTier
         recipe = $recipe
-        save   = (Resolve-Path -LiteralPath $save).ProviderPath
+        save   = $save
         vars   = (@($vars.PSBase.Keys | ForEach-Object { "$_=$($vars[$_])" }) -join ";")
         label  = "$Label-$(ConvertTo-SafeName $rung.name)"
     }
@@ -242,11 +248,12 @@ $stopped = $false
 $rungNo = 0
 foreach ($rung in $selected) {
     $rungNo++
-    $harnessArgs = @("-ExecutionPolicy", "Bypass", "-File", $Harness, "-Game", $preset, "-Recipe", $rung.recipe,
-        "-SaveFile", $rung.save, "-Runs", "$Runs", "-Label", $rung.label)
+    $harnessArgs = @("-ExecutionPolicy", "Bypass", "-File", $Harness, "-Game", $preset, "-Recipe", $rung.recipe)
+    if ($rung.save -ne "") { $harnessArgs += @("-SaveFile", $rung.save) }
+    $harnessArgs += @("-Runs", "$Runs", "-Label", $rung.label)
     if ($rung.vars -ne "") { $harnessArgs += @("-RecipeVars", $rung.vars) }
     if ($EngineDir -ne "") { $harnessArgs += @("-EngineDir", $EngineDir) }
-    Write-Host "=== [$rungNo/$($selected.Count)] $($rung.name) (tier $($rung.tier)) <- $($rung.save)" -ForegroundColor Cyan
+    Write-Host "=== [$rungNo/$($selected.Count)] $($rung.name) (tier $($rung.tier)) <- $(if ($rung.save -ne '') { $rung.save } else { "(no save: the game's own progress)" })" -ForegroundColor Cyan
     if ($DryRun) {
         Write-Host ("  powershell " + (@($harnessArgs | ForEach-Object { ConvertTo-ArgvString $_ }) -join " "))
         continue
