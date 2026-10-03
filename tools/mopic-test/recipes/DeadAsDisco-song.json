@@ -11,6 +11,7 @@
   "todo": ["Songs 9-11: scroll the list to its end (wheel over it) and record where they land; check which 3 of Authority / Kitsune no Uta / Mensch Maschine / Neko Miku they are.", "Arena Select: the right arrow (1112, 95) pages through 4 pages (Static, ...); whether paging alone changes the arena or the page's tile (913, 225) has to be clicked, and whether the pager wraps. The choice is saved (ID_Arena.sav), so arena rungs run last and the last one should put Static / Disco Floor 1 back.", "Record song_play_r6..r8 after scrolling (the rows' y may shift when the list ends mid-row).", "Infinite: the checkbox (392, 738) state is probably remembered; the infinite rung should untick it again (second click) or run last."],
   "checkpoints": {
     "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
+    "file_slot_select": {"image": "file_slot_select.png", "region": [310, 80, 650, 65], "threshold": 0.8},
     "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
     "mode_select": {"image": "mode_select.png", "region": [488, 118, 290, 62], "threshold": 0.8},
     "song_select": {"image": "song_select.png", "region": [686, 36, 132, 28], "threshold": 0.8},
@@ -32,6 +33,9 @@
     {"wait_for": "main_menu", "timeout": 300},
     {"phase": "enter"},
     {"click": [230, 80]},
+    {"note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"},
+    {"wait": 3},
+    {"click": [270, 255], "if": "file_slot_select"},
     {"wait_for": "stage_select", "timeout": 60, "click": [230, 80], "every": 8},
     {"wait": 2},
     {"key": "enter"},

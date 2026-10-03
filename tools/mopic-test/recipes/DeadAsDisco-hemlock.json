@@ -12,6 +12,7 @@
   "todo_checkpoints": {"hemlock_briefing": {"region_guess": null, "what": "screen after clicking the HEMLOCK tile"}, "hemlock_result": {"region_guess": [60, 365, 250, 250], "what": "mission end screen menu"}, "hemlock_failed": {"region_guess": null, "what": "death / fail screen"}, "pause_menu": {"region_guess": null, "what": "in-mission pause menu"}},
   "checkpoints": {
     "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
+    "file_slot_select": {"image": "file_slot_select.png", "region": [310, 80, 650, 65], "threshold": 0.8},
     "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
     "result": {"image": "result.png", "region": [60, 365, 250, 250], "threshold": 0.8},
     "exit_screen": {"image": "exit_screen.png", "region": [30, 540, 300, 120], "threshold": 0.8},
@@ -22,6 +23,9 @@
     {"wait_for": "main_menu", "timeout": 300},
     {"phase": "enter"},
     {"click": [230, 80]},
+    {"note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"},
+    {"wait": 3},
+    {"click": [270, 255], "if": "file_slot_select"},
     {"wait_for": "stage_select", "timeout": 60, "click": [230, 80], "every": 8},
     {"wait": 2},
     {"note": "HEMLOCK tile (right); hover first, then click (TODO: one click or two)"},
