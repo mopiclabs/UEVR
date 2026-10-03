@@ -842,6 +842,16 @@ foreach ($case in $refusals) {
 $l = Invoke-Ladder (Join-Path $Work "ladder-refuse4.json") @("-DryRun")
 Check "ladder -DryRun only warns about a missing recipe" ($l.code -eq 0 -and $l.flat -like "*WARNING*recipe not found*") $l.text
 
+# a rung without "save" plays the game's own progress: no -SaveFile, and its recipe needs no save_slot
+$noSaveLadder = Join-Path $Work "ladder-nosave.json"
+Write-Json $noSaveLadder ([ordered]@{ game = "Wukong"; recipe = $recipeLadderNoSlot; rungs = @([ordered]@{ name = "demo"; tier = 1 }) })
+$l = Invoke-Ladder $noSaveLadder @("-DryRun")
+Check "ladder: a rung without save dry-runs without -SaveFile" ($l.code -eq 0 -and $l.flat -like "*demo (tier 1) <- (no save: the game's own progress)*" -and $l.flat -notlike "*-SaveFile*") $l.text
+$noSaveSha = Join-Path $Work "ladder-nosave-sha.json"
+Write-Json $noSaveSha ([ordered]@{ game = "Wukong"; recipe = $recipeLadderNoSlot; rungs = @([ordered]@{ name = "demo"; sha256 = ("0" * 64) }) })
+$l = Invoke-Ladder $noSaveSha @("-DryRun")
+Check "ladder: a rung with sha256 but no save refused" ($l.code -ne 0 -and $l.flat -like "*rung demo has a sha256 but no save*") $l.text
+
 # full ladder with the stand-in harness: stops after the HARNESS_ERROR rung
 $env:MOPIC_SELFTEST_RUNS = Join-Path $Work "ladder-runs"
 New-Item -ItemType Directory -Force -Path $env:MOPIC_SELFTEST_RUNS | Out-Null

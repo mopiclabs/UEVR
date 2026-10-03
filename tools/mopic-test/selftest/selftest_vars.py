@@ -120,12 +120,15 @@ for path in sorted(glob.glob(os.path.join(TOOLS, "recipes", "*.json"))):
     recipe = gamepilot.load_recipe(path)
     orig = copy.deepcopy(recipe["steps"])
     if recipe.get("vars"):
-        # a recipe that declares vars (Wukong-save): its defaults fill every ${name}, an undeclared --var is refused
-        s, txt, prob, unf = gamepilot.recipe_steps_with_vars(recipe, {})
+        # a recipe that declares vars (Wukong-save): its defaults, plus a value for each var without one (null: the
+        # ladder rung must give it, e.g. Stray-chapter's chapter_index), fill every ${name}; an undeclared --var is
+        # refused
+        required = {n: "1" for n, v in recipe["vars"].items() if v is None}
+        s, txt, prob, unf = gamepilot.recipe_steps_with_vars(recipe, required)
         left = [n for n in recipe["vars"] if "${" + n + "}" in json.dumps(s)]
         check(f"recipe {os.path.basename(path)} (vars): defaults fill every var", prob == [] and not any(unf) and not left
               and len(s) == len(orig), (prob, left))
-        s, txt, prob, unf = gamepilot.recipe_steps_with_vars(recipe, {"mopicselftest_typo": "1"})
+        s, txt, prob, unf = gamepilot.recipe_steps_with_vars(recipe, {**required, "mopicselftest_typo": "1"})
         check(f"recipe {os.path.basename(path)} (vars): an undeclared --var is refused", len(prob) == 1, prob)
         continue
     s, txt, prob, unf = gamepilot.recipe_steps_with_vars(recipe, {})
