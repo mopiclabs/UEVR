@@ -14384,7 +14384,7 @@ bool VR::should_skip_duplicate_present(VRRuntime* runtime) {
     }
 
     ++m_skipped_duplicate_presents;
-    SPDLOG_INFO_ONCE("[VR] Skipping Present passes without a new engine frame (frame generation); VR_SubmitOncePerEngineFrame");
+    SPDLOG_INFO_ONCE("[VR] Skipping Present passes without a new engine frame (frame generation, or a game presenting twice); VR_SubmitOncePerEngineFrame");
     SPDLOG_INFO_EVERY_N_SEC(30, "[VR] Present passes skipped without a new engine frame: {}", m_skipped_duplicate_presents);
     return true;
 }

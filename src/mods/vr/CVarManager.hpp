@@ -279,6 +279,7 @@ private:
     void enforce_frame_generation_cvars();
     std::array<std::optional<int>, 3> m_frame_generation_cvar_originals{};
     std::array<uint32_t, 3> m_frame_generation_cvar_forced_count{};
+    std::array<bool, 3> m_frame_generation_cvar_refused{}; // Set() left the value unchanged: not retried
     std::chrono::steady_clock::time_point m_next_frame_generation_cvar_check{};
 
     static inline std::mutex s_change_mutex{};

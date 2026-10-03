@@ -913,7 +913,9 @@ void CVarManager::enforce_frame_generation_cvars() {
     const auto& vr = VR::get();
     const auto want_off = vr != nullptr && vr->should_disable_frame_generation();
     const auto any_forced = std::any_of(m_frame_generation_cvar_originals.begin(), m_frame_generation_cvar_originals.end(),
-        [](const auto& original) { return original.has_value(); });
+        [](const auto& original) { return original.has_value(); }) ||
+        std::any_of(m_frame_generation_cvar_refused.begin(), m_frame_generation_cvar_refused.end(),
+            [](bool refused) { return refused; });
 
     if (!want_off && !any_forced) {
         return;
@@ -940,7 +942,7 @@ void CVarManager::enforce_frame_generation_cvars() {
             const auto before = variable->GetInt();
 
             if (want_off) {
-                if (before == 0) {
+                if (before == 0 || m_frame_generation_cvar_refused[i]) {
                     continue;
                 }
 
@@ -949,14 +951,28 @@ void CVarManager::enforce_frame_generation_cvars() {
                 }
 
                 const auto ok = variable->Set(L"0");
+                const auto after = variable->GetInt();
+
+                if (after == before) {
+                    // The game keeps it (Black Myth: Wukong's r.Streamline.DLSSG.Enable stays 1): stop asking until the
+                    // fix is off again, and leave nothing to put back.
+                    m_frame_generation_cvar_refused[i] = true;
+                    original.reset();
+                    SPDLOG_WARN("[FrameGen] Native Stereo Fix is on, but {} stays {} after setting it to 0 (ok={}); not "
+                        "retrying", utility::narrow(name), after, ok);
+                    continue;
+                }
+
                 const auto count = ++m_frame_generation_cvar_forced_count[i];
 
                 // The first few, then every 60th: a game that keeps turning it back on would fill the log otherwise.
                 if (count <= 3 || count % 60 == 0) {
                     SPDLOG_INFO("[FrameGen] Native Stereo Fix is on: {} {} -> {} (ok={}, time {}); generated frames never reach "
                         "the headset and split the eye pair (VR_NativeStereoFixDisableFrameGeneration)",
-                        utility::narrow(name), before, variable->GetInt(), ok, count);
+                        utility::narrow(name), before, after, ok, count);
                 }
+            } else if (m_frame_generation_cvar_refused[i]) {
+                m_frame_generation_cvar_refused[i] = false;
             } else if (original.has_value()) {
                 const auto ok = variable->Set(std::to_wstring(*original).c_str());
                 SPDLOG_INFO("[FrameGen] Native Stereo Fix is off: {} put back {} -> {} (ok={})",
