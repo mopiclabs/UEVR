@@ -7,7 +7,7 @@
   "checkpoints": {
     "title": {"image": "title.png", "region": [490, 590, 300, 34], "threshold": 0.8},
     "char_select": {"image": "char_select.png", "region": [62, 502, 356, 36], "threshold": 0.8},
-    "slot_aram": {"image": "slot_aram.png", "region": [58, 128, 368, 78], "threshold": 0.8},
+    "slot_aram": {"image": "slot_aram.png", "region": [64, 136, 260, 32], "threshold": 0.8},
     "loading": {"image": "loading.png", "region": [36, 588, 96, 26], "threshold": 0.8},
     "in_game": {"image": "in_game.png", "region": [994, 562, 262, 66], "threshold": 0.8},
     "field_guide": {"image": "field_guide.png", "region": [1040, 686, 214, 22], "threshold": 0.8},
