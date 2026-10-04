@@ -38,6 +38,17 @@ XInputHook::XInputHook() {
         return nullptr;
     };
 
+    // Where a hook's trampoline landed: a fault in executable memory just below xinput1_4.dll (TEKKEN 8 Demo
+    // FREEZE at 0x7ffde7420078) can then be told apart from another hook's trampolines (Steam overlay).
+    static auto log_trampoline = [](const char* name, const safetyhook::InlineHook& hook) {
+        if (!hook) {
+            return;
+        }
+
+        spdlog::info("[XInputHook] {} target {:x} trampoline {:x} (+{:x})", name, (uintptr_t)hook.target(),
+            (uintptr_t)hook.trampoline().address(), hook.trampoline().size());
+    };
+
     auto recursive_resolve_jmp = [](this const auto& self, uint8_t* instr) -> uintptr_t {
         try {
             const auto decoded = utility::decode_one(instr);
@@ -126,6 +137,9 @@ XInputHook::XInputHook() {
             }
         }
 
+        log_trampoline("XInputGetState (1_4)", m_xinput_1_4_get_state_hook);
+        log_trampoline("XInputSetState (1_4)", m_xinput_1_4_set_state_hook);
+
          spdlog::info("[XInputHook] Done (1_4)");
     };
 
@@ -184,6 +198,9 @@ XInputHook::XInputHook() {
                 spdlog::error("[XInputHook] Failed to find XInputSetState");
             }
         }
+
+        log_trampoline("XInputGetState (1_3)", m_xinput_1_3_get_state_hook);
+        log_trampoline("XInputSetState (1_3)", m_xinput_1_3_set_state_hook);
 
         spdlog::info("[XInputHook] Done (1_3)");
     };
