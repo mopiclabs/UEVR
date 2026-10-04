@@ -465,7 +465,9 @@ if ($busy.Count -gt 0 -or $NoWindows) {
         for ($i = 0; $i -lt [math]::Min($dh.Count, $dn.Count); $i++) {
             $added = @($dn[$i].keys | Where-Object { $dh[$i].keys -notcontains $_ })
             $lost = @($dh[$i].keys | Where-Object { $dn[$i].keys -notcontains $_ })
-            Check "cmp $($case.name) r$($i + 1): result.json keys = before + game_ini, perf, eyes" (($added -join ",") -eq "game_ini,perf,eyes" -and $lost.Count -eq 0) "added $($added -join ','); lost $($lost -join ',')"
+            # keys this branch added since the comparison point (HEAD may already have some of them)
+            $allowed = @("game_ini", "perf", "eyes", "binocular")
+            Check "cmp $($case.name) r$($i + 1): result.json keys = before + some of $($allowed -join ', ')" (@($added | Where-Object { $allowed -notcontains $_ }).Count -eq 0 -and $lost.Count -eq 0) "added $($added -join ','); lost $($lost -join ',')"
             $changed = @($dh[$i].keys | Where-Object { $dh[$i].values[$_] -cne $dn[$i].values[$_] })
             Check "cmp $($case.name) r$($i + 1): result.json values as before" ($changed.Count -eq 0) (($changed | ForEach-Object { "$_ head=$($dh[$i].values[$_]) new=$($dn[$i].values[$_])" }) -join "; ")
             Check "cmp $($case.name) r$($i + 1): recipe_vars empty, save null" ($dn[$i].values["recipe_vars"] -eq '""' -and $dn[$i].values["save"] -eq "null")
@@ -474,11 +476,14 @@ if ($busy.Count -gt 0 -or $NoWindows) {
             $launched = $null -ne $case.game
             Check "cmp $($case.name) r$($i + 1): perf null, $(if ($launched) { 'one perf line (not measured)' } else { 'no perf line (no game)' })" ($dn[$i].values["perf"] -eq "null" -and $(if ($launched) { $perfLines.Count -eq 1 -and $perfLines[0] -eq "perf: not measured (no .venv or no perfreport.py)" } else { $perfLines.Count -eq 0 })) ($perfLines -join " / ")
             $sumNew = @($dn[$i].summary | Where-Object { $_ -notlike "perf*" })
-            Check "cmp $($case.name) r$($i + 1): summary.txt as before (but the perf line)" (($dh[$i].summary -join "`n") -ceq ($sumNew -join "`n")) ("head: " + ($dh[$i].summary -join " / ") + " | new: " + ($dn[$i].summary -join " / "))
+            $sumHead = @($dh[$i].summary | Where-Object { $_ -notlike "perf*" })
+            Check "cmp $($case.name) r$($i + 1): summary.txt as before (but the perf line)" (($sumHead -join "`n") -ceq ($sumNew -join "`n")) ("head: " + ($dh[$i].summary -join " / ") + " | new: " + ($dn[$i].summary -join " / "))
             # the samplers' files: nvidia-smi's gpu.csv, PresentMon's output (or its "access denied"), perf-context.json,
             # monado's stats when a VR session happened to run
-            $filesNew = @($dn[$i].files | Where-Object { $_ -notmatch '^\\(gpu\.csv|presentmon[^\\]*|perf-context\.json|monado-frames\.csv)$' })
-            Check "cmp $($case.name) r$($i + 1): same files in the run folder (but the perf samplers')" (($dh[$i].files -join ",") -eq ($filesNew -join ",")) ("head: " + ($dh[$i].files -join ",") + " | new: " + ($dn[$i].files -join ","))
+            $samplers = '^\\(gpu\.csv|presentmon[^\\]*|perf-context\.json|monado-frames\.csv)$'
+            $filesNew = @($dn[$i].files | Where-Object { $_ -notmatch $samplers })
+            $filesHead = @($dh[$i].files | Where-Object { $_ -notmatch $samplers })
+            Check "cmp $($case.name) r$($i + 1): same files in the run folder (but the perf samplers')" (($filesHead -join ",") -eq ($filesNew -join ",")) ("head: " + ($dh[$i].files -join ",") + " | new: " + ($dn[$i].files -join ","))
             if ($launched) { Check "cmp $($case.name) r$($i + 1): perf-context.json written" ($dn[$i].files -contains "\perf-context.json") ($dn[$i].files -join ",") }
         }
         $norm = @{}
@@ -933,6 +938,15 @@ $pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py -W error (Join-Path $H
 $pyOut | Where-Object { $_ -like "FAIL*" -or $_ -like "  line: *" -or $_ -like "Traceback*" -or $_ -match "Error" } | ForEach-Object { Write-Host "  $_" }
 $pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
 Check "eye sampler self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
+
+Write-Host "== 7d. both eyes' content compared (analysis\binocular.py) on synthetic stereo pairs with one-eye defects"
+$binPy = Join-Path $Tools "analysis\binocular.py"
+& { $ErrorActionPreference = "Continue"; & $Py -W error -m py_compile $binPy 2>&1 | ForEach-Object { Write-Host "      $_" } }
+Check "py_compile binocular.py (warnings as errors)" ($LASTEXITCODE -eq 0)
+$pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py -W error $binPy "selftest" "--work" (Join-Path $Work "binocular") 2>&1 | ForEach-Object { "$_" } })
+$pyOut | Where-Object { $_ -like "FAIL*" -or $_ -like "Traceback*" -or $_ -match "Error" } | ForEach-Object { Write-Host "  $_" }
+$pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
+Check "binocular self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
 
 Write-Host "== 8. the real save folder"
 Check "real Wukong save folder unchanged by the self-test" ((Get-Listing $RealSaveDir) -join "`n" -eq ($realBefore -join "`n"))

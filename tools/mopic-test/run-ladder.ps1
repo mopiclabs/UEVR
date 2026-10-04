@@ -30,6 +30,7 @@ param(
     [int]$Runs = 1,
     [string]$EngineDir = "",
     [string]$Label = "ladder",
+    [switch]$Binocular,                            # compare both eyes every 3 s (run-test.ps1 -EyeSampler, binocular.py); monado-service in MOPIC_MODE=sbs
     [string[]]$StopOn = @("HARNESS_ERROR", "NO_VR"),   # stop the ladder after a rung with one of these verdicts
     [switch]$DryRun,                               # print what would run, run nothing
     [string]$Harness = "",                         # test hook: a stand-in for run-test.ps1
@@ -253,6 +254,7 @@ foreach ($rung in $selected) {
     $harnessArgs += @("-Runs", "$Runs", "-Label", $rung.label)
     if ($rung.vars -ne "") { $harnessArgs += @("-RecipeVars", $rung.vars) }
     if ($EngineDir -ne "") { $harnessArgs += @("-EngineDir", $EngineDir) }
+    if ($Binocular) { $harnessArgs += @("-EyeSampler", "-EyeSamplerArgs", "--full-every 3") }
     Write-Host "=== [$rungNo/$($selected.Count)] $($rung.name) (tier $($rung.tier)) <- $(if ($rung.save -ne '') { $rung.save } else { "(no save: the game's own progress)" })" -ForegroundColor Cyan
     if ($DryRun) {
         Write-Host ("  powershell " + (@($harnessArgs | ForEach-Object { ConvertTo-ArgvString $_ }) -join " "))
