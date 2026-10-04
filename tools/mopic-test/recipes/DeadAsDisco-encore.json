@@ -7,7 +7,6 @@
   "images": "DeadAsDisco",
   "config": {"FrameworkConfig_RememberMenuState": "true", "FrameworkConfig_MenuOpen": "false"},
   "notes": "DRAFT, never run past the stage hub. Two looks without spending: the Skill Trees screen (button at the hub's top left, about (210, 43)) and THE ENCORE, the bar hub (left tile, about (320, 450)): third-person walking, NPCs, unlocks and upgrades bought with Fans. Never buy (purchases change the save); E near an NPC may open dialogue or a shop (kept out of the keys). Leave through the pause menu (TODO).",
-  "vars": {},
   "todo": ["Skill Trees: whether a click opens it and Esc closes it back to the hub.", "THE ENCORE: what the tile click opens (loading straight in?), a stable HUD element for the walk, the pause menu and its way back to the stage hub (or main menu)."],
   "todo_checkpoints": {"skill_trees": {"region_guess": null, "what": "Skill Trees screen title"}, "encore_pause": {"region_guess": null, "what": "pause menu in The Encore"}, "encore_pause_leave_selected": {"region_guess": null, "what": "its 'stage select' / 'leave' item"}},
   "checkpoints": {

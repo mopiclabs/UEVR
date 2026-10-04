@@ -164,7 +164,7 @@ class Sampler:
 
     def __init__(self, out_dir, rect, hz=120, status_path=None, seconds=None, stop_file=None, alive=None, shots=40,
                  shot_threshold=1.0, black_level=8.0, bright_min=20.0, lr_every=12, grab=None, clock=time.perf_counter_ns,
-                 sleep=time.sleep):
+                 sleep=time.sleep, full_every=0.0, full_rect=None, full_max=60, full_width=1920, full_grab=None):
         self.out_dir, self.rect, self.hz, self.lr_every = out_dir, rect, hz, max(1, lr_every)
         self.status_path, self.seconds, self.stop_file, self.alive = status_path, seconds, stop_file, alive
         self.shots_left, self.shot_threshold = shots, shot_threshold
@@ -173,6 +173,11 @@ class Sampler:
         self.meta = {"version": 1, "rect": [rect["left"], rect["top"], rect["width"], rect["height"]], "hz": hz,
                      "step": STEP, "status": status_path, "samples": 0, "shots": [], "stopped_by": None}
         self._status_sig, self._status = None, None
+        # --full-every: the whole side-by-side display every N s of a measured segment, for analysis\binocular.py
+        self.full_every, self.full_rect, self.full_max, self.full_width = full_every, full_rect, full_max, full_width
+        self.full_grab = full_grab
+        if full_every and full_rect:
+            self.meta["full_frames"] = []
 
     def read_status(self):
         """read_segments() of the pilot's status file, opened only when os.stat says it changed: the pilot replaces
@@ -204,6 +209,7 @@ class Sampler:
         status, next_poll, seg = None, start, None
         prev, prev_t, prev_seg = None, None, None
         last_shot = None
+        last_full = None
         next_t = start
         w, h = self.rect["width"], self.rect["height"]
         with open(os.path.join(self.out_dir, "eyes.csv"), "w", newline="\n", encoding="utf-8") as f:
@@ -252,6 +258,11 @@ class Sampler:
                     self.save_shot(t0, kind, prev, (left, right))
                     last_shot = t0
                 prev, prev_t, prev_seg = (left, right), t0, seg
+                if (self.full_every and self.full_rect and len(self.meta["full_frames"]) < self.full_max and
+                        (not self.status_path or seg is not None) and
+                        (last_full is None or t0 - last_full >= self.full_every * 1e9)):
+                    self.save_full(t0, seg)
+                    last_full = t0
                 if t1 - last_flush > 1e9:
                     f.flush()
                     last_flush = t1
@@ -278,6 +289,24 @@ class Sampler:
             if rd > 4 * thr and ld < thr / 2:
                 return "right-only"
         return None
+
+    def save_full(self, t, seg):
+        """The whole Mopic display (left eye | right eye under MOPIC_MODE=sbs), scaled to full_width, as
+        binocular\\<t_ns>-seg<N>.png."""
+        from PIL import Image
+        if self.full_grab is None:
+            import mss
+            sct = mss.MSS()
+            self.full_grab = lambda rect: (lambda r: (r.size, r.bgra))(sct.grab(rect))
+        size, data = self.full_grab(self.full_rect)
+        img = Image.frombytes("RGB", size, data, "raw", "BGRX")
+        if img.width > self.full_width:
+            img = img.resize((self.full_width, int(img.height * self.full_width / img.width)), Image.BILINEAR)
+        d = os.path.join(self.out_dir, "binocular")
+        os.makedirs(d, exist_ok=True)
+        name = f"{t}-seg{-1 if seg is None else seg}.png"
+        img.save(os.path.join(d, name), compress_level=1)
+        self.meta["full_frames"].append({"t_ns": t, "seg": seg, "file": f"binocular\\{name}"})
 
     def save_shot(self, t, kind, prev, cur):
         from PIL import Image
@@ -628,6 +657,8 @@ def main():
     s.add_argument("--rect", default="", help="left,top,width,height instead of the Mopic display")
     s.add_argument("--shots", type=int, default=40, help="at most this many candidate PNGs")
     s.add_argument("--lr-every", type=int, default=12, help="the left/right match on every Nth sample (it costs as much as a grab)")
+    s.add_argument("--full-every", type=float, default=0, help="also save the whole side-by-side display every N s of a measured segment (binocular\\, for analysis\\binocular.py; 0: off)")
+    s.add_argument("--full-max", type=int, default=60, help="at most this many whole-display frames")
     s = sub.add_parser("report", help="find one-eye changes and black eyes in a run folder's eyes.csv")
     s.add_argument("path")
     s.add_argument("--threshold", type=float, default=1.0, help="an eye changed when its mean luma diff exceeds this")
@@ -663,7 +694,9 @@ def main():
         return
     sampler = Sampler(args.out, rect, hz=args.hz, status_path=args.status or None, seconds=args.seconds or None,
                       stop_file=args.stop_file or None, alive=process_alive_fn(args.pid) if args.pid else None,
-                      shots=args.shots, lr_every=args.lr_every)
+                      shots=args.shots, lr_every=args.lr_every, full_every=args.full_every,
+                      full_rect={"left": display[0], "top": display[1], "width": display[2], "height": display[3]},
+                      full_max=args.full_max)
     sampler.meta["display"] = list(display)
     sampler.meta["refresh_hz"] = refresh
     meta = sampler.run()

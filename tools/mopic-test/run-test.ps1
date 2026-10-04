@@ -979,6 +979,25 @@ function Invoke-EyeReport([string]$runDir) {
     return [pscustomobject]@{ summary = $null; line = "eyes: eyesampler.py report failed ($why)" }
 }
 
+# binocular.py analyze over the whole-display frames eyesampler.py --full-every saved (binocular\*.png) -> its summary
+# (result.json's "binocular") and summary.txt line; $null without frames
+function Invoke-BinocularReport([string]$runDir) {
+    if (-not (Get-ChildItem -LiteralPath (Join-Path $runDir "binocular") -Filter *.png -ErrorAction SilentlyContinue)) { return $null }
+    $output = @()
+    try { $output = @(& { $ErrorActionPreference = "Continue"; & $PilotPython $BinocularScript "analyze" $runDir 2>&1 | ForEach-Object { "$_" } }) } catch { $output = @($_.Exception.Message) }
+    $reportPath = Join-Path $runDir "binocular-report.json"
+    if (Test-Path -LiteralPath $reportPath) {
+        try {
+            $doc = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            return [pscustomobject]@{ summary = $doc.summary; line = [string]$doc.summary.line }
+        } catch {
+            $output += "binocular-report.json: $($_.Exception.Message)"
+        }
+    }
+    $why = @($output | Where-Object { "$_".Trim() -ne "" }) | Select-Object -Last 1
+    return [pscustomobject]@{ summary = $null; line = "binocular: binocular.py analyze failed ($why)" }
+}
+
 # ---------------------------------------------------------------------------------------------------------------
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -1039,6 +1058,7 @@ $PilotPython = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 $PilotScript = Join-Path $ScriptDir "gamepilot.py"
 $PerfScript = Join-Path $ScriptDir "perfreport.py"
 $EyeScript = Join-Path $ScriptDir "analysis\eyesampler.py"
+$BinocularScript = Join-Path $ScriptDir "analysis\binocular.py"
 $MonadoStatsDir = Join-Path $env:LOCALAPPDATA "monado"
 $GameIniPending = Join-Path $RunsRoot "game-ini-pending"
 $RecipeGameIni = @()
@@ -1638,6 +1658,13 @@ for ($run = 1; $run -le $Runs; $run++) {
             # alternate-eye rendering updates one eye per engine frame: one-eye changes are its design, not a fault
             if ($eyes -and $perf -and $perf.mode -and $perf.mode.afr) { $eyesLine += " | AFR: one eye per engine frame by design, lags expected" }
         }
+        # both eyes' content compared beyond parallax (eyesampler.py --full-every frames; informational)
+        $binocular = $null
+        $binocularLine = $null
+        if ($EyeSampler -and $gameProc) {
+            $binReport = Invoke-BinocularReport $runDir
+            if ($binReport) { $binocular = $binReport.summary; $binocularLine = $binReport.line }
+        }
 
         $result = [ordered]@{
             verdict             = $verdict
@@ -1669,6 +1696,7 @@ for ($run = 1; $run -le $Runs; $run++) {
             pilot               = $pilot
             perf                = $perf
             eyes                = $eyes
+            binocular           = $binocular
             notes               = $notes
         }
         $result | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $runDir "result.json") -Encoding UTF8
@@ -1703,6 +1731,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
         if ($perfLine) { $summary += $perfLine }
         if ($eyesLine) { $summary += $eyesLine }
+        if ($binocularLine) { $summary += $binocularLine }
         $summary += ($notes | ForEach-Object { "  - $_" })
         $summary | Set-Content -Path (Join-Path $runDir "summary.txt") -Encoding UTF8
 
