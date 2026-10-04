@@ -47,10 +47,16 @@ EDGE = 36               # columns at each side left out of the vertical offset s
 EDGE_PAD = 8            # work px left out at each side beyond the frame's best horizontal shift
 SHADE_WIN = 15          # low-pass window of the shade band (work px)
 SHADE_THRESHOLD = 10.0
+TEX_FOUND = 0.6         # mean SAD of the contrast-normalized texture (0 same, ~1.1 unrelated) up to which a block's
+                        # surface counts as found in the other eye
+TEX_MIN = 3.0           # local luma contrast a block needs for its texture to say anything
 SHADE_MIN_W = 3         # blocks: narrower horizontal runs of differing shading are half occlusions
 SHADE_FLAG = 1.5        # % of the frame: the biggest patch of differing shading that flags a run
 EDGE_FLAG = 5.0         # % of the frame: the same for patches touching the left / right edge (window violations)
-DETAIL_FLAG = 10.0      # % of the frame: the same for detail  # mean best-match SAD of the low-passed luma above which a block's shading differs
+DETAIL_FLAG = 10.0
+LIT = 15.0              # mean luma both eyes need for a frame to count in the whole-picture flags
+FRAME_SHARE = 0.1       # brightness / vertical / blur flags: share of the lit frames (luma diff >= 8%, |dy| >= 8 px,
+                        # sharpness R/L outside 0.8-1.25)      # % of the frame: the same for detail  # mean best-match SAD of the low-passed luma above which a block's shading differs
 BLACK = 6.0             # luma below this in both eyes: not judged
 THRESHOLD = 14.0        # mean best-match SAD (luma 0-255) above which a block is mismatched
 
@@ -91,29 +97,70 @@ def shifted(a, dx, dy):
     return a[ys][:, xs]
 
 
-def best_match(l, r, max_dx=MAX_DX, max_dy=MAX_DY):
-    """Per pixel, in two bands, the smallest box SAD over the shifts (a shift whose source falls outside the right
-    eye doesn't count), and the global best shift. detail: luma as is; shade: luma low-passed by SHADE_WIN, where
-    particles, sparkles and view-dependent highlights average out and a missing shadow or light does not."""
-    w = l.shape[1]
-    ls, rs = box(l, SHADE_WIN), box(r, SHADE_WIN)
-    best = np.full(l.shape, np.inf, np.float32)
-    best_s = np.full(l.shape, np.inf, np.float32)
+def normalized(a, win):
+    """a with its local mean removed and divided by its local contrast (win x win): a shadow or light that scales
+    the brightness of a textured surface leaves this unchanged. Also the local contrast, to leave flat areas out."""
+    hp = a - box(a, win)
+    sd = np.sqrt(np.maximum(box(hp * hp, win), 0.0))
+    return hp / (sd + 2.0), sd
+
+
+def search(l, r, shifts, win, shade_win):
+    """For every pixel of l, over the shifts (dx, dy) of r (a shift whose source falls outside r doesn't count):
+    raw     the smallest box SAD of luma as is (the detail band)
+    tex     the smallest box SAD of the contrast-normalized texture: how well the surface itself is found in r
+    shade   at that texture-best shift, the box SAD of luma low-passed by shade_win: the lighting on the same
+            surface in the two eyes
+    shade_min  the smallest low-passed luma SAD over all shifts: no shift gives the same lighting
+    and the mean raw cost per shift (for the global best shift)."""
+    h, w = l.shape
+    nl, _ = normalized(l, win)
+    nr, _ = normalized(r, win)
+    ls, rs = box(l, shade_win), box(r, shade_win)
+    raw = np.full((h, w), np.inf, np.float32)
+    tex = np.full((h, w), np.inf, np.float32)
+    shade = np.full((h, w), np.inf, np.float32)
+    shade_min = np.full((h, w), np.inf, np.float32)
     totals = {}
     x = np.arange(w)
-    for dy in range(-max_dy, max_dy + 1):
-        for dx in range(-max_dx, max_dx + 1):
-            out = (x - dx < 0) | (x - dx >= w)
-            cost = box(np.abs(l - shifted(r, dx, dy)), SAD_WIN).astype(np.float32)
-            cost[:, out] = np.inf
-            np.minimum(best, cost, out=best)
-            if dx % 2 == 0:     # low-passed: every other shift is enough
-                cs = box(np.abs(ls - shifted(rs, dx, dy)), SAD_WIN).astype(np.float32)
-                cs[:, out] = np.inf
-                np.minimum(best_s, cs, out=best_s)
-            totals[(dx, dy)] = float(cost[:, ~out].mean())
+    for dx, dy in shifts:
+        out = (x - dx < 0) | (x - dx >= w)
+        c = box(np.abs(l - shifted(r, dx, dy)), win).astype(np.float32)
+        c[:, out] = np.inf
+        np.minimum(raw, c, out=raw)
+        totals[(dx, dy)] = float(c[:, ~out].mean())
+        t = box(np.abs(nl - shifted(nr, dx, dy)), win).astype(np.float32)
+        t[:, out] = np.inf
+        better = t < tex
+        tex[better] = t[better]
+        sh = box(np.abs(ls - shifted(rs, dx, dy)), win).astype(np.float32)
+        shade[better] = sh[better]
+        sh[:, out] = np.inf
+        np.minimum(shade_min, sh, out=shade_min)
+    return raw, tex, shade, shade_min, totals
+
+
+def best_match(l, r, max_dx=MAX_DX, max_dy=MAX_DY):
+    """Per pixel of the left eye: raw (smallest luma SAD, the detail band), tex (how well its texture is found in the
+    right eye) and shade (the low-passed luma difference on that same surface), plus the global best shift. Things
+    right in front of the camera (a cat's ear, a phone held up, leaves) shift further than max_dx: a coarse pass at
+    half resolution covers shifts up to 2 * max_dx."""
+    shifts = [(dx, dy) for dy in range(-max_dy, max_dy + 1) for dx in range(-max_dx, max_dx + 1)]
+    raw, tex, shade, shade_min, totals = search(l, r, shifts, SAD_WIN, SHADE_WIN)
     (gdx, gdy) = min(totals, key=totals.get)
-    return best, best_s, gdx, gdy
+    h, w = l.shape
+    h2, w2 = h // 2, w // 2
+    half = lambda a: a[:h2 * 2, :w2 * 2].reshape(h2, 2, w2, 2).mean((1, 3))
+    far = [(dx, 0) for dx in range(-max_dx, max_dx + 1) if abs(dx) * 2 > max_dx]
+    raw2, tex2, shade2, shade_min2, _ = search(half(l), half(r), far, SAD_WIN // 2 | 1, SHADE_WIN // 2 | 1)
+    up = lambda a: np.repeat(np.repeat(a, 2, 0), 2, 1)
+    sub = (slice(0, h2 * 2), slice(0, w2 * 2))
+    np.minimum(raw[sub], up(raw2), out=raw[sub])
+    np.minimum(shade_min[sub], up(shade_min2), out=shade_min[sub])
+    better = up(tex2) < tex[sub]
+    tex[sub][better] = up(tex2)[better]
+    shade[sub][better] = up(shade2)[better]
+    return raw, tex, shade, shade_min, gdx, gdy
 
 
 def vertical_offset(l, r, max_dy=6, max_dx=EDGE - 4):
@@ -177,7 +224,7 @@ def blocks(a, border, bh, bw):
 
 def analyze_pair(lb, rb, threshold=THRESHOLD, shade_threshold=SHADE_THRESHOLD):
     l, r = luma(lb), luma(rb)
-    best, best_s, gdx, gdy = best_match(l, r)
+    best, tex, best_s, shade_min, gdx, gdy = best_match(l, r)
     h, w = l.shape
     # the strip at the left eye's edges that the right eye sees past its own frame edge: one-eye by geometry
     border = abs(gdx) + EDGE_PAD
@@ -186,7 +233,14 @@ def analyze_pair(lb, rb, threshold=THRESHOLD, shade_threshold=SHADE_THRESHOLD):
     bright = blocks(np.maximum(l, shifted(r, gdx, gdy)), border, bh, bw)
     valid = (bright >= BLACK) & np.isfinite(cost)
     mism = (cost > threshold) & valid
-    shade = wide((cost_s > shade_threshold) & valid)
+    # shading is judged where the surface itself is found in the other eye (its texture matches): background only
+    # one eye sees beside a near object (half occlusion) and flat areas aren't, a shadow drawn in one eye only is
+    _, contrast = normalized(l, SAD_WIN)
+    found = (blocks(tex, border, bh, bw) <= TEX_FOUND) & (blocks(contrast, border, bh, bw) >= TEX_MIN)
+    # and no shift at all gives the same lighting there (repeating textures, cobblestones, can be "found" at the
+    # wrong place)
+    unlit = blocks(shade_min, border, bh, bw) > shade_threshold
+    shade = wide((cost_s > shade_threshold) & valid & found & unlit)
     nvalid = int(valid.sum())
     # whole-picture comparisons over what both eyes see: the right eye moved by the best shift, edge strips left out
     cols = slice(border, w - border)
@@ -273,7 +327,25 @@ def analyze(path, top=6, threshold=THRESHOLD, jobs=0):
         os.makedirs(heat_dir, exist_ok=True)
     for pct, f, lb, rb, mism, geom in keep:
         heat_image(lb, rb, mism, geom, os.path.join(heat_dir, os.path.basename(f)))
+    doc = {"version": 1, "summary": summarize(frames, threshold), "frames": frames,
+           "heat": [os.path.join("binocular-heat", os.path.basename(k[1])) for k in keep]}
+    with open(os.path.join(out_dir, "binocular-report.json"), "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
+    return doc
 
+
+def resummarize(path):
+    """binocular-report.json's summary again from its per-frame values (after the flag rules changed)."""
+    rp = path if path.endswith(".json") else os.path.join(path, "binocular-report.json")
+    with open(rp, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    doc["summary"] = summarize(doc["frames"], doc["summary"].get("threshold", THRESHOLD))
+    with open(rp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
+    return doc
+
+
+def summarize(frames, threshold):
     def stat(key, fn=max, absval=False):
         vals = [(abs(fr[key]) if absval else fr[key], fr["file"]) for fr in frames if fr.get(key) is not None]
         if not vals:
@@ -284,6 +356,11 @@ def analyze(path, top=6, threshold=THRESHOLD, jobs=0):
     def median(key, absval=False):
         vals = sorted(abs(fr[key]) if absval else fr[key] for fr in frames if fr.get(key) is not None)
         return vals[len(vals) // 2] if vals else None
+
+    lit = [fr for fr in frames if fr["luma_left"] >= LIT and fr["luma_right"] >= LIT]
+
+    def share(test):
+        return round(sum(1 for fr in lit if test(fr)) / len(lit), 3) if lit else None
 
     summary = {
         "frames": len(frames), "threshold": threshold,
@@ -296,14 +373,16 @@ def analyze(path, top=6, threshold=THRESHOLD, jobs=0):
         "sharpness_min": stat("sharpness", fn=min), "sharpness_max": stat("sharpness"),
         "contrast_min": stat("contrast", fn=min), "contrast_max": stat("contrast"),
         "vertical_px_abs_max": stat("vertical_px", absval=True), "vertical_px_median": median("vertical_px", True),
+        # whole-picture flags need the difference in a share of the lit frames, not one: a fade, a cut or a black
+        # frame gives any single frame an extreme value
+        "lit_frames": len(lit),
+        "brightness_share": share(lambda f: f["luma_diff_pct"] is not None and abs(f["luma_diff_pct"]) >= 8.0),
+        "vertical_share": share(lambda f: abs(f["vertical_px"]) >= 8),
+        "blur_share": share(lambda f: f["sharpness"] is not None and not 0.8 <= f["sharpness"] <= 1.25),
     }
     summary["flags"] = flags(summary)
     summary["line"] = line(summary)
-    doc = {"version": 1, "summary": summary, "frames": frames,
-           "heat": [os.path.join("binocular-heat", os.path.basename(k[1])) for k in keep]}
-    with open(os.path.join(out_dir, "binocular-report.json"), "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=1)
-    return doc
+    return summary
 
 
 def flags(s):
@@ -317,12 +396,11 @@ def flags(s):
         out.append("one-eye at frame edge")
     if (v("largest_pct_max") or 0) >= DETAIL_FLAG:
         out.append("one-eye detail")
-    if (v("luma_diff_pct_abs_max") or 0) >= 8.0:
+    if (s.get("brightness_share") or 0) >= FRAME_SHARE:
         out.append("brightness differs")
-    if (v("vertical_px_abs_max") or 0) >= 8:
+    if (s.get("vertical_share") or 0) >= FRAME_SHARE:
         out.append("vertical offset")
-    sm, sx = v("sharpness_min"), v("sharpness_max")
-    if (sm is not None and sm < 0.8) or (sx is not None and sx > 1.25):
+    if (s.get("blur_share") or 0) >= FRAME_SHARE:
         out.append("one eye blurrier")
     return out
 
@@ -383,13 +461,22 @@ def selftest(work):
     l5 = left.copy()
     l5[850:1000, 600:800] *= 0.45
     to_png(l5, r5, os.path.join(work, "5-small-shadow-left-only.png"))
+    # a textured object close to the camera (160 px disparity, more than the background's 24) in front of the
+    # background: the background beside it is seen by one eye only (half occlusion), which is not a fault
+    rng = np.random.default_rng(7)
+    obj = np.kron(rng.normal(150, 50, (75, 50, 3)).clip(0, 255), np.ones((4, 4, 1)))
+    l6, r6 = left.copy(), right.copy()
+    l6[300:600, 500:700] = obj
+    r6[300:600, 340:540] = obj
+    to_png(l6, r6, os.path.join(work, "6-near-object.png"))
     fails = 0
     # (frame, flags it must raise, flags it must not)
     for name, want, never in (("0-same.png", [], None), ("1-shadow-one-eye.png", ["one-eye shading"], []),
                               ("2-right-darker.png", ["brightness differs"], []),
                               ("3-right-blurred.png", ["one eye blurrier"], ["one-eye shading"]),
                               ("4-right-raised.png", ["vertical offset"], []),
-                              ("5-small-shadow-left-only.png", ["one-eye shading"], ["brightness differs"])):
+                              ("5-small-shadow-left-only.png", ["one-eye shading"], ["brightness differs"]),
+                              ("6-near-object.png", [], ["one-eye shading"])):
         d = os.path.join(work, name[:-4])
         os.makedirs(d, exist_ok=True)
         os.replace(os.path.join(work, name), os.path.join(d, name))
@@ -411,12 +498,18 @@ def main():
     s.add_argument("--threshold", type=float, default=THRESHOLD)
     s.add_argument("--jobs", type=int, default=0, help="worker processes (0: CPUs - 2, at most 8)")
     s.add_argument("--print", action="store_true")
+    s = sub.add_parser("resummarize", help="redo a binocular-report.json's summary and flags from its frames")
+    s.add_argument("path")
+    s.add_argument("--print", action="store_true")
     s = sub.add_parser("selftest")
     s.add_argument("--work", default=os.path.join(os.environ.get("TEMP", "."), "binocular-selftest"))
     args = ap.parse_args()
     if args.cmd == "selftest":
         sys.exit(1 if selftest(args.work) else 0)
-    doc = analyze(args.path, args.top, args.threshold, args.jobs)
+    if args.cmd == "resummarize":
+        doc = resummarize(args.path)
+    else:
+        doc = analyze(args.path, args.top, args.threshold, args.jobs)
     if args.print:
         for fr in doc["frames"]:
             print(json.dumps(fr))
