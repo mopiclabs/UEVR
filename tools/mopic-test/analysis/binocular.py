@@ -49,6 +49,7 @@ SHADE_WIN = 15          # low-pass window of the shade band (work px)
 SHADE_THRESHOLD = 10.0
 SHADE_MIN_W = 3         # blocks: narrower horizontal runs of differing shading are half occlusions
 SHADE_FLAG = 1.5        # % of the frame: the biggest patch of differing shading that flags a run
+EDGE_FLAG = 5.0         # % of the frame: the same for patches touching the left / right edge (window violations)
 DETAIL_FLAG = 10.0      # % of the frame: the same for detail  # mean best-match SAD of the low-passed luma above which a block's shading differs
 BLACK = 6.0             # luma below this in both eyes: not judged
 THRESHOLD = 14.0        # mean best-match SAD (luma 0-255) above which a block is mismatched
@@ -134,24 +135,30 @@ def laplacian_mean(a):
 
 
 def largest_group(mask):
-    """Size of the biggest 4-connected group of True cells."""
+    """Sizes of the biggest 4-connected group of True cells away from the left and right edges, and of the biggest
+    touching one: something near at the frame edge is seen by one eye only (a stereo window violation), which is
+    geometry, not a rendering fault."""
     seen = np.zeros_like(mask, bool)
-    best = 0
+    best, best_edge = 0, 0
     h, w = mask.shape
     for y in range(h):
         for x in range(w):
             if mask[y, x] and not seen[y, x]:
-                stack, n = [(y, x)], 0
+                stack, n, edge = [(y, x)], 0, False
                 seen[y, x] = True
                 while stack:
                     cy, cx = stack.pop()
                     n += 1
+                    edge = edge or cx == 0 or cx == w - 1
                     for ny, nx in ((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)):
                         if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
                             seen[ny, nx] = True
                             stack.append((ny, nx))
-                best = max(best, n)
-    return best
+                if edge:
+                    best_edge = max(best_edge, n)
+                else:
+                    best = max(best, n)
+    return best, best_edge
 
 
 def wide(mask, n=SHADE_MIN_W):
@@ -190,11 +197,13 @@ def analyze_pair(lb, rb, threshold=THRESHOLD, shade_threshold=SHADE_THRESHOLD):
     cl, cr = lb[:, cols].reshape(-1, 3).mean(0), rbo.reshape(-1, 3).mean(0)
     sl, sr = laplacian_mean(lo), laplacian_mean(ro)
 
+    shade_groups = largest_group(shade)
+
     def pct(n):
         return round(100.0 * n / nvalid, 2) if nvalid else None
     res = {
-        "shade_pct": pct(shade.sum()), "shade_largest_pct": pct(largest_group(shade)),
-        "mismatch_pct": pct(mism.sum()), "largest_pct": pct(largest_group(mism)),
+        "shade_pct": pct(shade.sum()), "shade_largest_pct": pct(shade_groups[0]), "shade_edge_pct": pct(shade_groups[1]),
+        "mismatch_pct": pct(mism.sum()), "largest_pct": pct(largest_group(mism)[0]),
         "luma_left": round(lm, 1), "luma_right": round(rm, 1),
         "luma_diff_pct": round(100.0 * (rm - lm) / lm, 2) if lm > 1 else None,
         "color_diff": round(float(np.abs(cr - cl).max()), 2),
@@ -279,6 +288,7 @@ def analyze(path, top=6, threshold=THRESHOLD, jobs=0):
     summary = {
         "frames": len(frames), "threshold": threshold,
         "shade_pct_median": median("shade_pct"), "shade_largest_pct_max": stat("shade_largest_pct"),
+        "shade_edge_pct_max": stat("shade_edge_pct"),
         "mismatch_pct_median": median("mismatch_pct"), "mismatch_pct_max": stat("mismatch_pct"),
         "largest_pct_max": stat("largest_pct"),
         "luma_diff_pct_abs_max": stat("luma_diff_pct", absval=True),
@@ -303,6 +313,8 @@ def flags(s):
         return x["value"] if isinstance(x, dict) else x
     if (v("shade_largest_pct_max") or 0) >= SHADE_FLAG:
         out.append("one-eye shading")
+    if (v("shade_edge_pct_max") or 0) >= EDGE_FLAG:
+        out.append("one-eye at frame edge")
     if (v("largest_pct_max") or 0) >= DETAIL_FLAG:
         out.append("one-eye detail")
     if (v("luma_diff_pct_abs_max") or 0) >= 8.0:
@@ -321,7 +333,7 @@ def line(s):
         x = x["value"] if isinstance(x, dict) else x
         return "-" if x is None else f.format(x)
     return (f"binocular[{s['frames']} frames]: one-eye shading median {v('shade_pct_median')}% (largest patch max "
-            f"{v('shade_largest_pct_max')}%) | detail median {v('mismatch_pct_median')}% (largest patch max "
+            f"{v('shade_largest_pct_max')}%, at the frame edge {v('shade_edge_pct_max')}%) | detail median {v('mismatch_pct_median')}% (largest patch max "
             f"{v('largest_pct_max')}%) | luma diff max "
             f"{v('luma_diff_pct_abs_max')}% | sharpness R/L {v('sharpness_min', '{:.2f}')}-{v('sharpness_max', '{:.2f}')} | "
             f"vertical max {v('vertical_px_abs_max', '{:.0f}')} px"
