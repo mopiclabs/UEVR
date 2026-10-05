@@ -23744,6 +23744,65 @@ void delete_view_family_extension(void* obj) {
 }
 }
 
+// Holds r.LumenScene.UpdateViewOrigin at 0 for its lifetime (one Native Stereo Fix submission) and puts the value back
+// (see VR_NativeStereoFixLumenOriginRefreshFrames in begin_render_viewfamily_real). The cvar is render-thread safe: a
+// change made on the game thread reaches the render thread in order with the submission's render commands.
+class LumenViewOriginHold {
+public:
+    explicit LumenViewOriginHold(bool hold) {
+        if (!hold || (m_cvar = find_cvar()) == nullptr) {
+            return;
+        }
+
+        try {
+            m_before = m_cvar->GetInt();
+            if (m_before != 0 && m_cvar->Set(L"0")) {
+                m_held = true;
+                SPDLOG_INFO_ONCE("[NativeStereoFix] Holding r.LumenScene.UpdateViewOrigin at 0 between Lumen view origin refreshes");
+            }
+        } catch (...) {
+            SPDLOG_WARN_ONCE("[NativeStereoFix] Setting r.LumenScene.UpdateViewOrigin threw");
+        }
+    }
+
+    ~LumenViewOriginHold() {
+        if (!m_held) {
+            return;
+        }
+
+        try {
+            m_cvar->Set(std::to_wstring(m_before).c_str());
+        } catch (...) {
+        }
+    }
+
+    LumenViewOriginHold(const LumenViewOriginHold&) = delete;
+    LumenViewOriginHold& operator=(const LumenViewOriginHold&) = delete;
+
+private:
+    static sdk::IConsoleVariable* find_cvar() {
+        static sdk::IConsoleVariable* cvar{};
+        static bool looked_up{false};
+
+        if (!looked_up) {
+            looked_up = true;
+            if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
+                auto* object = console_manager->find(L"r.LumenScene.UpdateViewOrigin");
+                if (object != nullptr && object->AsCommand() == nullptr) {
+                    cvar = static_cast<sdk::IConsoleVariable*>(object);
+                }
+            }
+            SPDLOG_INFO("[NativeStereoFix] r.LumenScene.UpdateViewOrigin {}", cvar != nullptr ? "found" : "not found (no Lumen view origin hold)");
+        }
+
+        return cvar;
+    }
+
+    sdk::IConsoleVariable* m_cvar{};
+    int32_t m_before{1};
+    bool m_held{false};
+};
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
 
@@ -25608,7 +25667,21 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         }
     }
 
-    call_original();
+    // VR_NativeStereoFixLumenOriginRefreshFrames (N, default 30; 0 = off): Lumen moves its scene data to the view
+    // origin on every render, and each move leaves that render's Lumen lighting dimmer for a while; the second
+    // submission of a frame moves it again and comes out dimmer still. Black Myth: Wukong (UE5.0) chapter-1 forest,
+    // both eyes at one position, shared exposure, luma left/right: moving on both renders 47/39, never 55/55, on the
+    // first only 42/63, on the second only 49/27, on both every 60th frame only 47/47 (and the same with real stereo:
+    // forest -7.5% -> -0.8%, shrine -5.7% -> +0.8%). r.LumenScene.UpdateViewOrigin is render-thread safe, so holding it
+    // at 0 around a submission applies to that render alone. Games without the cvar (UE4) are left alone.
+    static uint32_t lumen_origin_frame_counter{0};
+    const auto lumen_origin_refresh = vr->get_native_stereo_fix_lumen_origin_refresh_frames();
+    const bool hold_lumen_origin = lumen_origin_refresh > 0 && (++lumen_origin_frame_counter % (uint32_t)lumen_origin_refresh) != 0;
+
+    {
+        LumenViewOriginHold first_hold{hold_lumen_origin};
+        call_original();
+    }
 
     uint32_t daysgone_first_frame{};
     if (use_daysgone_same_frame_render) {
@@ -25758,6 +25831,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             *exposure_state_slot = exposure_state_before;
         }
     }};
+
+    // The same Lumen view-origin hold for the second submission (see VR_NativeStereoFixLumenOriginRefreshFrames above).
+    LumenViewOriginHold second_hold{hold_lumen_origin};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {

@@ -15174,10 +15174,13 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "Disable only to restore the legacy same-pass behavior.");
             m_native_stereo_fix_share_exposure->draw("Share Auto Exposure Between Eyes");
             ImGui::TextWrapped(
-                "Experimental, default off. The right eye uses the left eye's auto exposure instead of metering its own, "
-                "as in stock stereo. With its own the eyes can settle on different brightness (Black Myth: Wukong shrine: "
-                "right eye 5% darker, matched with this on); where the right eye's Lumen/fog lighting is dimmer (Wukong "
-                "forest) its own exposure partly hides that, and this makes the right eye darker there.");
+                "Default on. The right eye uses the left eye's auto exposure instead of metering its own, as in stock "
+                "stereo. With its own the eyes can settle on different brightness (Black Myth: Wukong: right eye 5% darker).");
+            m_native_stereo_fix_lumen_origin_refresh_frames->draw("Lumen View Origin Refresh (frames)");
+            ImGui::TextWrapped(
+                "Default 30, 0 turns it off. Lumen moves its scene data to the camera on every render, which dims that "
+                "render's lighting for a while, and the second eye's render moves it again. The move is held off for both "
+                "eyes and let through for both every N frames (Black Myth: Wukong forest: right eye 8-16% darker -> under 1%).");
             m_native_stereo_fix_disable_frame_generation->draw("Turn Off Frame Generation");
             ImGui::TextWrapped(
                 "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "
