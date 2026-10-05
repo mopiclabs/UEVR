@@ -15172,6 +15172,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "Recommended for UE5.5 and newer. Keeps the real secondary-eye pass identity for per-eye water, "
                 "post-process, and renderer paths while retaining the Native Fix constructor safety guard. "
                 "Disable only to restore the legacy same-pass behavior.");
+            m_native_stereo_fix_share_exposure->draw("Share Auto Exposure Between Eyes");
+            ImGui::TextWrapped(
+                "Experimental, default off. The right eye uses the left eye's auto exposure instead of metering its own, "
+                "as in stock stereo. With its own the eyes can settle on different brightness (Black Myth: Wukong shrine: "
+                "right eye 5% darker, matched with this on); where the right eye's Lumen/fog lighting is dimmer (Wukong "
+                "forest) its own exposure partly hides that, and this makes the right eye darker there.");
             m_native_stereo_fix_disable_frame_generation->draw("Turn Off Frame Generation");
             ImGui::TextWrapped(
                 "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "

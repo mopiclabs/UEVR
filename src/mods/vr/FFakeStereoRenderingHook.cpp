@@ -24595,6 +24595,44 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                     "[NativeStereoFix] Using the validated pre-UE4.16 two-view eye-pair fallback without PlayerIndex");
             }
 
+            // Once: where each eye's FSceneView holds its own scene state. Besides FSceneView::State (+0x8) and the
+            // init options' copy, UE5 keeps the view state its auto exposure (eye adaptation) comes from, past the
+            // post-process settings (Black Myth: Wukong, UE5.0: +0x188 and +0x24f0). A view at the same offset in
+            // both eyes, after the first 4 KB, is taken for that field (see VR_NativeStereoFixShareExposure).
+            static bool looked_for_exposure_state_field = false;
+            if (!looked_for_exposure_state_field) {
+                looked_for_exposure_state_field = true;
+                const auto fields_holding = [](const void* view, const void* value) {
+                    std::vector<size_t> out{};
+                    for (size_t off = 0; off < 0x5000; off += sizeof(void*)) {
+                        const auto p = (const uint8_t*)view + off;
+                        if (IsBadReadPtr(p, sizeof(void*))) {
+                            break;
+                        }
+                        if (*(const void* const*)p == value) {
+                            out.push_back(off);
+                        }
+                    }
+                    return out;
+                };
+                const auto left_fields = fields_holding(primary_view, primary.state);
+                const auto right_fields = fields_holding(secondary_view, secondary.state);
+                const auto text = [](const std::vector<size_t>& offs) {
+                    std::string out{};
+                    for (const auto off : offs) {
+                        out += fmt::format(" +0x{:x}", off);
+                    }
+                    return out;
+                };
+                if (left_fields == right_fields && left_fields.size() == 3 && left_fields[2] >= 0x1000) {
+                    g_hook->m_native_stereo_exposure_state_offset = left_fields[2];
+                }
+                SPDLOG_INFO("[NativeStereoFix] Scene state fields: left view at{}, right view at{}; exposure view state field {}",
+                    text(left_fields), text(right_fields),
+                    g_hook->m_native_stereo_exposure_state_offset
+                        ? fmt::format("+0x{:x}", *g_hook->m_native_stereo_exposure_state_offset) : std::string{"not identified"});
+            }
+
             ++selected_family_count;
             selected_family = family;
             native_left_view = primary_view;
@@ -25691,6 +25729,33 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     utility::ScopeGuard clear_daysgone_frame_override{[&]() {
         if (use_daysgone_same_frame_render) {
             clear_daysgone_native_frame_override();
+        }
+    }};
+
+    // VR_NativeStereoFixShareExposure: the right eye renders as a primary view of its own, so it meters its own auto
+    // exposure; stock stereo gives the secondary view the primary's. Pointing its exposure view state at the left
+    // eye's for the second submission makes both eyes use one exposure (Black Myth: Wukong shrine, standing still:
+    // right eye 5.5% darker with its own, +0.3% with the left's; with r.EyeAdaptationQuality 0 the eyes match too).
+    void** exposure_state_slot{};
+    void* exposure_state_before{};
+    if (vr->is_native_stereo_fix_share_exposure_enabled() && g_hook->m_native_stereo_exposure_state_offset &&
+        native_left_metadata.state != nullptr && native_right_view != nullptr)
+    {
+        auto slot = (void**)((uintptr_t)native_right_view + *g_hook->m_native_stereo_exposure_state_offset);
+        if (!IsBadWritePtr(slot, sizeof(void*)) && *slot == (void*)native_right_metadata.state) {
+            exposure_state_slot = slot;
+            exposure_state_before = *slot;
+            *slot = native_left_metadata.state;
+            SPDLOG_INFO_ONCE("[NativeStereoFix] Right eye uses the left eye's exposure view state {:x} (field +0x{:x})",
+                (uintptr_t)native_left_metadata.state, *g_hook->m_native_stereo_exposure_state_offset);
+        } else {
+            SPDLOG_WARN_ONCE("[NativeStereoFix] Exposure view state field +0x{:x} doesn't hold the right eye's state; not sharing exposure",
+                *g_hook->m_native_stereo_exposure_state_offset);
+        }
+    }
+    utility::ScopeGuard restore_exposure_state{[&]() {
+        if (exposure_state_slot != nullptr) {
+            *exposure_state_slot = exposure_state_before;
         }
     }};
 

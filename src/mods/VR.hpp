@@ -692,6 +692,15 @@ public:
         return m_native_stereo_fix_preserve_secondary_pass->value();
     }
 
+    // VR_NativeStereoFixShareExposure (default off): the right eye renders as a primary view of its own and meters its
+    // own auto exposure; this gives it the left eye's, as stock stereo gives the secondary view the primary's. Off by
+    // default while the right eye's Lumen/fog lighting is still dimmer than the left's (Black Myth: Wukong forest): its
+    // own exposure partly hides that (right eye -7% with its own exposure, -15% with the left's), while in scenes
+    // without that gap sharing makes the eyes match (Wukong shrine: -5.5% -> +0.3%).
+    bool is_native_stereo_fix_share_exposure_enabled() const {
+        return m_native_stereo_fix_share_exposure->value();
+    }
+
     bool is_native_stereo_fix_texture_array_submit_enabled() const {
         if (uevr::nascar::is_target()) { return false; }
         const auto runtime = get_runtime();
@@ -1870,6 +1879,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), true) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
+    const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), false) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
@@ -2348,6 +2358,7 @@ public:
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,
             *m_native_stereo_fix_preserve_secondary_pass,
+            *m_native_stereo_fix_share_exposure,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_native_stereo_fix_pair_snapshot,
