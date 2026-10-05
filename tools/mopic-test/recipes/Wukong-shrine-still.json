@@ -1,0 +1,557 @@
+{
+  "game": "Black Myth: Wukong",
+  "process": "b1-Win64-Shipping",
+  "source": "mopic",
+  "max_width": 1280,
+  "notes": "Wukong-shrine without playing: travels to the shrine (region_y/area_y/shrine_y) and stands still for ${still_s} s (measured), then quits. For A/B runs that need the same picture every time.",
+  "images": "Wukong-shrine",
+  "config": {
+    "FrameworkConfig_RememberMenuState": "true",
+    "FrameworkConfig_MenuOpen": "false"
+  },
+  "save_slot": {
+    "dir": "{gamedir}\\b1\\Saved\\SaveGames\\{sid64}",
+    "file": "ArchiveSaveFile.9.sav"
+  },
+  "vars": {
+    "region_y": 293,
+    "area_y": 220,
+    "shrine_y": 220,
+    "play_s": 30,
+    "load_wait_s": 10,
+    "still_s": 75
+  },
+  "checkpoints": {
+    "title": {
+      "image": "title.png",
+      "region": [
+        120,
+        300,
+        246,
+        76
+      ],
+      "threshold": 0.8
+    },
+    "main_menu": {
+      "image": "main_menu.png",
+      "region": [
+        56,
+        290,
+        120,
+        180
+      ],
+      "threshold": 0.8
+    },
+    "load_hover": {
+      "image": "load_hover.png",
+      "region": [
+        48,
+        366,
+        250,
+        26
+      ],
+      "threshold": 0.8,
+      "mode": "highlight"
+    },
+    "load_list": {
+      "image": "load_list.png",
+      "region": [
+        108,
+        82,
+        250,
+        24
+      ],
+      "threshold": 0.7
+    },
+    "five_saves": {
+      "image": "five_saves.png",
+      "region": [
+        164,
+        107,
+        13,
+        18
+      ],
+      "threshold": 0.9
+    },
+    "last_save_hover": {
+      "image": "last_save_hover.png",
+      "region": [
+        324,
+        490,
+        68,
+        42
+      ],
+      "threshold": 0.8
+    },
+    "load_confirm": {
+      "image": "load_confirm.png",
+      "region": [
+        455,
+        320,
+        370,
+        30
+      ],
+      "threshold": 0.8
+    },
+    "new_round": {
+      "image": "new_round.png",
+      "region": [
+        490,
+        320,
+        300,
+        30
+      ],
+      "threshold": 0.8
+    },
+    "cancel_hover": {
+      "image": "cancel_hover.png",
+      "region": [
+        650,
+        410,
+        250,
+        26
+      ],
+      "threshold": 0.8,
+      "mode": "highlight"
+    },
+    "loading": {
+      "image": "loading.png",
+      "region": [
+        566,
+        666,
+        148,
+        30
+      ],
+      "threshold": 0.8
+    },
+    "loading_band": {
+      "image": "loading_band.png",
+      "region": [
+        420,
+        457,
+        80,
+        24
+      ],
+      "threshold": 0.8
+    },
+    "shrine_menu": {
+      "image": "shrine_menu.png",
+      "region": [
+        88,
+        282,
+        56,
+        100
+      ],
+      "threshold": 0.8
+    },
+    "travel_hover": {
+      "image": "travel_hover.png",
+      "region": [
+        70,
+        243,
+        276,
+        28
+      ],
+      "threshold": 0.8,
+      "mode": "highlight"
+    },
+    "region_list": {
+      "image": "region_list.png",
+      "region": [
+        400,
+        280,
+        100,
+        216
+      ],
+      "threshold": 0.93
+    },
+    "travel_title": {
+      "image": "travel_title.png",
+      "region": [
+        76,
+        110,
+        64,
+        34
+      ],
+      "threshold": 0.8
+    },
+    "pause_menu": {
+      "image": "pause_menu.png",
+      "region": [
+        38,
+        20,
+        102,
+        26
+      ],
+      "threshold": 0.8
+    },
+    "settings_tab": {
+      "image": "settings_tab.png",
+      "region": [
+        134,
+        520,
+        110,
+        28
+      ],
+      "threshold": 0.8
+    },
+    "exit_panel": {
+      "image": "exit_panel.png",
+      "region": [
+        222,
+        178,
+        104,
+        26
+      ],
+      "threshold": 0.8
+    },
+    "quit_confirm": {
+      "image": "quit_confirm.png",
+      "region": [
+        516,
+        320,
+        248,
+        30
+      ],
+      "threshold": 0.8
+    },
+    "quit_confirm_unsaved": {
+      "image": "quit_confirm_unsaved.png",
+      "region": [
+        444,
+        310,
+        392,
+        28
+      ],
+      "threshold": 0.8
+    }
+  },
+  "steps": [
+    {
+      "phase": "boot"
+    },
+    {
+      "wait_for": [
+        "title",
+        "main_menu"
+      ],
+      "timeout": 300
+    },
+    {
+      "key": "enter",
+      "if": "title"
+    },
+    {
+      "note": "an Enter while the title is still fading in is dropped (5 of 15 ladder rungs on 2026-10-04 stayed on the title): click an empty corner until the menu shows; a click there does nothing on the menu, an Enter could pick 계속하기"
+    },
+    {
+      "wait_for": "main_menu",
+      "timeout": 60,
+      "click": [
+        1220,
+        660
+      ],
+      "every": 6
+    },
+    {
+      "phase": "load"
+    },
+    {
+      "move": [
+        110,
+        379
+      ]
+    },
+    {
+      "wait_for": "load_hover",
+      "timeout": 15
+    },
+    {
+      "click": [
+        110,
+        379
+      ]
+    },
+    {
+      "wait_for": "load_list",
+      "timeout": 30
+    },
+    {
+      "wait_for": "five_saves",
+      "timeout": 10
+    },
+    {
+      "move": [
+        430,
+        480
+      ]
+    },
+    {
+      "key": "wheel:-10"
+    },
+    {
+      "wait": 1.5
+    },
+    {
+      "move": [
+        430,
+        480
+      ]
+    },
+    {
+      "wait_for": "last_save_hover",
+      "timeout": 10
+    },
+    {
+      "key": "e"
+    },
+    {
+      "wait_for": "load_confirm",
+      "timeout": 15
+    },
+    {
+      "move": [
+        503,
+        423
+      ]
+    },
+    {
+      "click": [
+        503,
+        423
+      ]
+    },
+    {
+      "wait_for": [
+        "new_round",
+        "loading",
+        "loading_band"
+      ],
+      "timeout": 30
+    },
+    {
+      "move": [
+        777,
+        423
+      ],
+      "if": "new_round"
+    },
+    {
+      "wait_for": "cancel_hover",
+      "timeout": 10,
+      "if": "new_round"
+    },
+    {
+      "click": [
+        777,
+        423
+      ],
+      "if": "new_round"
+    },
+    {
+      "wait_for": [
+        "loading",
+        "loading_band"
+      ],
+      "timeout": 60
+    },
+    {
+      "wait_gone": [
+        "loading",
+        "loading_band"
+      ],
+      "timeout": 300,
+      "for": 5
+    },
+    {
+      "wait": "${load_wait_s}"
+    },
+    {
+      "phase": "travel"
+    },
+    {
+      "shot": "spawn"
+    },
+    {
+      "note": "E at the shrine the save stands at opens its menu"
+    },
+    {
+      "key": "e"
+    },
+    {
+      "wait_for": "shrine_menu",
+      "timeout": 20
+    },
+    {
+      "move": [
+        140,
+        256
+      ]
+    },
+    {
+      "wait_for": "travel_hover",
+      "timeout": 10
+    },
+    {
+      "click": [
+        140,
+        256
+      ]
+    },
+    {
+      "wait_for": "region_list",
+      "timeout": 10
+    },
+    {
+      "move": [
+        470,
+        "${region_y}"
+      ]
+    },
+    {
+      "wait": 1
+    },
+    {
+      "click": [
+        470,
+        "${region_y}"
+      ]
+    },
+    {
+      "wait_for": "travel_title",
+      "timeout": 10
+    },
+    {
+      "move": [
+        160,
+        "${area_y}"
+      ]
+    },
+    {
+      "wait": 1
+    },
+    {
+      "click": [
+        160,
+        "${area_y}"
+      ]
+    },
+    {
+      "wait": 1.5
+    },
+    {
+      "move": [
+        470,
+        "${shrine_y}"
+      ]
+    },
+    {
+      "wait": 1.5
+    },
+    {
+      "click": [
+        470,
+        "${shrine_y}"
+      ]
+    },
+    {
+      "shot": "travel-target"
+    },
+    {
+      "key": "e"
+    },
+    {
+      "wait_for": [
+        "loading",
+        "loading_band"
+      ],
+      "timeout": 30
+    },
+    {
+      "wait_gone": [
+        "loading",
+        "loading_band"
+      ],
+      "timeout": 300,
+      "for": 5
+    },
+    {
+      "wait": "${load_wait_s}"
+    },
+    {
+      "phase": "play"
+    },
+    {
+      "shot": "arrived"
+    },
+    {
+      "note": "stand still at the shrine we traveled to: the same view every run, no enemies, for A/B of rendering settings"
+    },
+    {
+      "wait": "${still_s}",
+      "measure": true
+    },
+    {
+      "key": "esc"
+    },
+    {
+      "wait_for": "pause_menu",
+      "timeout": 60,
+      "press": "esc",
+      "every": 8
+    },
+    {
+      "phase": "leave"
+    },
+    {
+      "seek": "settings_tab",
+      "press": "d",
+      "max": 7,
+      "gap": 1.5
+    },
+    {
+      "move": [
+        196,
+        533
+      ]
+    },
+    {
+      "click": [
+        196,
+        533
+      ]
+    },
+    {
+      "wait_for": "exit_panel",
+      "timeout": 15
+    },
+    {
+      "click": [
+        272,
+        190
+      ]
+    },
+    {
+      "wait_for": [
+        "quit_confirm",
+        "quit_confirm_unsaved"
+      ],
+      "timeout": 15
+    },
+    {
+      "wait": 1
+    },
+    {
+      "phase": "exit"
+    },
+    {
+      "click": [
+        503,
+        423
+      ]
+    },
+    {
+      "expect_exit": 90
+    }
+  ]
+}
