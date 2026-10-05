@@ -696,13 +696,18 @@ public:
         return m_native_stereo_fix_preserve_secondary_pass->value();
     }
 
-    // VR_NativeStereoFixShareExposure (default off): the right eye renders as a primary view of its own and meters its
-    // own auto exposure; this gives it the left eye's, as stock stereo gives the secondary view the primary's. Off by
-    // default while the right eye's Lumen/fog lighting is still dimmer than the left's (Black Myth: Wukong forest): its
-    // own exposure partly hides that (right eye -7% with its own exposure, -15% with the left's), while in scenes
-    // without that gap sharing makes the eyes match (Wukong shrine: -5.5% -> +0.3%).
+    // VR_NativeStereoFixShareExposure (default on): the right eye renders as a primary view of its own and meters its
+    // own auto exposure; this gives it the left eye's, as stock stereo gives the secondary view the primary's (Black
+    // Myth: Wukong shrine: right eye -5.5% -> +0.3%). Goes with VR_NativeStereoFixLumenOriginRefreshFrames: without that,
+    // the right eye's own exposure partly hid its dimmer Lumen lighting.
     bool is_native_stereo_fix_share_exposure_enabled() const {
         return m_native_stereo_fix_share_exposure->value();
+    }
+
+    // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
+    // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).
+    int32_t get_native_stereo_fix_lumen_origin_refresh_frames() const {
+        return m_native_stereo_fix_lumen_origin_refresh_frames->value();
     }
 
     bool is_native_stereo_fix_texture_array_submit_enabled() const {
@@ -1660,7 +1665,8 @@ private:
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), true) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
-    const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), false) };
+    const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), true) };
+    const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_stalker2_native_pair_experiment{ ModToggle::create(generate_name("Stalker2NativePairExperiment"), false) };
@@ -1988,6 +1994,7 @@ public:
             *m_native_stereo_fix_same_pass,
             *m_native_stereo_fix_preserve_secondary_pass,
             *m_native_stereo_fix_share_exposure,
+            *m_native_stereo_fix_lumen_origin_refresh_frames,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_stalker2_native_pair_experiment,
