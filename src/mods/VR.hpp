@@ -1601,8 +1601,9 @@ private:
     const ModToggle::Ptr m_enable_depth{ ModToggle::create(generate_name("PassDepthToRuntime"), false, true) };
     const ModToggle::Ptr m_openxr_afr_depth_target_stability{ ModToggle::create(generate_name("OpenXRAFRDepthTargetStability"), false, true) };
     const ModToggle::Ptr m_enable_hitch_diagnostics{ ModToggle::create(generate_name("EnableHitchDiagnostics"), false, true) };
-    // perf.csv / perf-frames.csv next to log.txt. Cheap enough to stay on (see PerfLog.hpp).
-    const ModToggle::Ptr m_perf_log{ ModToggle::create(generate_name("PerfLog"), true, true) };
+    // perf.csv / perf-frames.csv next to log.txt (see PerfLog.hpp). Off by default: perf-frames.csv grows by a row per
+    // frame for as long as the game runs; the test harness turns it on for its runs.
+    const ModToggle::Ptr m_perf_log{ ModToggle::create(generate_name("PerfLog"), false, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };

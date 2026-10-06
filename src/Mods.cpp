@@ -140,7 +140,7 @@ bool migrate_ui_invert_alpha(utility::Config& cfg) {
 // Mopic config migrations, applied once to an existing config.txt. The version is stored in
 // Mopic_ConfigVersion (a VR option, so config saves keep it).
 constexpr const char* MOPIC_CONFIG_VERSION_KEY = "Mopic_ConfigVersion";
-constexpr int32_t MOPIC_CONFIG_VERSION = 1;
+constexpr int32_t MOPIC_CONFIG_VERSION = 2;
 
 bool migrate_mopic_defaults(utility::Config& cfg) {
     int32_t version = 0;
@@ -161,6 +161,13 @@ bool migrate_mopic_defaults(utility::Config& cfg) {
     //    CrossWorlds. Every existing config stored the old default (false), so switch it once.
     if (version < 1) {
         cfg.set<bool>("VR_UseFMallocSceneViewExtensions", true);
+    }
+
+    // 2: VR_PerfLog now defaults to off (perf-frames.csv grows by a row per frame), but every existing config stored
+    //    the old default (true). tools/mopic-test/run-test.ps1 raises Mopic_ConfigVersion with its VR_PerfLog=true
+    //    override, so this doesn't turn its measurement off again.
+    if (version < 2) {
+        cfg.set<bool>("VR_PerfLog", false);
     }
 
     cfg.set<int32_t>(MOPIC_CONFIG_VERSION_KEY, MOPIC_CONFIG_VERSION);
