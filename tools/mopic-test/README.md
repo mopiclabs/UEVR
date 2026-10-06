@@ -249,6 +249,13 @@ come from one submitted frame, so they normally change in the same refresh. `ana
   leaves the desktop game window black for most games while it renders. Clicks are mapped back to the game window.
   `--source mopic-sbs`: the same while monado-service runs with `MOPIC_MODE=sbs` (its left eye, stretched back to
   the full width; see "Each eye").
+- monado-service (7dcf4a0ad, 2026-10-06) moves a UEVR game's window onto the Mopic display, right under the
+  click-through "Mopic XR" window, scaled to fit with its aspect kept (2560x1600 -> 3456x2160 centred); some games
+  (Stray, Dead as Disco) then make themselves fullscreen there (3840x2160, 16:9). Clicks still map through the game
+  window. `--source window` reads a game window on the Mopic display with PrintWindow (a screen grab there sees the
+  3D picture). Checkpoints recorded with the game at 2560x1600 don't match a game that went 16:9 (Stray's pause
+  menu, Dead as Disco's menus wrap text differently at the new size): run those recipes with monado-service
+  started with `MOPIC_MOVE_GAME_WINDOW=false`, or record them again.
 - While Windows shows the lock screen, input and capture don't reach the desktop: the screen and input commands
   exit with code 3 and `{"error":"locked"}`, and `run` stops with `error_kind` "locked". Ask the user to unlock;
   auto-lock stays on.

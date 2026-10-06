@@ -358,9 +358,91 @@ def sbs_left_eye(img, width, height):
     return img.crop((0, 0, img.width // 2, img.height)).resize((width, height), Image.LANCZOS)
 
 
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG), ("biPlanes", wt.WORD),
+                ("biBitCount", wt.WORD), ("biCompression", wt.DWORD), ("biSizeImage", wt.DWORD),
+                ("biXPelsPerMeter", wt.LONG), ("biYPelsPerMeter", wt.LONG), ("biClrUsed", wt.DWORD),
+                ("biClrImportant", wt.DWORD)]
+
+
+def print_window(hwnd, rect):
+    """The window's own content (PrintWindow PW_RENDERFULLCONTENT), cropped to rect (screen coordinates inside its
+    window rect), or None. For a game window under another one: monado-service moves a UEVR game's window onto the
+    Mopic display under its always-on-top "Mopic XR" window, where a screen grab sees the woven 3D picture."""
+    from PIL import Image
+    gdi32 = ctypes.WinDLL("gdi32")
+    gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+    gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    gdi32.CreateCompatibleBitmap.restype = ctypes.c_void_p
+    gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    gdi32.SelectObject.restype = ctypes.c_void_p
+    gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi32.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wt.UINT, wt.UINT, ctypes.c_void_p,
+                                ctypes.c_void_p, wt.UINT]
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+    user32.GetDC.restype = ctypes.c_void_p
+    user32.GetDC.argtypes = [wt.HWND]
+    user32.ReleaseDC.argtypes = [wt.HWND, ctypes.c_void_p]
+    user32.PrintWindow.argtypes = [wt.HWND, ctypes.c_void_p, wt.UINT]
+
+    wr = wt.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(wr)):
+        return None
+    w, h = wr.right - wr.left, wr.bottom - wr.top
+    if w <= 0 or h <= 0:
+        return None
+    screen = user32.GetDC(None)
+    dc = gdi32.CreateCompatibleDC(screen)
+    bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+    old = gdi32.SelectObject(dc, bmp)
+    try:
+        if not user32.PrintWindow(hwnd, dc, 2):  # PW_RENDERFULLCONTENT
+            return None
+        bih = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        if gdi32.GetDIBits(dc, bmp, 0, h, buf, ctypes.byref(bih), 0) != h:
+            return None
+    finally:
+        gdi32.SelectObject(dc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(dc)
+        user32.ReleaseDC(None, screen)
+    img = Image.frombuffer("RGB", (w, h), buf.raw, "raw", "BGRX", 0, 1)
+    box = img.getbbox()
+    if box is None:  # all black: nothing came back this way
+        return None
+    # A swap chain smaller than the window comes back unscaled in the top-left corner (DWM stretches it on screen):
+    # its size is learned from a frame whose content box starts there with the window's shape, kept per window size
+    # (dark frames have smaller boxes), and stretched back to the window.
+    key = (hwnd, w, h)
+    if box[:2] == (0, 0) and box[2] < w * 0.98 and abs(box[2] / box[3] - w / h) < 0.02 * w / h:
+        _swapchain_size[key] = box[2:]
+    size = _swapchain_size.get(key)
+    if size and (box[2] > size[0] or box[3] > size[1]):  # content past it: the swap chain grew
+        del _swapchain_size[key]
+        size = None
+    if size:
+        img = img.crop((0, 0) + size).resize((w, h), Image.LANCZOS)
+    l, t, r, b = rect
+    return img.crop((l - wr.left, t - wr.top, r - wr.left, b - wr.top))
+
+
+_swapchain_size = {}
+
+
+def on_mopic_monitor(rect):
+    m = mopic_monitor()
+    if m is None:
+        return False
+    l, t, r, b = rect
+    return l < m[2] and r > m[0] and t < m[3] and b > m[1]
+
+
 def grab(hwnd, max_width, source="window"):
     """(image, meta) of the game window, or of the Mopic display with source="mopic" ("mopic-sbs": its left eye
-    while monado-service shows side by side)."""
+    while monado-service shows side by side). A game window on the Mopic display is read with PrintWindow: it sits
+    under the "Mopic XR" window there."""
     import mss
     from PIL import Image
     l, t, r, b = window_rect(hwnd)
@@ -369,9 +451,11 @@ def grab(hwnd, max_width, source="window"):
         if m is None:
             raise SystemExit("no Mopic display found")
         l, t, r, b = m
-    with mss.MSS() as sct:
-        raw = sct.grab({"left": l, "top": t, "width": r - l, "height": b - t})
-    img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+    img = print_window(hwnd, (l, t, r, b)) if source == "window" and on_mopic_monitor((l, t, r, b)) else None
+    if img is None:
+        with mss.MSS() as sct:
+            raw = sct.grab({"left": l, "top": t, "width": r - l, "height": b - t})
+        img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
     scale = 1.0
     if img.width > max_width:
         scale = max_width / img.width
