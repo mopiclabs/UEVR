@@ -1203,8 +1203,17 @@ for ($run = 1; $run -le $Runs; $run++) {
     $hadConfig = Test-Path $ConfigPath
     if ($hadConfig) { Copy-Item $ConfigPath $configBackup -Force }
     $overrides = @{ "FrameworkConfig_LogLevel" = "2" }
-    # UEVR's frame-rate log (perf.csv, perf-frames.csv next to log.txt; on by default, unless a user turned it off)
-    if (-not $NoPerf -and -not $NoInject) { $overrides["VR_PerfLog"] = "true" }
+    # UEVR's frame-rate log (perf.csv, perf-frames.csv next to log.txt; off by default). An older config would get
+    # Mopic config migration 2 on load, which turns VR_PerfLog off, so the version is raised to 2 with it (never lowered).
+    if (-not $NoPerf -and -not $NoInject) {
+        $overrides["VR_PerfLog"] = "true"
+        $configVersion = 0
+        if ($hadConfig) {
+            $versionLine = Select-String -LiteralPath $ConfigPath -Pattern '^\s*Mopic_ConfigVersion\s*=\s*(\d+)' | Select-Object -First 1
+            if ($versionLine) { $configVersion = [int]$versionLine.Matches[0].Groups[1].Value }
+        }
+        if ($configVersion -lt 2) { $overrides["Mopic_ConfigVersion"] = "2" }
+    }
     foreach ($key in $RecipeConfig.Keys) { $overrides[$key] = $RecipeConfig[$key] }
     foreach ($kv in $SetPairs) { $overrides[$kv[0]] = $kv[1] }
     Set-ConfigValues $ConfigPath $overrides

@@ -1,7 +1,8 @@
 #pragma once
 
-// Always-on frame-rate log (VR_PerfLog, on by default): perf.csv and perf-frames.csv next to log.txt, read by
-// tools/mopic-test/perfreport.py (which looks columns up by name; the first line of each file is its header).
+// Frame-rate log (VR_PerfLog, off by default; tools/mopic-test/run-test.ps1 turns it on for its runs): perf.csv and
+// perf-frames.csv next to log.txt, read by tools/mopic-test/perfreport.py (which looks columns up by name; the first
+// line of each file is its header).
 //
 // The VR frame rate is the rate of xrEndFrame calls that carry a projection layer for a new engine frame
 // ("P" submits): one newer than every engine frame submitted before. Submits of an engine frame that was already
