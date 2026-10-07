@@ -1,0 +1,26 @@
+{
+  "game": "Stray",
+  "process": "Stray-Win64-Shipping",
+  "source": "mopic",
+  "max_width": 1280,
+  "images": "Stray-chapter",
+  "notes": "Exit-crash isolation: boot to the main menu and quit through it with timed keys only (no checkpoints), so the same route runs with and without UEVR (-NoInject reads a different picture). The main menu opens with the top item selected; the last (exit) is three down; the quit question takes Right then Enter.",
+  "checkpoints": {},
+  "steps": [
+    {"phase": "boot"},
+    {"wait": 50},
+    {"shot": "menu"},
+    {"phase": "leave"},
+    {"keys": "down down down"},
+    {"wait": 1},
+    {"shot": "exit_selected"},
+    {"key": "enter"},
+    {"wait": 2},
+    {"key": "right"},
+    {"wait": 1},
+    {"shot": "quit_yes"},
+    {"phase": "exit"},
+    {"key": "enter"},
+    {"expect_exit": 60}
+  ]
+}
