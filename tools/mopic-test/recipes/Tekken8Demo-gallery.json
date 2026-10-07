@@ -19,15 +19,15 @@
     "movie_playing": {"region_guess": null, "what": "a stable element while a movie plays (likely none: then use a fixed wait)"}
   },
   "checkpoints": {
-    "notice": {"image": "notice.png", "region": [450, 298, 380, 90], "threshold": 0.8},
-    "title": {"image": "title.png", "region": [815, 338, 360, 60], "threshold": 0.8},
-    "main_menu": {"image": "main_menu.png", "region": [112, 66, 122, 34], "threshold": 0.8},
-    "story_selected": {"image": "story_selected.png", "region": [142, 162, 214, 28], "threshold": 0.8, "mode": "highlight"},
-    "options": {"image": "options.png", "region": [112, 66, 90, 34], "threshold": 0.8},
-    "options_selected": {"image": "options_selected.png", "region": [129, 523, 36, 36], "threshold": 0.8, "mode": "highlight"},
-    "quit_selected": {"image": "quit_selected.png", "region": [338, 466, 604, 28], "threshold": 0.8, "mode": "highlight"},
-    "quit_confirm": {"image": "quit_confirm.png", "region": [540, 310, 200, 80], "threshold": 0.8},
-    "quit_yes": {"image": "quit_yes.png", "region": [392, 364, 496, 54], "threshold": 0.8, "mode": "highlight"}
+    "notice": {"image": "notice.png", "region": [429, 293, 422, 100], "threshold": 0.8},
+    "title": {"image": "title.png", "region": [834, 336, 400, 66], "threshold": 0.8},
+    "main_menu": {"image": "main_menu.png", "region": [54, 33, 136, 38], "threshold": 0.8},
+    "story_selected": {"image": "story_selected.png", "region": [87, 140, 238, 31], "threshold": 0.8, "mode": "highlight"},
+    "options": {"image": "options.png", "region": [53, 33, 100, 38], "threshold": 0.8},
+    "options_selected": {"image": "options_selected.png", "region": [72, 541, 40, 40], "threshold": 0.8, "mode": "highlight"},
+    "quit_selected": {"image": "quit_selected.png", "region": [304, 478, 671, 31], "threshold": 0.8, "mode": "highlight"},
+    "quit_confirm": {"image": "quit_confirm.png", "region": [529, 304, 222, 89], "threshold": 0.8},
+    "quit_yes": {"image": "quit_yes.png", "region": [364, 364, 551, 60], "threshold": 0.8, "mode": "highlight"}
   },
   "steps": [
     {"phase": "boot"},
@@ -36,7 +36,7 @@
     {"wait_for": ["title", "main_menu"], "timeout": 240, "press": "enter", "every": 5},
     {"wait": 1, "if": "title"},
     {"key": "enter", "if": "title"},
-    {"wait_for": "main_menu", "timeout": 30},
+    {"wait_for": "main_menu", "timeout": 60, "press": "enter", "every": 5},
     {"phase": "enter"},
     {"seek": "story_selected", "press": "up", "max": 6},
     {"key": "down", "times": 4, "gap": 500},
