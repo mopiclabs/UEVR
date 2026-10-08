@@ -419,6 +419,12 @@ if ($busy.Count -gt 0 -or $NoWindows) {
     $headText = (& git -C $Repo show "HEAD:tools/mopic-test/run-test.ps1") -join "`r`n"
     [System.IO.File]::WriteAllText((Join-Path $cmp.head "run-test.ps1"), $headText + "`r`n", [System.Text.Encoding]::ASCII)
     Copy-Item -LiteralPath (Join-Path $Tools "run-test.ps1") -Destination (Join-Path $cmp.new "run-test.ps1")
+    # what run-test.ps1 dot-sources (HEAD's copy may predate it; a missing one is fine for it)
+    foreach ($dep in @("steam-offline.ps1")) {
+        Copy-Item -LiteralPath (Join-Path $Tools $dep) -Destination (Join-Path $cmp.new $dep)
+        $depHead = (& cmd /c "git -C `"$Repo`" show HEAD:tools/mopic-test/$dep 2>nul") -join "`r`n"
+        if ($depHead) { [System.IO.File]::WriteAllText((Join-Path $cmp.head $dep), $depHead + "`r`n", [System.Text.Encoding]::ASCII) }
+    }
     Check "HEAD run-test.ps1 extracted" ((Get-Content -LiteralPath (Join-Path $cmp.head "run-test.ps1") -TotalCount 1) -like "# Test harness for Mopic UEVR*")
     $recipeCmp = Join-Path $Work "cmp-recipe.json"
     Write-Json $recipeCmp ([ordered]@{ game = "selftest"; process = "mopicselftest_noproc"; source = "window"; checkpoints = @{}; steps = @(@{ wait = 1 }, @{ expect_exit = 5 }) })
