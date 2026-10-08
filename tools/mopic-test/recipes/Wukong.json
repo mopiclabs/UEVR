@@ -7,7 +7,7 @@
   "config": {"FrameworkConfig_RememberMenuState": "true", "FrameworkConfig_MenuOpen": "false"},
   "checkpoints": {
     "title": {"image": "title.png", "region": [120, 300, 246, 76], "threshold": 0.8},
-    "main_menu": {"image": "main_menu.png", "region": [56, 290, 120, 180], "threshold": 0.8},
+    "main_menu": {"image": "main_menu.png", "region": [56, 290, 120, 34], "threshold": 0.8},
     "continue_hover": {"image": "continue_hover.png", "region": [44, 290, 256, 32], "threshold": 0.8, "mode": "highlight"},
     "loading": {"image": "loading.png", "region": [566, 666, 148, 30], "threshold": 0.8},
     "pause_menu": {"image": "pause_menu.png", "region": [540, 18, 110, 30], "threshold": 0.8},
