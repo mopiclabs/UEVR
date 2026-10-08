@@ -26,6 +26,16 @@ below are run from `tools\mopic-test` with the same interpreter (`.venv\Scripts\
 Before a run: Steam logged in, Mopic Hub running (it provides eye tracking; keep it open) with its auto-inject
 off, monado-service running, UEVRInjector's saved settings on OpenXR, the PC unlocked and not used meanwhile.
 
+Steam runs offline during tests (no cloud sync, updates or overlay traffic in the middle of a run) and goes back
+online afterwards: `steam-offline.ps1` sets the account's `WantsOfflineMode` in `Steam\config\loginusers.vdf` and
+restarts Steam (about 15 s to go offline, 40 s back). `run-test.ps1` switches before its first run of a Steam
+launch and back after its last; `run-ladder.ps1` and `run-matrix.ps1` switch once for the whole batch and set
+`MOPIC_STEAM_OFFLINE_HELD=1`, which their runs leave alone (a script of your own that calls `run-test.ps1` in a loop
+should do the same: dot-source `steam-offline.ps1`, `Enter-SteamMode $true`, set the variable, `Enter-SteamMode
+$false` at the end). Steam already offline stays offline. `-SteamOnline` (all three scripts) keeps Steam online.
+Offline Steam leaves `ActiveProcess\ActiveUser` at 0; `{sid64}` then comes from the account Steam started with.
+Hogwarts Legacy stops at the WB Games EULA screen when Steam is offline: run it with `-SteamOnline`.
+
 ## Harness
 
 From the repository root:
@@ -375,6 +385,10 @@ can be stale. Check the top system function before concluding a thread is blocke
   first match; afterwards the post-match menu takes W/A/S/D. Quit: Main menu > OPTIONS > last item > yes. The
   opening movie loops for minutes unless a key is pressed. Random stages: HUD checkpoints must not include the stage
   background (the name plate works, the portrait doesn't). Menu cursors wrap around and their highlight pulses.
+  `Tekken8Demo` takes the RANDOM stage; for comparisons and measurements that need the same scene every run use
+  `Tekken8Demo-pvc -RecipeVars "p1=jin;p1_key=right;p1_moves=0;stage=urban;stage_moves=1"` (JIN vs KAZUYA, EASY,
+  Urban Square (Evening); stage_moves 2 = Yakushima, 3 = Sanctum). The round intro camera is the same in every run for
+  its first seconds, so same-frame screenshots across settings are best taken right when `in_match` shows.
 - Clair Obscur: Expedition 33: Enter confirm, Esc pause/back, F loads the selected save. In the load list R deletes
   a save. Route: Continue > newest save > the camp > pause > 종료 (quit to desktop) > 확인.
 - Hozy: mouse driven, read from the desktop window (with UEVR the game's UI doesn't show on the Mopic display).

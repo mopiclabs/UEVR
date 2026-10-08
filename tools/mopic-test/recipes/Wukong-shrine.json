@@ -9,7 +9,7 @@
   "vars": {"region_y": 293, "area_y": 220, "shrine_y": 220, "play_s": 30, "load_wait_s": 10},
   "checkpoints": {
     "title": {"image": "title.png", "region": [120, 300, 246, 76], "threshold": 0.8},
-    "main_menu": {"image": "main_menu.png", "region": [56, 290, 120, 180], "threshold": 0.8},
+    "main_menu": {"image": "main_menu.png", "region": [56, 290, 120, 34], "threshold": 0.8},
     "load_hover": {"image": "load_hover.png", "region": [48, 366, 250, 26], "threshold": 0.8, "mode": "highlight"},
     "load_list": {"image": "load_list.png", "region": [108, 82, 250, 24], "threshold": 0.7},
     "five_saves": {"image": "five_saves.png", "region": [164, 107, 13, 18], "threshold": 0.9},
