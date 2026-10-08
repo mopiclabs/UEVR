@@ -33,6 +33,7 @@ param(
     [switch]$Binocular,                            # compare both eyes every 3 s (run-test.ps1 -EyeSampler, binocular.py); monado-service in MOPIC_MODE=sbs
     [string[]]$StopOn = @("HARNESS_ERROR", "NO_VR"),   # stop the ladder after a rung with one of these verdicts
     [switch]$DryRun,                               # print what would run, run nothing
+    [switch]$SteamOnline,                          # keep Steam online (default: offline for the whole ladder, back online after)
     [string]$Harness = "",                         # test hook: a stand-in for run-test.ps1
     [string]$RunsDir = ""                          # test hook: where the harness writes its run folders (default runs\)
 )
@@ -244,9 +245,17 @@ function Write-LadderTable($rows, [string]$path, [bool]$stopped) {
     return $md
 }
 
+# Steam offline once for the whole ladder (steam-offline.ps1); the rungs see MOPIC_STEAM_OFFLINE_HELD and leave it alone.
+# Not for a dry run or a stand-in harness (self-test).
+. (Join-Path $ScriptDir "steam-offline.ps1")
+$steamSwitched = $false
+$holdSteam = -not $SteamOnline -and -not $DryRun -and $Harness -eq (Join-Path $ScriptDir "run-test.ps1")
+if ($holdSteam) { $steamSwitched = Enter-SteamMode $true; $env:MOPIC_STEAM_OFFLINE_HELD = "1" }
+
 $rows = @()
 $stopped = $false
 $rungNo = 0
+try {
 foreach ($rung in $selected) {
     $rungNo++
     $harnessArgs = @("-ExecutionPolicy", "Bypass", "-File", $Harness, "-Game", $preset, "-Recipe", $rung.recipe)
@@ -255,6 +264,7 @@ foreach ($rung in $selected) {
     if ($rung.vars -ne "") { $harnessArgs += @("-RecipeVars", $rung.vars) }
     if ($EngineDir -ne "") { $harnessArgs += @("-EngineDir", $EngineDir) }
     if ($Binocular) { $harnessArgs += @("-EyeSampler", "-EyeSamplerArgs", "--full-every 3") }
+    if ($SteamOnline) { $harnessArgs += "-SteamOnline" }
     Write-Host "=== [$rungNo/$($selected.Count)] $($rung.name) (tier $($rung.tier)) <- $(if ($rung.save -ne '') { $rung.save } else { "(no save: the game's own progress)" })" -ForegroundColor Cyan
     if ($DryRun) {
         Write-Host ("  powershell " + (@($harnessArgs | ForEach-Object { ConvertTo-ArgvString $_ }) -join " "))
@@ -307,6 +317,10 @@ foreach ($rung in $selected) {
     $stopped = @($rungVerdicts | Where-Object { $StopOn -contains $_ }).Count -gt 0
     $null = Write-LadderTable $rows $mdPath $stopped
     if ($stopped) { Write-Warning "stopping the ladder: $($rung.name) ended with $($rungVerdicts -join ', ')"; break }
+}
+} finally {
+    if ($holdSteam) { $env:MOPIC_STEAM_OFFLINE_HELD = $null }
+    if ($steamSwitched) { try { [void](Enter-SteamMode $false) } catch { Write-Warning "Steam: could not go back online: $($_.Exception.Message)" } }
 }
 
 if ($DryRun) { exit 0 }

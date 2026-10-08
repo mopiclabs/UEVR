@@ -87,6 +87,7 @@ param(
     [switch]$GracefulExit,            # at the end of the window close the game's main window (like a normal quit) and watch for crashes during shutdown
     [switch]$WaitForExit,             # the game is expected to quit by itself within -Seconds (someone quits it through its menu): an exit without a dump or UE crash report is a PASS
     [switch]$NoInject,                # baseline: the game without UEVR (with -Recipe the pilot reads the desktop window)
+    [switch]$SteamOnline,             # keep Steam online (default: Steam goes offline for the runs and back online after; steam-offline.ps1)
     [string]$Recipe = "",             # drive the game with gamepilot.py: recipe name (recipes\<name>.json) or path. Enters gameplay, plays, quits through the menu; implies -WaitForExit
     [string]$SaveFile = "",           # copy this save over the recipe's "save_slot" before each run (path, or relative to this script's folder); the file is overwritten, nothing is deleted
     [string]$SaveSlot = "",           # with -SaveFile: the file it replaces, with save_slot's placeholders ("{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"); instead of the recipe's save_slot, also without a recipe (discovery)
@@ -1001,6 +1002,7 @@ function Invoke-BinocularReport([string]$runDir) {
 # ---------------------------------------------------------------------------------------------------------------
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir "steam-offline.ps1")
 
 if ($EngineDir -eq "") {
     $engines = Join-Path $env:APPDATA "MOPIC\mopichub\engines\mopic-uevr"
@@ -1188,6 +1190,12 @@ if ($pendingNote) { Write-Warning $pendingNote }
 
 $results = @()
 
+# Steam offline for the runs (no cloud sync, updates or overlay traffic in the middle of a test), back online after;
+# a batch around this run (run-ladder / run-matrix) holds it instead. Only for Steam launches.
+$steamSwitched = $false
+if (-not $SteamOnline -and $LaunchTarget -like "steam://*") { $steamSwitched = Enter-SteamMode $true }
+
+try {
 for ($run = 1; $run -le $Runs; $run++) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $runDir = Join-Path $RunsRoot "$stamp-$Game-$Label-r$run"
@@ -1755,6 +1763,10 @@ for ($run = 1; $run -le $Runs; $run++) {
         $results += $result
         if ($gameProc) { try { $gameProc.Dispose() } catch { } }
     }
+}
+
+} finally {
+    if ($steamSwitched) { try { [void](Enter-SteamMode $false) } catch { Write-Warning "Steam: could not go back online: $($_.Exception.Message)" } }
 }
 
 Write-Host ""

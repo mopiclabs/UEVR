@@ -13,6 +13,7 @@ param(
     [string]$Dll = "",
     [string]$EngineDir = "",
     [switch]$NoInject,
+    [switch]$SteamOnline,          # keep Steam online (default: offline for the whole matrix, back online after)
     [string]$Label = "matrix"
 )
 
@@ -32,12 +33,19 @@ $kind = $(if ($NoInject) { "vanilla" } else { "uevr" })
 $hlKind = $(if ($NoInject) { "flat" } else { "vr" })   # perf headline kind the fps columns show
 $runLabel = "$Label-$kind"
 
+# Steam offline once for the whole matrix (steam-offline.ps1); the runs see MOPIC_STEAM_OFFLINE_HELD and leave it alone
+. (Join-Path $ScriptDir "steam-offline.ps1")
+$steamSwitched = $false
+if (-not $SteamOnline) { $steamSwitched = Enter-SteamMode $true; $env:MOPIC_STEAM_OFFLINE_HELD = "1" }
+
 $rows = @()
 $dllArg = $Dll
+try {
 foreach ($game in $Games) {
     $harnessArgs = @("-ExecutionPolicy", "Bypass", "-File", $Harness, "-Game", $game, "-Recipe", $game, "-Runs", "$Runs", "-Label", $runLabel)
     if ($dllArg -ne "") { $harnessArgs += @("-Dll", $dllArg); $dllArg = "" }   # deploy once
     if ($NoInject) { $harnessArgs += "-NoInject" }
+    if ($SteamOnline) { $harnessArgs += "-SteamOnline" }
     if ($EngineDir -ne "") { $harnessArgs += @("-EngineDir", $EngineDir) }
     Write-Host "=== $game ($kind, $Runs run(s))" -ForegroundColor Cyan
     $start = Get-Date
@@ -62,6 +70,11 @@ foreach ($game in $Games) {
             dir = $d.Name
         }
     }
+}
+
+} finally {
+    Remove-Item Env:MOPIC_STEAM_OFFLINE_HELD -ErrorAction SilentlyContinue
+    if ($steamSwitched) { try { [void](Enter-SteamMode $false) } catch { Write-Warning "Steam: could not go back online: $($_.Exception.Message)" } }
 }
 
 $fpsName = $(if ($NoInject) { "Flat fps" } else { "VR fps" })
