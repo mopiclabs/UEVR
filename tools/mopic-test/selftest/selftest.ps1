@@ -85,6 +85,8 @@ foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.La
     if ($wanted -contains $fn.Name) { . ([scriptblock]::Create($fn.Extent.Text)) }
 }
 foreach ($w in $wanted) { Check "function $w defined" ([bool](Get-Command $w -ErrorAction SilentlyContinue)) }
+# what run-test.ps1 dot-sources: Get-SavePlaceholderValues asks it for the account while Steam runs offline
+. (Join-Path $Tools "steam-offline.ps1")
 
 $vals = @{ sid64 = "76561199750818073"; accountid = "1790552345"; gamedir = "D:\Games\BMW"; localappdata = "L"; appdata = "A"; documents = "Docs" }
 $e = Expand-SavePlaceholders "{gamedir}\b1\{sid64}\{accountid}|{localappdata}|{appdata}|{documents}" $vals

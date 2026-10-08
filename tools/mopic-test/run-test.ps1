@@ -248,6 +248,8 @@ function Get-SteamAccountId {
 # Values for the placeholders in a recipe's save_slot "dir"; $null = not available on this PC / for this game
 function Get-SavePlaceholderValues([string]$gameDir) {
     $account = Get-SteamAccountId
+    # offline Steam leaves ActiveUser at 0 (steam-offline.ps1, dot-sourced below, knows the account)
+    if (-not $account -and (Get-Command Get-SteamOfflineAccountId -ErrorAction SilentlyContinue)) { $account = Get-SteamOfflineAccountId }
     return @{
         sid64        = $(if ($account) { [string]([uint64]76561197960265728 + $account) } else { $null })
         accountid    = $(if ($account) { [string]$account } else { $null })

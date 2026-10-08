@@ -42,8 +42,9 @@ function Get-SteamLoginUsersPath {
 function Get-SteamRecentAccount([string[]]$lines) {
     $accounts = @()
     for ($i = 0; $i -lt $lines.Count; $i++) {
+        # (the id is read before the second -match, which replaces $Matches)
         if ($lines[$i] -match '^\s*"(\d{17})"\s*$' -and $i + 1 -lt $lines.Count -and $lines[$i + 1] -match '^\s*\{\s*$') {
-            $id = $Matches[1]; $start = $i + 1; $depth = 0; $end = -1
+            $id = $lines[$i].Trim().Trim('"'); $start = $i + 1; $depth = 0; $end = -1
             for ($j = $start; $j -lt $lines.Count; $j++) {
                 if ($lines[$j] -match '^\s*\{\s*$') { $depth++ }
                 elseif ($lines[$j] -match '^\s*\}\s*$') { $depth--; if ($depth -eq 0) { $end = $j; break } }
@@ -103,6 +104,18 @@ function Set-SteamWantsOffline([bool]$offline) {
 
 function Test-SteamLoggedIn {
     try { return [int](Get-ItemProperty "HKCU:\Software\Valve\Steam\ActiveProcess" -ErrorAction Stop).ActiveUser -ne 0 } catch { return $false }
+}
+
+# The account id (SteamID64 - 76561197960265728) Steam runs under while it is in offline mode, where ActiveProcess
+# ActiveUser stays 0: the account loginusers.vdf starts it with. $null when Steam isn't running offline.
+function Get-SteamOfflineAccountId {
+    if (-not (Get-Process steam -ErrorAction SilentlyContinue)) { return $null }
+    if ((Get-SteamWantsOffline) -ne $true) { return $null }
+    $path = Get-SteamLoginUsersPath
+    if (-not $path) { return $null }
+    $acct = Get-SteamRecentAccount ([System.IO.File]::ReadAllLines($path))
+    if (-not $acct) { return $null }
+    return [uint64]([decimal]$acct.id - [decimal]76561197960265728)
 }
 
 # Ready for a game launch: online = the account is logged in (ActiveUser != 0); offline = ActiveUser stays 0 (checked
