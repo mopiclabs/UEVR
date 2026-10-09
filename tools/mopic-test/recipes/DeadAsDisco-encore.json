@@ -5,43 +5,188 @@
   "max_width": 1280,
   "game": "DeadAsDisco",
   "images": "DeadAsDisco",
-  "config": {"FrameworkConfig_RememberMenuState": "true", "FrameworkConfig_MenuOpen": "false"},
+  "config": {
+    "FrameworkConfig_RememberMenuState": "true",
+    "FrameworkConfig_MenuOpen": "false"
+  },
   "notes": "DRAFT, never run past the stage hub. Two looks without spending: the Skill Trees screen (button at the hub's top left, about (210, 43)) and THE ENCORE, the bar hub (left tile, about (320, 450)): third-person walking, NPCs, unlocks and upgrades bought with Fans. Never buy (purchases change the save); E near an NPC may open dialogue or a shop (kept out of the keys). Leave through the pause menu (TODO).",
-  "todo": ["Skill Trees: whether a click opens it and Esc closes it back to the hub.", "THE ENCORE: what the tile click opens (loading straight in?), a stable HUD element for the walk, the pause menu and its way back to the stage hub (or main menu)."],
-  "todo_checkpoints": {"skill_trees": {"region_guess": null, "what": "Skill Trees screen title"}, "encore_pause": {"region_guess": null, "what": "pause menu in The Encore"}, "encore_pause_leave_selected": {"region_guess": null, "what": "its 'stage select' / 'leave' item"}},
+  "todo": [
+    "Skill Trees: whether a click opens it and Esc closes it back to the hub.",
+    "THE ENCORE: what the tile click opens (loading straight in?), a stable HUD element for the walk, the pause menu and its way back to the stage hub (or main menu)."
+  ],
+  "todo_checkpoints": {
+    "skill_trees": {
+      "region_guess": null,
+      "what": "Skill Trees screen title"
+    },
+    "encore_pause": {
+      "region_guess": null,
+      "what": "pause menu in The Encore"
+    },
+    "encore_pause_leave_selected": {
+      "region_guess": null,
+      "what": "its 'stage select' / 'leave' item"
+    }
+  },
   "checkpoints": {
-    "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
-    "file_slot_select": {"image": "file_slot_select.png", "region": [310, 80, 650, 65], "threshold": 0.8},
-    "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
-    "exit_screen": {"image": "exit_screen.png", "region": [30, 540, 300, 120], "threshold": 0.8},
-    "skill_trees": {"image": "skill_trees.png", "region": [25, 15, 100, 55], "threshold": 0.8}
+    "main_menu": {
+      "image": "main_menu.png",
+      "region": [
+        100,
+        40,
+        235,
+        310
+      ],
+      "threshold": 0.8
+    },
+    "file_slot_select": {
+      "image": "file_slot_select.png",
+      "region": [
+        340,
+        72,
+        585,
+        60
+      ],
+      "threshold": 0.8
+    },
+    "stage_select": {
+      "image": "stage_select.png",
+      "region": [
+        110,
+        27,
+        160,
+        26
+      ],
+      "threshold": 0.8
+    },
+    "exit_screen": {
+      "image": "exit_screen.png",
+      "region": [
+        30,
+        495,
+        265,
+        95
+      ],
+      "threshold": 0.8
+    },
+    "skill_trees": {
+      "image": "skill_trees.png",
+      "region": [
+        22,
+        14,
+        90,
+        50
+      ],
+      "threshold": 0.8
+    }
   },
   "steps": [
-    {"phase": "boot"},
-    {"wait_for": "main_menu", "timeout": 300},
-    {"phase": "enter"},
-    {"click": [230, 80]},
-    {"note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"},
-    {"wait": 3},
-    {"click": [270, 255], "if": "file_slot_select"},
-    {"wait_for": "stage_select", "timeout": 60, "click": [230, 80], "every": 8},
-    {"wait": 2},
-    {"note": "Skill Trees: look only (nothing bought). THE ENCORE and HEMLOCK tiles start nothing on mopic_demo1 (clicks, Enter and Space tried 2026-10-04; they likely need NEW GAME's tutorial), so the rung stops at the skill screen"},
-    {"phase": "play"},
-    {"click": [210, 43]},
-    {"wait_for": "skill_trees", "timeout": 15},
-    {"wait": 10, "measure": "skill-trees"},
-    {"shot": "skill-trees"},
-    {"phase": "leave"},
-    {"key": "esc"},
-    {"wait": 3},
-    {"note": "back on the hub its camera sits further out than on arrival (stage_select scored 0.74), so the second Esc is blind: hub > main menu"},
-    {"key": "esc"},
-    {"wait_for": "main_menu", "timeout": 30, "press": "esc", "every": 8},
-    {"click": [180, 370]},
-    {"wait_for": "exit_screen", "timeout": 20},
-    {"phase": "exit"},
-    {"click": [100, 633]},
-    {"expect_exit": 60}
+    {
+      "phase": "boot"
+    },
+    {
+      "wait_for": "main_menu",
+      "timeout": 300
+    },
+    {
+      "phase": "enter"
+    },
+    {
+      "click": [
+        207,
+        72
+      ]
+    },
+    {
+      "note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"
+    },
+    {
+      "wait": 3
+    },
+    {
+      "click": [
+        243,
+        230
+      ],
+      "if": "file_slot_select"
+    },
+    {
+      "wait_for": "stage_select",
+      "timeout": 60,
+      "click": [
+        207,
+        72
+      ],
+      "every": 8
+    },
+    {
+      "wait": 2
+    },
+    {
+      "note": "Skill Trees: look only (nothing bought). THE ENCORE and HEMLOCK tiles start nothing on mopic_demo1 (clicks, Enter and Space tried 2026-10-04; they likely need NEW GAME's tutorial), so the rung stops at the skill screen"
+    },
+    {
+      "phase": "play"
+    },
+    {
+      "click": [
+        189,
+        39
+      ]
+    },
+    {
+      "wait_for": "skill_trees",
+      "timeout": 15
+    },
+    {
+      "wait": 10,
+      "measure": "skill-trees"
+    },
+    {
+      "shot": "skill-trees"
+    },
+    {
+      "phase": "leave"
+    },
+    {
+      "key": "esc"
+    },
+    {
+      "wait": 3
+    },
+    {
+      "note": "back on the hub its camera sits further out than on arrival (stage_select scored 0.74), so the second Esc is blind: hub > main menu"
+    },
+    {
+      "key": "esc"
+    },
+    {
+      "wait_for": "main_menu",
+      "timeout": 30,
+      "press": "esc",
+      "every": 8
+    },
+    {
+      "click": [
+        162,
+        333
+      ]
+    },
+    {
+      "wait_for": "exit_screen",
+      "timeout": 20
+    },
+    {
+      "phase": "exit"
+    },
+    {
+      "click": [
+        90,
+        570
+      ]
+    },
+    {
+      "expect_exit": 60
+    }
   ]
 }

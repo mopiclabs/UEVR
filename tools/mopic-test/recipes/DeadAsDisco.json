@@ -3,52 +3,261 @@
   "source": "window",
   "max_width": 1280,
   "game": "DeadAsDisco",
-  "config": {"FrameworkConfig_RememberMenuState": "true", "FrameworkConfig_MenuOpen": "false"},
+  "config": {
+    "FrameworkConfig_RememberMenuState": "true",
+    "FrameworkConfig_MenuOpen": "false"
+  },
   "notes": "Dead as Disco Demo (Steam 3763830, UE 5.7 custom branch). Mouse-driven menus, read from the desktop window (the Mopic display doubles the UI text). The very first start asks about Streamer Safe Mode (click OFF) before the main menu; a fresh install shows NEW GAME instead of CONTINUE. Route: CONTINUE > stage hub > Enter > FREE PLAY > first song (Maniac) > click again to play > play > Esc ends the song (RESULT) > Stage Select > Esc > EXIT GAME > EXIT GAME on the wishlist screen. Never click GET THE GAME!, GIVE FEEDBACK or SIGN UP (store/browser). With Native Stereo Fix active the desktop window shows the 3D scene behind the menus; checkpoints sit on opaque UI. A played song posts its score to the account's leaderboard.",
   "checkpoints": {
-    "main_menu": {"image": "main_menu.png", "region": [110, 45, 260, 340], "threshold": 0.8},
-    "file_slot_select": {"image": "file_slot_select.png", "region": [310, 80, 650, 65], "threshold": 0.8},
-    "stage_select": {"image": "stage_select.png", "region": [125, 30, 175, 28], "threshold": 0.8},
-    "mode_select": {"image": "mode_select.png", "region": [488, 118, 290, 62], "threshold": 0.8},
-    "song_select": {"image": "song_select.png", "region": [686, 36, 132, 28], "threshold": 0.8},
-    "song_play": {"image": "song_play.png", "region": [545, 74, 80, 34], "threshold": 0.8},
-    "result": {"image": "result.png", "region": [60, 365, 250, 250], "threshold": 0.8},
-    "exit_screen": {"image": "exit_screen.png", "region": [30, 540, 300, 120], "threshold": 0.8}
+    "main_menu": {
+      "image": "main_menu.png",
+      "region": [
+        100,
+        40,
+        235,
+        310
+      ],
+      "threshold": 0.8
+    },
+    "file_slot_select": {
+      "image": "file_slot_select.png",
+      "region": [
+        340,
+        72,
+        585,
+        60
+      ],
+      "threshold": 0.8
+    },
+    "stage_select": {
+      "image": "stage_select.png",
+      "region": [
+        110,
+        27,
+        160,
+        26
+      ],
+      "threshold": 0.8
+    },
+    "mode_select": {
+      "image": "mode_select.png",
+      "region": [
+        495,
+        42,
+        290,
+        60
+      ],
+      "threshold": 0.8
+    },
+    "song_select": {
+      "image": "song_select.png",
+      "region": [
+        617,
+        33,
+        119,
+        25
+      ],
+      "threshold": 0.8
+    },
+    "song_play": {
+      "image": "song_play.png",
+      "region": [
+        490,
+        67,
+        72,
+        31
+      ],
+      "threshold": 0.8
+    },
+    "result": {
+      "image": "result.png",
+      "region": [
+        55,
+        330,
+        225,
+        215
+      ],
+      "threshold": 0.8
+    },
+    "exit_screen": {
+      "image": "exit_screen.png",
+      "region": [
+        30,
+        495,
+        265,
+        95
+      ],
+      "threshold": 0.8
+    }
   },
   "steps": [
-    {"phase": "boot"},
-    {"wait_for": "main_menu", "timeout": 300},
-    {"phase": "enter"},
-    {"click": [230, 80]},
-    {"note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"},
-    {"wait": 3},
-    {"click": [270, 255], "if": "file_slot_select"},
-    {"wait_for": "stage_select", "timeout": 60, "click": [230, 80], "every": 8},
-    {"wait": 2},
-    {"key": "enter"},
-    {"wait_for": "mode_select", "timeout": 20, "press": "enter", "every": 5},
-    {"click": [250, 400]},
-    {"wait_for": "song_select", "timeout": 20, "click": [250, 400], "every": 5},
-    {"click": [230, 95]},
-    {"wait_for": "song_play", "timeout": 15, "click": [230, 95], "every": 5},
-    {"click": [230, 95]},
-    {"note": "the HUD pulses with the beat and loses hearts, so there is no stable gameplay checkpoint; the RESULT screen after Esc proves a song was played"},
-    {"wait": 10},
-    {"phase": "play"},
-    {"move": [640, 400]},
-    {"play": 30, "keys": "lmb lmb rmb w a s d", "every": 0.5, "hold": 120},
-    {"phase": "leave"},
-    {"key": "esc"},
-    {"wait_for": "result", "timeout": 20, "press": "esc", "every": 6},
-    {"click": [165, 443]},
-    {"wait_for": "stage_select", "timeout": 30, "click": [165, 443], "every": 8},
-    {"wait": 1},
-    {"key": "esc"},
-    {"wait_for": "main_menu", "timeout": 30, "press": "esc", "every": 8},
-    {"click": [180, 370]},
-    {"wait_for": "exit_screen", "timeout": 20},
-    {"phase": "exit"},
-    {"click": [100, 633]},
-    {"expect_exit": 60}
+    {
+      "phase": "boot"
+    },
+    {
+      "wait_for": "main_menu",
+      "timeout": 300
+    },
+    {
+      "phase": "enter"
+    },
+    {
+      "click": [
+        207,
+        72
+      ]
+    },
+    {
+      "note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"
+    },
+    {
+      "wait": 3
+    },
+    {
+      "click": [
+        243,
+        230
+      ],
+      "if": "file_slot_select"
+    },
+    {
+      "wait_for": "stage_select",
+      "timeout": 60,
+      "click": [
+        207,
+        72
+      ],
+      "every": 8
+    },
+    {
+      "wait": 2
+    },
+    {
+      "key": "enter"
+    },
+    {
+      "wait_for": "mode_select",
+      "timeout": 20,
+      "press": "enter",
+      "every": 5
+    },
+    {
+      "click": [
+        225,
+        360
+      ]
+    },
+    {
+      "wait_for": "song_select",
+      "timeout": 20,
+      "click": [
+        225,
+        360
+      ],
+      "every": 5
+    },
+    {
+      "click": [
+        207,
+        86
+      ]
+    },
+    {
+      "wait_for": "song_play",
+      "timeout": 15,
+      "click": [
+        207,
+        86
+      ],
+      "every": 5
+    },
+    {
+      "click": [
+        207,
+        86
+      ]
+    },
+    {
+      "note": "the HUD pulses with the beat and loses hearts, so there is no stable gameplay checkpoint; the RESULT screen after Esc proves a song was played"
+    },
+    {
+      "wait": 10
+    },
+    {
+      "phase": "play"
+    },
+    {
+      "move": [
+        640,
+        400
+      ]
+    },
+    {
+      "play": 30,
+      "keys": "lmb lmb rmb w a s d",
+      "every": 0.5,
+      "hold": 120
+    },
+    {
+      "phase": "leave"
+    },
+    {
+      "key": "esc"
+    },
+    {
+      "wait_for": "result",
+      "timeout": 20,
+      "press": "esc",
+      "every": 6
+    },
+    {
+      "click": [
+        148,
+        399
+      ]
+    },
+    {
+      "wait_for": "stage_select",
+      "timeout": 30,
+      "click": [
+        148,
+        399
+      ],
+      "every": 8
+    },
+    {
+      "wait": 1
+    },
+    {
+      "key": "esc"
+    },
+    {
+      "wait_for": "main_menu",
+      "timeout": 30,
+      "press": "esc",
+      "every": 8
+    },
+    {
+      "click": [
+        162,
+        333
+      ]
+    },
+    {
+      "wait_for": "exit_screen",
+      "timeout": 20
+    },
+    {
+      "phase": "exit"
+    },
+    {
+      "click": [
+        90,
+        570
+      ]
+    },
+    {
+      "expect_exit": 60
+    }
   ]
 }
