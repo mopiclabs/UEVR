@@ -4098,6 +4098,7 @@ void VR::native_openxr_async_wait_worker_loop(std::stop_token stop_token) {
         if (sync_result == VRRuntime::Error::SUCCESS &&
             m_is_d3d12 &&
             is_native_openxr_async_wait_active() &&
+            is_native_stereo_fix_texture_array_submit_enabled() &&
             openxr->frame_synced &&
             !openxr->frame_began)
         {

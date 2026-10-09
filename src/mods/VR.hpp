@@ -757,8 +757,10 @@ public:
 
     bool is_native_stereo_fix_async_openxr_wait_enabled() const {
         const auto runtime = get_runtime();
+        // EXPERIMENT exp/pacing-asyncwait: the async xrWaitFrame does not need the texture-array path (only the
+        // pre-acquire does), so allow it with Use Same Stereo Pass on as well.
         return m_native_stereo_fix_async_openxr_wait->value() &&
-            is_native_stereo_fix_texture_array_submit_enabled() &&
+            m_is_d3d12 &&
             runtime != nullptr &&
             runtime->is_openxr();
     }
