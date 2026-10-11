@@ -880,6 +880,10 @@ thread_local int32_t g_present_depth = 0;
 
 HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags, DXGI_PRESENT_PARAMETERS* params, bool present1) {
     auto d3d12 = g_d3d12_hook;
+    // EXPERIMENT (exp/hogwarts-dred): make sure the ExecuteCommandLists / Close() probe is in place for every title.
+    if (d3d12 != nullptr && d3d12->m_execute_command_lists_hook == nullptr && d3d12->m_command_queue != nullptr) {
+        d3d12->hook_execute_command_lists(d3d12->m_command_queue);
+    }
     const auto original_sync_interval = sync_interval;
     const auto original_flags = flags;
 
