@@ -1078,7 +1078,22 @@ class Pilot:
         if not hwnd:
             return
         sx, sy = self.to_screen(hwnd, x, y)
+        self.log_click_target(hwnd, sx, sy)
         click_at(sx, sy, button, double)
+
+    def log_click_target(self, hwnd, sx, sy):
+        """Log when the window under the click point (or the foreground) is not the game: a topmost window that is
+        not click-through swallows the click (suspected cause of the Dead as Disco CONTINUE misses, 10-11)."""
+        try:
+            under = user32.GetAncestor(user32.WindowFromPoint(wt.POINT(int(sx), int(sy))), 2)  # GA_ROOT
+            fg = user32.GetForegroundWindow()
+            if under != hwnd or fg != hwnd:
+                cls = ctypes.create_unicode_buffer(64)
+                user32.GetClassNameW(under, cls, 64)
+                self.log(f"  click at ({sx:.0f}, {sy:.0f}): window under point 0x{under or 0:x} [{cls.value}], "
+                         f"foreground 0x{fg or 0:x}, game 0x{hwnd:x}")
+        except Exception as e:  # diagnostics only
+            self.log(f"  click target check failed: {e}")
 
     def move(self, x, y):
         """Move the mouse to recipe coordinates (hover: menus that highlight under the mouse)."""
