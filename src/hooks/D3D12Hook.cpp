@@ -3,6 +3,8 @@
 #include <future>
 #include <optional>
 #include <unordered_set>
+#include <mutex>
+#include <intrin.h>
 
 #include <spdlog/spdlog.h>
 #include <wrl/client.h>
@@ -1312,9 +1314,105 @@ bool D3D12Hook::hook_execute_command_lists(ID3D12CommandQueue* queue) {
     }
 }
 
+// EXPERIMENT (exp/hogwarts-dred): find who records the command list whose Close() fails / whose execution removes
+// the device. Close() is hooked through the vtable of the first command list seen in ExecuteCommandLists.
+namespace dred_probe {
+using CloseFn = HRESULT(WINAPI*)(ID3D12GraphicsCommandList*);
+static std::unique_ptr<PointerHook> g_close_hook{};
+static std::atomic<CloseFn> g_original_close{nullptr};
+static std::mutex g_failed_mutex{};
+static std::unordered_set<uintptr_t> g_failed_lists{};
+static std::atomic<int> g_close_failures{0};
+static std::atomic<bool> g_removal_logged{false};
+
+static std::string where(void* address) {
+    HMODULE module{};
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)address, &module) && module != nullptr) {
+        char name[MAX_PATH]{};
+        GetModuleFileNameA(module, name, MAX_PATH);
+        const char* base = strrchr(name, '\\');
+        return fmt::format("{}+{:x}", base != nullptr ? base + 1 : name, (uintptr_t)address - (uintptr_t)module);
+    }
+    return fmt::format("{:x}", (uintptr_t)address);
+}
+
+static HRESULT WINAPI close(ID3D12GraphicsCommandList* list) {
+    const auto original = g_original_close.load(std::memory_order_acquire);
+    const HRESULT hr = original != nullptr ? original(list) : E_FAIL;
+    if (FAILED(hr)) {
+        {
+            std::scoped_lock _{g_failed_mutex};
+            g_failed_lists.insert((uintptr_t)list);
+        }
+        if (g_close_failures.fetch_add(1) < 20) {
+            spdlog::error("[DRED-probe] Close() of list {:x} failed {:x}, called from {} (uevr-internal={})",
+                (uintptr_t)list, (uint32_t)hr, where(_ReturnAddress()), g_internal_execute);
+        }
+    }
+    return hr;
+}
+
+static void hook_close(ID3D12CommandList* any_list) {
+    if (g_close_hook != nullptr || any_list == nullptr) {
+        return;
+    }
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> gfx{};
+    if (FAILED(any_list->QueryInterface(IID_PPV_ARGS(&gfx)))) {
+        return;
+    }
+    try {
+        auto** slot = &(*(void***)gfx.Get())[9]; // ID3D12GraphicsCommandList::Close
+        g_original_close.store(reinterpret_cast<CloseFn>(*slot), std::memory_order_release);
+        auto hook = std::make_unique<PointerHook>(slot, reinterpret_cast<void*>(&close));
+        g_original_close.store(hook->get_original<CloseFn>(), std::memory_order_release);
+        g_close_hook = std::move(hook);
+        spdlog::info("[DRED-probe] hooked ID3D12GraphicsCommandList::Close (vtable entry {:x})", (uintptr_t)slot);
+    } catch (const std::exception& e) {
+        spdlog::error("[DRED-probe] could not hook Close: {}", e.what());
+    }
+}
+
+static void check_after_execute(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists, void* caller) {
+    bool any_failed = false;
+    {
+        std::scoped_lock _{g_failed_mutex};
+        for (UINT i = 0; i < count; ++i) {
+            if (lists[i] != nullptr && g_failed_lists.count((uintptr_t)lists[i]) != 0) {
+                any_failed = true;
+            }
+        }
+    }
+    if (any_failed) {
+        spdlog::error("[DRED-probe] ExecuteCommandLists with a list whose Close() failed, from {} (uevr-internal={})",
+            where(caller), g_internal_execute);
+    }
+    if (g_removal_logged.load()) {
+        return;
+    }
+    Microsoft::WRL::ComPtr<ID3D12Device> device{};
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))) || SUCCEEDED(device->GetDeviceRemovedReason())) {
+        return;
+    }
+    if (!g_removal_logged.exchange(true)) {
+        const auto desc = queue->GetDesc();
+        spdlog::error("[DRED-probe] device removed ({:x}) right after ExecuteCommandLists of {} list(s) on queue {:x} "
+                      "type {} from {} (uevr-internal={})",
+            (uint32_t)device->GetDeviceRemovedReason(), count, (uintptr_t)queue, (int)desc.Type, where(caller),
+            g_internal_execute);
+    }
+}
+}
+
 void WINAPI D3D12Hook::execute_command_lists(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
+    if (count > 0 && lists != nullptr) {
+        dred_probe::hook_close(lists[0]);
+    }
     if (const auto original = g_original_execute_command_lists.load(std::memory_order_acquire); original != nullptr) {
         original(queue, count, lists);
+    }
+    if (count > 0 && lists != nullptr) {
+        dred_probe::check_after_execute(queue, count, lists, _ReturnAddress());
     }
 
     if (g_internal_execute) {
