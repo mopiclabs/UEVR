@@ -26,6 +26,78 @@ thread_local bool g_inside_depth_stencil_observer = false;
 // execute observer: such calls go straight to the original and are not reported.
 thread_local bool g_internal_execute = false;
 
+// EXPERIMENT (exp/hogwarts-dred): log DRED auto-breadcrumbs and page-fault data once after the device is removed.
+// DRED has to be on before the game creates its device (d3dconfig dred auto-breadcrumbs=force-on page-faults=force-on).
+static void log_dred_once(ID3D12Device* device) {
+    static std::atomic<bool> done{false};
+    if (device == nullptr || done.exchange(true)) {
+        return;
+    }
+    spdlog::error("[DRED] device removed reason {:x}", (uint32_t)device->GetDeviceRemovedReason());
+    Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData1> dred{};
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred)))) {
+        spdlog::error("[DRED] ID3D12DeviceRemovedExtendedData1 not available (DRED off?)");
+        return;
+    }
+    static const char* op_names[] = {"SETMARKER", "BEGINEVENT", "ENDEVENT", "DRAWINSTANCED", "DRAWINDEXEDINSTANCED",
+        "EXECUTEINDIRECT", "DISPATCH", "COPYBUFFERREGION", "COPYTEXTUREREGION", "COPYRESOURCE", "COPYTILES",
+        "RESOLVESUBRESOURCE", "CLEARRENDERTARGETVIEW", "CLEARUNORDEREDACCESSVIEW", "CLEARDEPTHSTENCILVIEW",
+        "RESOURCEBARRIER", "EXECUTEBUNDLE", "PRESENT", "RESOLVEQUERYDATA", "BEGINSUBMISSION", "ENDSUBMISSION",
+        "DECODEFRAME", "PROCESSFRAMES", "ATOMICCOPYBUFFERUINT", "ATOMICCOPYBUFFERUINT64", "RESOLVESUBRESOURCEREGION",
+        "WRITEBUFFERIMMEDIATE", "DECODEFRAME1", "SETPROTECTEDRESOURCESESSION", "DECODEFRAME2", "PROCESSFRAMES1",
+        "BUILDRAYTRACINGACCELERATIONSTRUCTURE", "EMITRAYTRACINGACCELERATIONSTRUCTUREPOSTBUILDINFO",
+        "COPYRAYTRACINGACCELERATIONSTRUCTURE", "DISPATCHRAYS", "INITIALIZEMETACOMMAND", "EXECUTEMETACOMMAND",
+        "ESTIMATEMOTION", "RESOLVEMOTIONVECTORHEAP", "SETPIPELINESTATE1", "INITIALIZEEXTENSIONCOMMAND",
+        "EXECUTEEXTENSIONCOMMAND", "DISPATCHMESH"};
+    auto op_name = [&](D3D12_AUTO_BREADCRUMB_OP op) -> const char* {
+        return (size_t)op < std::size(op_names) ? op_names[op] : "?";
+    };
+    auto wname = [](const wchar_t* w) { return w != nullptr ? utility::narrow(w) : std::string{"(unnamed)"}; };
+
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs))) {
+        int node_index = 0;
+        for (auto node = crumbs.pHeadAutoBreadcrumbNode; node != nullptr && node_index < 64; node = node->pNext, ++node_index) {
+            const uint32_t count = node->BreadcrumbCount;
+            const uint32_t last = node->pLastBreadcrumbValue != nullptr ? *node->pLastBreadcrumbValue : 0;
+            if (last >= count) {
+                continue; // this command list finished on the GPU
+            }
+            spdlog::error("[DRED] unfinished list {} queue='{}' list='{}' completed {}/{} ops", node_index,
+                wname(node->pCommandQueueDebugNameW), wname(node->pCommandListDebugNameW), last, count);
+            const uint32_t from = last > 6 ? last - 6 : 0;
+            const uint32_t to = (std::min)(count, last + 4);
+            for (uint32_t i = from; i < to; ++i) {
+                std::string ctx{};
+                for (uint32_t c = 0; c < node->BreadcrumbContextsCount; ++c) {
+                    if (node->pBreadcrumbContexts[c].BreadcrumbIndex == i) {
+                        ctx = wname(node->pBreadcrumbContexts[c].pContextString);
+                    }
+                }
+                spdlog::error("[DRED]   {} op {} {}{}", i == last ? "->" : "  ", i, op_name(node->pCommandHistory[i]),
+                    ctx.empty() ? "" : " '" + ctx + "'");
+            }
+        }
+    } else {
+        spdlog::error("[DRED] no auto-breadcrumbs");
+    }
+
+    D3D12_DRED_PAGE_FAULT_OUTPUT1 fault{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&fault))) {
+        spdlog::error("[DRED] page fault VA {:x}", (uint64_t)fault.PageFaultVA);
+        int n = 0;
+        for (auto a = fault.pHeadExistingAllocationNode; a != nullptr && n < 16; a = a->pNext, ++n) {
+            spdlog::error("[DRED]   existing allocation '{}' type {}", wname(a->ObjectNameW), (int)a->AllocationType);
+        }
+        n = 0;
+        for (auto a = fault.pHeadRecentFreedAllocationNode; a != nullptr && n < 16; a = a->pNext, ++n) {
+            spdlog::error("[DRED]   recently freed allocation '{}' type {}", wname(a->ObjectNameW), (int)a->AllocationType);
+        }
+    } else {
+        spdlog::error("[DRED] no page-fault data");
+    }
+}
+
 using ExecuteCommandListsFn = void(WINAPI*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 // The vtable entry the hook replaced. Never cleared: a call already inside the detour while the hook is removed still
 // reaches it.
@@ -912,6 +984,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
 
             if (result != S_OK) {
                 spdlog::error("Present failed: {:x}", result);
+                log_dred_once(d3d12 != nullptr ? d3d12->get_device() : nullptr);
             }
 
             return result;
@@ -1006,6 +1079,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
 
         if (result != S_OK) {
             spdlog::error("Present failed: {:x}", result);
+                log_dred_once(d3d12 != nullptr ? d3d12->get_device() : nullptr);
         }
     } else {
         d3d12->m_ignore_next_present = false;
