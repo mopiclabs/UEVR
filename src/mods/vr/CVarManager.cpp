@@ -991,7 +991,6 @@ std::atomic<bool> g_streamline_dlssg_early_off{false};
 
 void streamline_dlssg_force_off_early() {
     g_streamline_dlssg_early_off = true;
-    streamline_dlssg::hook_once();
 }
 
 // VR_NativeStereoFixDisableFrameGeneration: while the Native Stereo Fix is on, hold the engine's frame generation off.
@@ -1017,13 +1016,10 @@ void CVarManager::enforce_frame_generation_cvars() {
     m_next_frame_generation_cvar_check = now + std::chrono::seconds{1};
 
     const auto& vr = VR::get();
-    const auto want_off = vr != nullptr && vr->should_disable_frame_generation();
-
-    streamline_dlssg::g_force_off = want_off;
-
-    if (want_off) {
-        streamline_dlssg::hook_once();
-    }
+    // EXPERIMENT: from the first hooked Present on (g_streamline_dlssg_early_off), not only once the Native Stereo Fix
+    // is up: Wukong crashed inside DLSS-G before the fix came up. The slDLSSGSetOptions eOff hook is left out here
+    // (with it, 5 of 6 runs dropped to 20 VR fps).
+    const auto want_off = (vr != nullptr && vr->should_disable_frame_generation()) || g_streamline_dlssg_early_off.load();
     const auto any_forced = std::any_of(m_frame_generation_cvar_originals.begin(), m_frame_generation_cvar_originals.end(),
         [](const auto& original) { return original.has_value(); }) ||
         std::any_of(m_frame_generation_cvar_refused.begin(), m_frame_generation_cvar_refused.end(),
