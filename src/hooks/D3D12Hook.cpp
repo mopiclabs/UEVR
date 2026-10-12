@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <mutex>
 #include <intrin.h>
+#include <safetyhook.hpp>
 
 #include <spdlog/spdlog.h>
 #include <wrl/client.h>
@@ -27,6 +28,110 @@ thread_local bool g_inside_depth_stencil_observer = false;
 // Set while an ExecuteCommandLists call on this thread is UEVR's own (InternalExecuteScope) or comes from inside an
 // execute observer: such calls go straight to the original and are not reported.
 thread_local bool g_internal_execute = false;
+
+// EXPERIMENT (exp/hogwarts-dred): Intel XeSS Frame Generation (libxess_fg.dll) swapchain proxy. A UE game tags its
+// depth / motion vectors / HUD-less colour with xefgSwapChainD3D12TagFrameResource, sized by its view. With UEVR the
+// view is the eye, which can be taller (or wider) than the swapchain the proxy sized its buffers for, and the proxy's
+// copy is then invalid: the D3D12 runtime removes the device (Hogwarts Legacy at 125 % / 150 %). Clamp each tagged
+// region to the swapchain. Declarations follow the XeSS FG SDK 1.2 xefg_swapchain_d3d12.h.
+namespace xefg_compat {
+struct Size2D {
+    uint32_t x;
+    uint32_t y;
+};
+struct ResourceData {
+    int32_t type;
+    int32_t validity;
+    Size2D base;
+    Size2D size;
+    ID3D12Resource* resource;
+    D3D12_RESOURCE_STATES incoming_state;
+};
+using TagFn = int32_t(__cdecl*)(void* swapchain, ID3D12CommandList* list, uint32_t present_id, const ResourceData* data);
+
+static safetyhook::InlineHook g_tag_hook{};
+static std::atomic<bool> g_tried{false};
+static std::atomic<uint32_t> g_limit_w{0};
+static std::atomic<uint32_t> g_limit_h{0};
+static std::atomic<int> g_logged{0};
+static std::atomic<int> g_clamped{0};
+
+// The tagged resource's own size, read under SEH in case the declarations above do not match this DLL.
+static bool resource_size(ID3D12Resource* resource, uint64_t& w, uint32_t& h) {
+    __try {
+        const auto desc = resource->GetDesc();
+        w = desc.Width;
+        h = desc.Height;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static int32_t __cdecl tag_frame_resource(void* swapchain, ID3D12CommandList* list, uint32_t present_id, const ResourceData* data) {
+    if (data == nullptr) {
+        return g_tag_hook.call<int32_t>(swapchain, list, present_id, data);
+    }
+    uint64_t res_w = 0;
+    uint32_t res_h = 0;
+    const bool res_ok = data->resource != nullptr && resource_size(data->resource, res_w, res_h);
+    const uint32_t lim_w = g_limit_w.load();
+    const uint32_t lim_h = g_limit_h.load();
+
+    ResourceData fixed = *data;
+    bool clamp = false;
+    if (lim_w != 0 && lim_h != 0) {
+        if (fixed.base.x >= lim_w || fixed.base.y >= lim_h) {
+            fixed.base = {0, 0};
+            clamp = true;
+        }
+        if (fixed.base.x + fixed.size.x > lim_w) {
+            fixed.size.x = lim_w - fixed.base.x;
+            clamp = true;
+        }
+        if (fixed.base.y + fixed.size.y > lim_h) {
+            fixed.size.y = lim_h - fixed.base.y;
+            clamp = true;
+        }
+    }
+    if (g_logged.fetch_add(1) < 24 || (clamp && g_clamped.load() < 4)) {
+        spdlog::info("[XeFG-compat] tag type={} validity={} base={}x{} size={}x{} resource={}x{}{} swapchain={}x{}{}",
+            data->type, data->validity, data->base.x, data->base.y, data->size.x, data->size.y, res_w, res_h,
+            res_ok ? "" : " (unreadable)", lim_w, lim_h,
+            clamp ? fmt::format(" -> clamped to base={}x{} size={}x{}", fixed.base.x, fixed.base.y, fixed.size.x, fixed.size.y) : "");
+    }
+    if (clamp) {
+        g_clamped.fetch_add(1);
+        return g_tag_hook.call<int32_t>(swapchain, list, present_id, &fixed);
+    }
+    return g_tag_hook.call<int32_t>(swapchain, list, present_id, data);
+}
+
+static void on_present(IDXGISwapChain3* swap_chain) {
+    if (swap_chain != nullptr) {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        if (SUCCEEDED(swap_chain->GetDesc1(&desc)) && desc.Width != 0 && desc.Height != 0) {
+            g_limit_w = desc.Width;
+            g_limit_h = desc.Height;
+        }
+    }
+    if (g_tried.exchange(true)) {
+        return;
+    }
+    const auto module = GetModuleHandleW(L"libxess_fg.dll");
+    if (module == nullptr) {
+        return;
+    }
+    const auto fn = GetProcAddress(module, "xefgSwapChainD3D12TagFrameResource");
+    if (fn == nullptr) {
+        spdlog::warn("[XeFG-compat] libxess_fg.dll without xefgSwapChainD3D12TagFrameResource");
+        return;
+    }
+    g_tag_hook = safetyhook::create_inline((void*)fn, (void*)&tag_frame_resource);
+    spdlog::info("[XeFG-compat] hooked xefgSwapChainD3D12TagFrameResource at {:x} ({})", (uintptr_t)fn,
+        g_tag_hook ? "ok" : "failed");
+}
+}
 
 // EXPERIMENT (exp/hogwarts-dred): log DRED auto-breadcrumbs and page-fault data once after the device is removed.
 // DRED has to be on before the game creates its device (d3dconfig dred auto-breadcrumbs=force-on page-faults=force-on).
@@ -884,6 +989,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     if (d3d12 != nullptr && d3d12->m_execute_command_lists_hook == nullptr && d3d12->m_command_queue != nullptr) {
         d3d12->hook_execute_command_lists(d3d12->m_command_queue);
     }
+    xefg_compat::on_present(swap_chain);
     const auto original_sync_interval = sync_interval;
     const auto original_flags = flags;
 
