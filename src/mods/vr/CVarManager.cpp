@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <fstream>
 #include <span>
+#include <atomic>
+#include <safetyhook.hpp>
 #include <nlohmann/json.hpp>
 
 #include <utility/Config.hpp>
@@ -888,6 +890,65 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     enforce_frame_generation_cvars();
 }
 
+// NVIDIA DLSS frame generation through Streamline, for titles that keep r.Streamline.DLSSG.Enable at 1 (Black Myth:
+// Wukong): hook the plugin's slDLSSGSetOptions (from sl.interposer's slGetFeatureFunction) and turn the mode the game
+// asks for into eOff while the Native Stereo Fix wants frame generation off. DLSS-G only runs with HAGS on; with it on
+// and the game's own frame generation setting on, Wukong ran 25 VR fps instead of ~30 and once crashed inside
+// sl.dlss_g.dll (2026-10-12). sl::DLSSGOptions starts with sl::BaseStructure (next, 16-byte struct type, version:
+// 32 bytes) followed by sl::DLSSGMode mode (eOff = 0, eOn = 1, eAuto = 2), Streamline 2.x.
+namespace streamline_dlssg {
+using SetOptionsFn = int32_t(__cdecl*)(const void* viewport, void* options);
+using GetFeatureFunctionFn = int32_t(__cdecl*)(uint32_t feature, const char* name, void*& function);
+constexpr uint32_t FEATURE_DLSS_G = 1000;
+constexpr size_t MODE_OFFSET = 32;
+
+static safetyhook::InlineHook g_set_options_hook{};
+static std::atomic<bool> g_force_off{false};
+static std::atomic<bool> g_tried{false};
+static std::atomic<int> g_logged{0};
+
+static int32_t __cdecl set_options(const void* viewport, void* options) {
+    if (options != nullptr && g_force_off.load()) {
+        auto mode = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(options) + MODE_OFFSET);
+        const auto requested = *mode;
+
+        if (requested != 0) {
+            *mode = 0;
+
+            if (g_logged.fetch_add(1) < 3) {
+                SPDLOG_INFO("[FrameGen] Native Stereo Fix is on: slDLSSGSetOptions mode {} -> 0 (eOff)", requested);
+            }
+        }
+    }
+
+    return g_set_options_hook.call<int32_t>(viewport, options);
+}
+
+static void hook_once() {
+    if (g_tried.exchange(true)) {
+        return;
+    }
+
+    const auto interposer = GetModuleHandleW(L"sl.interposer.dll");
+
+    if (interposer == nullptr) {
+        g_tried = false; // not loaded (yet): look again next time
+        return;
+    }
+
+    const auto get_feature_function = (GetFeatureFunctionFn)GetProcAddress(interposer, "slGetFeatureFunction");
+    void* fn = nullptr;
+
+    if (get_feature_function == nullptr || get_feature_function(FEATURE_DLSS_G, "slDLSSGSetOptions", fn) != 0 || fn == nullptr) {
+        SPDLOG_WARN("[FrameGen] Streamline loaded but slDLSSGSetOptions is not available; DLSS-G not hooked");
+        return;
+    }
+
+    g_set_options_hook = safetyhook::create_inline(fn, (void*)&set_options);
+    SPDLOG_INFO("[FrameGen] Hooked Streamline slDLSSGSetOptions ({})", g_set_options_hook ? "ok" : "failed");
+}
+}
+
 // VR_NativeStereoFixDisableFrameGeneration: while the Native Stereo Fix is on, hold the engine's frame generation off.
 // UEVR copies the engine's two eye targets, so generated frames never reach the headset; their extra Presents only add
 // submits, and one landing between the left and right eye renders sends the right eye one engine frame late (Hogwarts
@@ -912,6 +973,12 @@ void CVarManager::enforce_frame_generation_cvars() {
 
     const auto& vr = VR::get();
     const auto want_off = vr != nullptr && vr->should_disable_frame_generation();
+
+    streamline_dlssg::g_force_off = want_off;
+
+    if (want_off) {
+        streamline_dlssg::hook_once();
+    }
     const auto any_forced = std::any_of(m_frame_generation_cvar_originals.begin(), m_frame_generation_cvar_originals.end(),
         [](const auto& original) { return original.has_value(); }) ||
         std::any_of(m_frame_generation_cvar_refused.begin(), m_frame_generation_cvar_refused.end(),
