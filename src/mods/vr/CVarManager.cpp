@@ -1062,8 +1062,15 @@ void CVarManager::enforce_frame_generation_cvars() {
                     original = before;
                 }
 
-                const auto ok = variable->Set(L"0");
-                const auto after = variable->GetInt();
+                auto ok = variable->Set(L"0");
+                auto after = variable->GetInt();
+
+                if (after == before) {
+                    // EXPERIMENT: the game may hold it at a higher set-by priority than SetByCode; try SetByConsole.
+                    ok = variable->Set(L"0", 0x9000000);
+                    after = variable->GetInt();
+                    SPDLOG_INFO("[FrameGen] {} with SetByConsole: {} -> {} (ok={})", utility::narrow(name), before, after, ok);
+                }
 
                 if (after == before) {
                     // The game keeps it (Black Myth: Wukong's r.Streamline.DLSSG.Enable stays 1): stop asking until the
