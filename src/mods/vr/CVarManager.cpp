@@ -926,6 +926,32 @@ static int32_t __cdecl set_options(const void* viewport, void* options) {
     return g_set_options_hook.call<int32_t>(viewport, options);
 }
 
+// sl::ReflexOptions: BaseStructure (32 bytes), ReflexMode mode (eOff 0, eLowLatency 1, eLowLatencyWithBoost 2),
+// uint32_t frameLimitUs, bool useMarkersToOptimize, ...
+static safetyhook::InlineHook g_reflex_hook{};
+static std::atomic<int> g_reflex_logged{0};
+
+static int32_t __cdecl reflex_set_options(void* options) {
+    if (options != nullptr) {
+        auto bytes = reinterpret_cast<uint8_t*>(options);
+        auto mode = reinterpret_cast<uint32_t*>(bytes + 32);
+        auto frame_limit_us = reinterpret_cast<uint32_t*>(bytes + 36);
+        const auto forcing = g_force_off.load() || g_streamline_dlssg_early_off.load();
+
+        if (g_reflex_logged.fetch_add(1) < 6) {
+            SPDLOG_INFO("[FrameGen] slReflexSetOptions mode {} frameLimitUs {} markers {} (DLSS-G forced off: {})",
+                *mode, *frame_limit_us, (int)bytes[40], forcing);
+        }
+
+        if (forcing && *frame_limit_us != 0) {
+            SPDLOG_INFO("[FrameGen] DLSS-G forced off: Reflex frameLimitUs {} -> 0", *frame_limit_us);
+            *frame_limit_us = 0;
+        }
+    }
+
+    return g_reflex_hook.call<int32_t>(options);
+}
+
 static void hook_once() {
     if (g_tried.exchange(true)) {
         return;
@@ -948,6 +974,14 @@ static void hook_once() {
 
     g_set_options_hook = safetyhook::create_inline(fn, (void*)&set_options);
     SPDLOG_INFO("[FrameGen] Hooked Streamline slDLSSGSetOptions ({})", g_set_options_hook ? "ok" : "failed");
+
+    // EXPERIMENT: also watch Reflex (feature 3): with frame generation on the game may ask Reflex for a frame limit
+    // or pacing sized for generated frames, which DLSS-G off would turn into extra waiting.
+    void* reflex_fn = nullptr;
+    if (get_feature_function(3, "slReflexSetOptions", reflex_fn) == 0 && reflex_fn != nullptr) {
+        g_reflex_hook = safetyhook::create_inline(reflex_fn, (void*)&reflex_set_options);
+        SPDLOG_INFO("[FrameGen] Hooked Streamline slReflexSetOptions ({})", g_reflex_hook ? "ok" : "failed");
+    }
 }
 }
 
