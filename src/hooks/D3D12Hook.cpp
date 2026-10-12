@@ -34,6 +34,8 @@ thread_local bool g_internal_execute = false;
 // view is the eye, which can be taller (or wider) than the swapchain the proxy sized its buffers for, and the proxy's
 // copy is then invalid: the D3D12 runtime removes the device (Hogwarts Legacy at 125 % / 150 %). Clamp each tagged
 // region to the swapchain. Declarations follow the XeSS FG SDK 1.2 xefg_swapchain_d3d12.h.
+void streamline_dlssg_force_off_early(); // CVarManager.cpp, EXPERIMENT
+
 namespace xefg_compat {
 struct Size2D {
     uint32_t x;
@@ -990,6 +992,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
         d3d12->hook_execute_command_lists(d3d12->m_command_queue);
     }
     xefg_compat::on_present(swap_chain);
+    streamline_dlssg_force_off_early(); // EXPERIMENT exp/hogwarts-dred
     const auto original_sync_interval = sync_interval;
     const auto original_flags = flags;
 
