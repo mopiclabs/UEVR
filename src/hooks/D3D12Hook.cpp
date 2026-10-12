@@ -26,6 +26,8 @@ thread_local bool g_inside_depth_stencil_observer = false;
 // execute observer: such calls go straight to the original and are not reported.
 thread_local bool g_internal_execute = false;
 
+void streamline_dlssg_force_off_early(); // CVarManager.cpp, EXPERIMENT
+
 using ExecuteCommandListsFn = void(WINAPI*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 // The vtable entry the hook replaced. Never cleared: a call already inside the detour while the hook is removed still
 // reaches it.
@@ -806,6 +808,7 @@ thread_local int32_t g_present_depth = 0;
 
 HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags, DXGI_PRESENT_PARAMETERS* params, bool present1) {
     auto d3d12 = g_d3d12_hook;
+    streamline_dlssg_force_off_early(); // EXPERIMENT exp/pacing-asyncwait (from exp/hogwarts-dred)
     const auto original_sync_interval = sync_interval;
     const auto original_flags = flags;
 

@@ -896,6 +896,8 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
 // and the game's own frame generation setting on, Wukong ran 25 VR fps instead of ~30 and once crashed inside
 // sl.dlss_g.dll (2026-10-12). sl::DLSSGOptions starts with sl::BaseStructure (next, 16-byte struct type, version:
 // 32 bytes) followed by sl::DLSSGMode mode (eOff = 0, eOn = 1, eAuto = 2), Streamline 2.x.
+extern std::atomic<bool> g_streamline_dlssg_early_off; // defined below the namespace (EXPERIMENT)
+
 namespace streamline_dlssg {
 using SetOptionsFn = int32_t(__cdecl*)(const void* viewport, void* options);
 using GetFeatureFunctionFn = int32_t(__cdecl*)(uint32_t feature, const char* name, void*& function);
@@ -908,7 +910,7 @@ static std::atomic<bool> g_tried{false};
 static std::atomic<int> g_logged{0};
 
 static int32_t __cdecl set_options(const void* viewport, void* options) {
-    if (options != nullptr && g_force_off.load()) {
+    if (options != nullptr && (g_force_off.load() || g_streamline_dlssg_early_off.load())) {
         auto mode = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(options) + MODE_OFFSET);
         const auto requested = *mode;
 
@@ -947,6 +949,15 @@ static void hook_once() {
     g_set_options_hook = safetyhook::create_inline(fn, (void*)&set_options);
     SPDLOG_INFO("[FrameGen] Hooked Streamline slDLSSGSetOptions ({})", g_set_options_hook ? "ok" : "failed");
 }
+}
+
+// EXPERIMENT (exp/hogwarts-dred): DLSS-G off from the game's first hooked Present, long before the Native Stereo Fix
+// is up (Wukong crashed inside sl.dlss_g.dll ~3 s after UEVR's D3D12/VR setup, before the per-second check ran).
+std::atomic<bool> g_streamline_dlssg_early_off{false};
+
+void streamline_dlssg_force_off_early() {
+    g_streamline_dlssg_early_off = true;
+    streamline_dlssg::hook_once();
 }
 
 // VR_NativeStereoFixDisableFrameGeneration: while the Native Stereo Fix is on, hold the engine's frame generation off.
