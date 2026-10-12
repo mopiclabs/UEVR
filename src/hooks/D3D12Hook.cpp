@@ -4,6 +4,7 @@
 #include <optional>
 #include <unordered_set>
 
+#include <safetyhook.hpp>
 #include <spdlog/spdlog.h>
 #include <wrl/client.h>
 #include <utility/Thread.hpp>
@@ -24,6 +25,107 @@ static D3D12Hook* g_d3d12_hook = nullptr;
 // Set while an ExecuteCommandLists call on this thread is UEVR's own (InternalExecuteScope) or comes from inside an
 // execute observer: such calls go straight to the original and are not reported.
 thread_local bool g_internal_execute = false;
+
+// Intel XeSS Frame Generation (libxess_fg.dll) swapchain proxy. A UE game tags its HUD-less colour, depth, motion
+// vectors, UI and backbuffer for the proxy with xefgSwapChainD3D12TagFrameResource, each with a region sized by its
+// view. Under UEVR the view is the eye, which can be taller or wider than the swapchain: Hogwarts Legacy at 125 % tags
+// 2400x2700 regions, some on 3840x2160 resources, and the proxy's copy of such a region is an invalid call the D3D12
+// runtime answers by removing the device (DXGI_ERROR_INVALID_CALL). Clamping each region to the swapchain keeps the
+// proxy valid; with the Native Stereo Fix its generated frames are off anyway (VR_NativeStereoFixDisableFrameGeneration).
+// Declarations as in the XeSS FG SDK 1.2 xefg_swapchain_d3d12.h.
+namespace xefg_compat {
+struct Size2D {
+    uint32_t x;
+    uint32_t y;
+};
+struct ResourceData {
+    int32_t type;
+    int32_t validity;
+    Size2D base;
+    Size2D size;
+    ID3D12Resource* resource;
+    D3D12_RESOURCE_STATES incoming_state;
+};
+
+static safetyhook::InlineHook g_tag_hook{};
+static std::atomic<bool> g_tried{false};
+static std::atomic<uint32_t> g_limit_w{0};
+static std::atomic<uint32_t> g_limit_h{0};
+static std::atomic<int> g_clamp_logs{0};
+
+static int32_t __cdecl tag_frame_resource(void* swapchain, ID3D12CommandList* list, uint32_t present_id, const ResourceData* data) {
+    const uint32_t lim_w = g_limit_w.load();
+    const uint32_t lim_h = g_limit_h.load();
+
+    if (data == nullptr || lim_w == 0 || lim_h == 0) {
+        return g_tag_hook.call<int32_t>(swapchain, list, present_id, data);
+    }
+
+    ResourceData fixed = *data;
+    bool clamp = false;
+
+    if (fixed.base.x >= lim_w || fixed.base.y >= lim_h) {
+        fixed.base = {0, 0};
+        clamp = true;
+    }
+    if (fixed.base.x + fixed.size.x > lim_w) {
+        fixed.size.x = lim_w - fixed.base.x;
+        clamp = true;
+    }
+    if (fixed.base.y + fixed.size.y > lim_h) {
+        fixed.size.y = lim_h - fixed.base.y;
+        clamp = true;
+    }
+
+    if (!clamp) {
+        return g_tag_hook.call<int32_t>(swapchain, list, present_id, data);
+    }
+
+    if (g_clamp_logs.fetch_add(1) < 8) {
+        spdlog::info("[XeFG] Clamped tagged resource type {} region {}x{}+{}x{} to {}x{}+{}x{} (swapchain {}x{})",
+            data->type, data->base.x, data->base.y, data->size.x, data->size.y,
+            fixed.base.x, fixed.base.y, fixed.size.x, fixed.size.y, lim_w, lim_h);
+    }
+
+    return g_tag_hook.call<int32_t>(swapchain, list, present_id, &fixed);
+}
+
+// Called on every Present: tracks the swapchain size and hooks the proxy's tagging once its DLL is loaded.
+static void on_present(IDXGISwapChain3* swap_chain) {
+    if (swap_chain != nullptr) {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+
+        if (SUCCEEDED(swap_chain->GetDesc1(&desc)) && desc.Width != 0 && desc.Height != 0) {
+            g_limit_w = desc.Width;
+            g_limit_h = desc.Height;
+        }
+    }
+
+    // Most titles never load it: look every 120 Presents, not every one.
+    static uint32_t s_present_count = 0;
+
+    if (g_tried.load() || (s_present_count++ % 120) != 0) {
+        return;
+    }
+
+    const auto module = GetModuleHandleW(L"libxess_fg.dll");
+
+    if (module == nullptr) {
+        return;
+    }
+
+    g_tried = true;
+    const auto fn = GetProcAddress(module, "xefgSwapChainD3D12TagFrameResource");
+
+    if (fn == nullptr) {
+        spdlog::warn("[XeFG] libxess_fg.dll has no xefgSwapChainD3D12TagFrameResource, not hooked");
+        return;
+    }
+
+    g_tag_hook = safetyhook::create_inline((void*)fn, (void*)&tag_frame_resource);
+    spdlog::info("[XeFG] Hooked xefgSwapChainD3D12TagFrameResource ({})", g_tag_hook ? "ok" : "failed");
+}
+}
 
 using ExecuteCommandListsFn = void(WINAPI*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 // The vtable entry the hook replaced. Never cleared: a call already inside the detour while the hook is removed still
@@ -781,6 +883,10 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
 
     HWND swapchain_wnd{nullptr};
     swap_chain->GetHwnd(&swapchain_wnd);
+
+    if (!WindowFilter::get().is_filtered(swapchain_wnd)) {
+        xefg_compat::on_present(swap_chain);
+    }
 
     using Present1Fn = HRESULT(*)(IDXGISwapChain3*, UINT, UINT, DXGI_PRESENT_PARAMETERS*);
     Present1Fn present_fn{nullptr};
