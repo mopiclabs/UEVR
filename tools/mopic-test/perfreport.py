@@ -964,6 +964,9 @@ def finish_flat(acc):
         "hitches": hitches,
         "hitch_per_min": rnd(hitches * 60 / acc.measured_s, 2) if acc.measured_s else None,
         "gpu_busy_ms": rnd(median(f["gpu_busy"]), 2),
+        # GPU busy is per Present: with 2x frame generation one engine frame is two Presents, so the per-Present value
+        # is about half the frame's GPU time (the frame-generation pass included in the per-frame value)
+        "gpu_busy_frame_ms": rnd(median(f["gpu_busy"]) * sim / mean, 2) if sim and f["gpu_busy"] else None,
         "in_present_ms": rnd(median(f["in_present"]), 2),
         "displayed_fps": rnd(1000 / statistics.fmean(f["display"]), 2) if f["display"] else None,
         "frames": f["rows"],
