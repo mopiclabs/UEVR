@@ -5,9 +5,17 @@ This branch (`mopic/joeyhodge-base`) is the Mopic UEVR product line. It is built
 queue of Mopic patches for the Mopic glasses-free 3D display (Monado "MOPIC 3D Display" OpenXR runtime,
 eye tracking through Mopic Hub).
 
-- Base: joeyhodge release `092826MONO+5_8_3_UEVR` (`49c423e`), local tag `joeyhodge/092826MONO+5_8_3_UEVR`.
+- Base: joeyhodge release `101226HELLRAISERp1` (`387ccb7`, on joeyhodge's `ue57performance` release line), local tag
+  `joeyhodge/101226HELLRAISERp1`.
 - `git describe --tags` (and the "Tag / Commits past tag" lines at the top of UEVR's log.txt) shows which
   joeyhodge release a build is based on and how many Mopic commits sit on top.
+- Lineage: until 2026-10 this branch sat on `092826MONO+5_8_3_UEVR` (`49c423e`), which joeyhodge cut from his
+  `eBaseballfocused` line (the DIBR / Mono / ProSpi experiments). Every later release tag is on `ue57performance`, and
+  the two lines exchange the same changes as cherry-picks with different hashes (common ancestor praydog `4ee5c6b`),
+  so merging a new tag the usual way conflicted in 39 files. On 2026-10-14 the Mopic patch queue
+  (`49c423e..14f5198`, 92 commits) was replayed with `cherry-pick -x` onto `101226HELLRAISERp1`; the Mono-only parts
+  (UI alpha swapchain generation guard, Mono perf flag, Mono copy paths) were left out because that line has no Mono
+  mode. The old line is kept as the second parent of a history-only merge, so old builds' commits stay reachable.
 - The older Mopic line (praydog-based `mopiclabs/master` + early-injection fixes, branch
   `fix/early-injection-crash`) is kept only until this branch has proven itself on the shipped titles.
 
@@ -24,7 +32,7 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | VR: Allocate the SceneViewExtensions array with the game's FMalloc by default | `VR_UseFMallocSceneViewExtensions` defaults to on; a one-time config migration (`Mopic_ConfigVersion` 1) turns it on in existing configs; only used when FMalloc and its Malloc slot were found. | Games reallocate UEVR's array with FMallocBinned2 on exit and hit a fatal error (Sonic Racing CrossWorlds: "Attempt to realloc an unrecognized block"). | Graceful exit (`-GracefulExit`) passes; log.txt shows `Migrated config to Mopic defaults version 1` once per old config. |
 | VR: Turn the Native Stereo Fix off for the session when it can't activate | Watchdog: 20 s outside Active while 3D view families are rendered and the runtime asks for frames → the fix is turned off for the session (plain native stereo). | This line's fix fails closed (unrendered right eye); with the fix on by default that would black out titles where it can't activate. | Titles where the fix works never log `Not active after 20 s`. |
 | VR: Show in the menu when the watchdog turned the Native Stereo Fix off | The Native Fix status reads "off for this session: not active after 20 s (plain native stereo)" instead of joeyhodge's generic "skipped: title/runtime guard". | The generic text looked like a deliberate per-title block (reported on Wukong). | Only shown after `Not active after 20 s` in log.txt. |
-| UESDK: Run a worker's jobs without holding its lock (submodule) | `ThreadWorker::execute` takes the queued jobs out under the lock and runs them without it; unfinished work goes back in front of jobs enqueued meanwhile. | A game-thread job enqueuing to the render-thread worker while a render-thread job enqueued to the game-thread worker deadlocked both threads at startup (Dead as Disco froze, 1 in 3 runs with 21 s late injection like Mopic Hub). | No FREEZE verdict; `freeze.dmp` stacks never show two threads in `ThreadWorker::enqueue`. |
+| (UESDK worker lock: now upstream) | Dropped on the ue57 line: joeyhodge's UESDK (`0432e74`, in `e667df0`) already takes the queued jobs out under the enqueue lock and runs them without it, restores unfinished work in front, and adds a re-entrancy guard. Our `026791d` would have replaced that newer code. | The game-thread/render-thread enqueue deadlock (Dead as Disco froze, 1 in 3 runs with 21 s late injection like Mopic Hub). | Dead as Disco with `-InjectDelay 21`: no FREEZE; `freeze.dmp` stacks never show two threads in `ThreadWorker::enqueue`. |
 | UESDK: Wait for a texture's render resource instead of rescanning its offset (submodule) | `UTexture::update_render_resource_offset_texture2d` returns "not ready" when the resource at the known/cached offset is still null. | A texture probed right after its creation reset the global offset and a rescan picked another member (0x180 for 0x130), so the next resource read called a null vtable slot (crash at `begin_render_viewfamily_real`). | `Found UTexture::PrivateResource offset` keeps one value per session. |
 | VR: Keep the synced redraw and the dedicated UI publish ordered without the worker lock | The synced-AFR redraw no longer queues another redraw from its own nested draw; destroy/cancel and the game-thread publish of the dedicated UI texture share a mutex. | Both relied on the old worker lock (a nested job was dropped / `enqueue` blocked while the game thread ran its jobs). | — |
 | VR: Recognize Dead as Disco's UE5.7 FSceneViewFamily copy | Title-gated (`PagodaSteamDemo-Win64-Shipping.exe`, file version 5.7.4.0, DX12) fallback in `resolve_ue57_fsceneviewfamily_functions` with this exe's copy-constructor bytes (`DeadAsDiscoNativeFix.hpp`); the vtable and destructor still go through the generic UE5.7 checks. Compatibility tests cover the gate, single-byte changes, the StateTree lookalike and a fixture of the real bytes. | Its layout is stock UE5.7, but the copy constructor holds the source in rbx (`48 8B DA`, not `48 8B FA`), so the generic signature only found an unrelated StateTree copy, the linked-family fix failed closed and UE5.7 left the right eye's 3D black. | log: `[DeadAsDisco][UE5.7][NativeStereoFix] Validated the stock-layout family copy`, `copy constructor RVA 0x3d5d8e0`, `state=active`. |
@@ -35,17 +43,24 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | VR: Compare devices by identity in the scene-capture reallocation path | Same device comparison as the publish path. | Avoids rebuilding the capture on every reallocation on proxy-device setups. | — |
 | Framework: Don't tear the framework down while the game exits | `DllMain(DLL_PROCESS_DETACH)` with a non-null `reserved` (process terminating) releases `g_framework` instead of letting the CRT destroy it. | The static destructors released D3D12 resources into the GPU driver after ExitProcess had killed its threads: TEKKEN 8 stayed in `~TextureContext` → dxgi → Intel driver forever after a menu quit (upstream has the same DllMain). | Menu-exit test (`-Recipe`) passes with no `EXIT_HANG` noted "stuck in shutdown"; the process is gone a few seconds after the quit (an `EXIT_HANG` noted "never called ExitProcess" is the known gap below). |
 | VR: Log frame rate and frame pacing to perf CSVs | `VR_PerfLog` (default off since 2026-10-06; a one-time config migration, `Mopic_ConfigVersion` 2, turns it off in existing configs; `run-test.ps1` turns it on and raises the version for its runs) writes `perf.csv` (1 s rows: VR fps, new/repeated submits, xrWaitFrame/xrEndFrame times, Presents per engine tick, NSF fresh/reused/fallback) and `perf-frames.csv` (one row per `xrEndFrame`) next to log.txt; a submit counts as new only if its engine frame is newer than any submitted before. | UEVR's "Show FPS" sends `stat fps` once (screen only, stripped in Shipping); the harness needs a per-run frame rate, and frame generation doubled the naive count (Hogwarts "40 fps" was 20). | `perf.csv` exists after a run; `presents_per_tick` is 1.00 without frame generation. |
-| Framework: End the OpenXR session when the game's window is gone | Once the window the game last presented to got WM_DESTROY and no Present has run for 2.5 s, the D3D monitor thread destroys the session (try-locks only); a Present to a live window reinitializes OpenXR. `VR_EndSessionOnGameExit` turns it off. | Hogwarts takes ~30 s from destroying its window to ExitProcess (D3D12 teardown in the NVIDIA driver, vanilla too) and the Mopic display showed the frozen last frame all that time. | Hogwarts: frozen tail ~2 s instead of ~36 s (monado `app_frame_stats.csv`); TEKKEN 8 / E33 / Dead as Disco menu exits still PASS. |
+| Framework: End the OpenXR session when the game's window is gone | Once the window the game last presented to got WM_DESTROY and no Present has run for 2.5 s, the D3D monitor thread destroys the session (try-locks only); a Present to a live window reinitializes OpenXR. `VR_EndSessionOnGameExit` turns it off. The XInput callbacks hold `m_openxr_session_exit_mtx` shared while they use the session (ue57 line: not `m_actions_mtx`, which upstream keeps out of XInput bookkeeping; `gamepad-recovery-tests`). | Hogwarts takes ~30 s from destroying its window to ExitProcess (D3D12 teardown in the NVIDIA driver, vanilla too) and the Mopic display showed the frozen last frame all that time. | Hogwarts: frozen tail ~2 s instead of ~36 s (monado `app_frame_stats.csv`); TEKKEN 8 / E33 / Dead as Disco menu exits still PASS. |
 | VR: Turn frame generation off while the Native Stereo Fix is on | `VR_NativeStereoFixDisableFrameGeneration` (default on): once a second, while the fix is on, `r.XeFG.Enabled`, `r.Streamline.DLSSG.Enable`, `r.FidelityFX.FI.Enabled` are held at 0 and put back when it is off; a write the game refuses (Wukong's DLSSG, held above SetByCode) is retried at SetByConsole priority, and a cvar the game keeps even then is logged once and left alone. | UEVR copies the engine's eye targets, so generated frames never reach the display; their extra Presents land between the two eye renders and send the right eye one engine frame late (Hogwarts XeFG X2: 150-260 one-refresh splits per run). The engine frame rate is the same either way (~20 fps). | log `[FrameGen] Native Stereo Fix is on: r.XeFG.Enabled 1 -> 0`; Wukong with HAGS: `r.Streamline.DLSSG.Enable refused 0 at SetByCode; with SetByConsole: 1 -> 0`; `presents_per_tick` 1.00; games re-enable it at level loads / menus and it is off again within 1 s. |
 | VR: Submit once per engine frame under frame generation | `VR_SubmitOncePerEngineFrame` (default on, OpenXR, not AFR): a Present pass with no new engine frame while the engine produced one in the last 250 ms skips the copy and the xrWaitFrame / xrBeginFrame / xrEndFrame trio; repeats while the engine stalls still submit. | Frame generation the cvars can't turn off would otherwise re-submit every frame and add an xrWaitFrame per generated frame. | Non-FG titles skip only a handful of passes per run (log count); no MENU_FAIL from frozen menus. |
 | D3D12: Experimental per-engine-frame eye-pair snapshot (off by default) | `VR_NativeStereoFixPairSnapshot`: after the engine's first direct-queue submission following the pose callback, both eyes are copied into a 3-slot ring on the engine queue; Present passes off the engine thread submit the newest pair the GPU finished (no GPU wait). | For titles whose frame generation can't be turned off. The first version made XeFG's present queue wait on the snapshot fence and hung Hogwarts (wait cycle with XeFG's own fence). | Hogwarts with frame generation left on: no hang, frozen pairs 100%, 0 one-refresh splits; ~90% of passes take the pair one engine frame older. |
 | VR: Give the Native Stereo Fix right eye the left eye's auto exposure | `VR_NativeStereoFixShareExposure` (default on): for the second submission the right view's exposure view-state field (found at run time: the third copy of `FSceneView::State` past 4 KB, Wukong UE5.0 `+0x24f0`) points at the left eye's state, then is put back. Dead as Disco (UE5.7) has no such copy and is left alone. | The same-pass relabel makes the right eye a primary view that meters its own exposure; stock stereo gives the secondary view the primary's. Black Myth: Wukong shrine, standing still: right eye 5.5% darker. | `[NativeStereoFix] Right eye uses the left eye's exposure view state` in log.txt; binocular luma right-left within 1% on `Wukong-shrine-still`. |
+| D3D12: Clamp regions tagged for the XeSS-FG swapchain proxy to the swapchain | An inline hook on `libxess_fg.dll`'s `xefgSwapChainD3D12TagFrameResource` clamps each tagged region (base + size) to the swapchain size, read on every non-filtered Present (module looked up every 120 Presents). | With UEVR the engine's view is the eye, which can be larger than the swapchain XeFG sized its buffers for; Hogwarts Legacy at 125 % / 150 % tagged 2400x2700 regions on a 3840x2160 swapchain and the D3D12 runtime removed the device (INVALID_CALL). | Hogwarts at 125 % / 150 % with XeFG on: no device removal; log `[XeFG] Hooked xefgSwapChainD3D12TagFrameResource (ok)` and `[XeFG] Clamped tagged resource type ...`. |
 | VR: Hold Lumen's view origin between refreshes under the Native Stereo Fix | `VR_NativeStereoFixLumenOriginRefreshFrames` (default 30, 0 = off): `r.LumenScene.UpdateViewOrigin` is held at 0 around both eye submissions and let through for both every Nth frame (render-thread safe, so it applies to those renders only). Games without the cvar (UE4) are untouched. | Each Lumen view-origin move dims that render's Lumen lighting for a while; the second submission of a frame moved it again, so the second-rendered eye was 8-16% darker (Black Myth: Wukong chapter-1 forest; rendering the right eye first moved it to the left eye). | `Holding r.LumenScene.UpdateViewOrigin at 0` in log.txt; Wukong chapter-1 binocular luma -10.2% -> -0.2%; TEKKEN fps unchanged. |
 
 ## Updating to a new joeyhodge release
 
+Only release tags on joeyhodge's `ue57performance` line are candidates. Tags of the MONO / DIBR line and the
+`eBaseballfocused` branch are not: that line shares no history with this one since 2026-10 and a merge conflicts
+everywhere. Check before merging:
+
 ```
+git fetch --no-recurse-submodules joeyhodge "+refs/heads/ue57performance:refs/remotes/joeyhodge/ue57performance"
 git fetch --no-recurse-submodules joeyhodge "+refs/tags/<release>:refs/tags/joeyhodge/<release>"
+git merge-base --is-ancestor joeyhodge/<release> joeyhodge/ue57performance && echo on the release line
 git switch mopic/joeyhodge-base
 git merge joeyhodge/<release>          # merge, don't rebase: keeps history and later pushes fast-forward
 git submodule sync --recursive
@@ -57,13 +72,15 @@ git submodule update --init --recursive
 - The `joeyhodge` remote has `tagOpt = --no-tags`, so joeyhodge's ~150 release tags don't flood the tag
   namespace. Fetch the release you need into `refs/tags/joeyhodge/` as above.
 - If joeyhodge reworks one of the patched areas, re-apply the Mopic change by hand and keep the same check.
-- Two Mopic patches live in the UESDK submodule (rows marked "submodule"), on branch `mopic/uesdk` of
+- The Mopic UESDK patch (row marked "submodule") lives on branch `mopic/uesdk-ue57` of
   [mopiclabs/UESDK](https://github.com/mopiclabs/UESDK), a fork of joeyhodge/UESDK. This branch's `.gitmodules` points
-  the submodule there; inside the submodule `origin` is the fork and `joeyhodge` the upstream. Push `mopic/uesdk` to
-  the fork before pushing this branch, or clones can't check the submodule out.
-- When a joeyhodge release moves UESDK: in the submodule `git fetch joeyhodge`, rebase `mopic/uesdk` onto the
-  release's UESDK commit, `git push --force-with-lease origin mopic/uesdk`; in the superproject keep the fork URL in
-  `.gitmodules` and resolve the submodule conflict to the rebased commit (`git add dependencies/submodules/UESDK`).
+  the submodule there; inside the submodule `origin` is the fork and `joeyhodge` the upstream. Push
+  `mopic/uesdk-ue57` to the fork before pushing this branch, or clones can't check the submodule out.
+  `mopic/uesdk` (the 092826MONO-era UESDK patches) stays as it is: old superproject commits point at it.
+- When a joeyhodge release moves UESDK: in the submodule `git fetch joeyhodge`, then `git switch mopic/uesdk-ue57`
+  and `git merge <the release's UESDK commit>` (no rebase, no force-push, so UESDK commits that older superproject
+  commits point at never disappear); push it; in the superproject keep the fork URL in `.gitmodules` and resolve the
+  submodule conflict to the merge commit (`git add dependencies/submodules/UESDK`).
 
 ## Building
 
@@ -166,6 +183,30 @@ Results on 2026-10-02/03 (builds of this branch with the rows above; `-EngineDir
 - Regression matrix after them (one run each): TEKKEN 8, Wukong, E33, Dead as Disco, Stray, Sonic 6/6 PASS, the fix
   active in all six.
 
+Results on 2026-10-14/15 (the ue57performance rebuild: this branch on `101226HELLRAISERp1`, a build of 985eab55,
+against the 092826MONO line's last build 14f51980; `-EngineDir ...\1.0.5.1`, early injection, Steam offline except
+Hogwarts, monado `build-release` with the Mopic app pacer; one build after the other per title, 3 runs each):
+
+- Unit tests: `ctest` 32/32 (the CI target list plus `perf-log-tests`).
+- Every run logs `Tag: joeyhodge/101226HELLRAISERp1`. Native Stereo Fix active on every title where it was before
+  (TEKKEN 8, E33, Sonic, Stray, Hogwarts, Wukong, Dead as Disco; not Hozy and ACC, the same on both builds), no
+  `Not active after 20 s`, no `Refusing to publish a scene-capture resource`, no `Candidate eye pair rejected`, from
+  the first frame on (upstream's scene-capture component creation change, `43d013d8`, showed nothing).
+- Verdicts: ue57 48 PASS, 13 MENU_FAIL, no CRASH / FREEZE / EXIT_*; the old line 44 PASS, 16 MENU_FAIL, 1 EXIT_HANG
+  (TEKKEN 8, the known gap below), 2 NO_VR. The MENU_FAILs are recipe-side on both builds (Sonic's pause-menu cursor,
+  Stray's pause menu not opening after play, Hogwarts' new EULA screen while Steam is offline) and measured their
+  gameplay first. Dead as Disco with `-InjectDelay 21`: 3/3 PASS, no FREEZE, on upstream's ThreadWorker alone.
+- VR fps vs the old line: TEKKEN 8 +4.7 %, E33 -2.5 %, Sonic +0.1 %, Hozy -1.1 %, Stray +3.8 %, Hogwarts -0.6 %,
+  Wukong +0.8 % (DLSS-G off on both: Presents per engine tick 1.00), Dead as Disco -6.1 % in the batch but -0.4 % in
+  three alternating pairs (the batch put the old build's runs at a lower GPU load). Hozy's 1 % low (-11.7 %) drifted
+  down run after run across both builds; in alternating pairs it matches.
+- SBS (`MOPIC_MODE=sbs`, eye sampler, 2 runs per build): no one-eye lag / only / black on either build, one-eye
+  shading median 0.0 % everywhere, luma difference within the old line's range except single frames that are a dark
+  loading screen with a desktop FPS overlay in the left eye only (Wukong) or an extreme close-up cutscene (Sonic).
+  TEKKEN 8 no longer identifies the exposure field (`exposure view state field not identified`: the two eye views
+  sit back to back and hold the same view state, so the scan counted the right view's copies too); its left/right
+  luma difference stays 3-5 %, the same as before.
+
 ## Known gaps
 
 - TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 12 full
@@ -203,9 +244,11 @@ Results on 2026-10-02/03 (builds of this branch with the rows above; `-EngineDir
   through still differs; compare a Mopic-display MENU_FAIL against a run in the same state before calling it a
   regression.
 - The cached right-eye fallback is D3D12/OpenXR double-wide only (not D3D11, texture-array or OpenVR).
-- joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, DIBR, alpha passes).
-  Only the scene-capture paths use `is_same_d3d12_device`; the others may fail the same way on Mopic setups
-  when those features are used.
+- joeyhodge compares D3D devices by raw pointer in 20+ other places (UI composition, alpha passes, and on the ue57
+  line also title-gated Native Fix paths: Hellraiser's capture check `desc.device == device`, Stalker 2's exact pair
+  `device == m_openxr.binding.device`, Galactic Racer's `device_identity`). Only the scene-capture paths use
+  `is_same_d3d12_device`; the others may fail the same way on Mopic setups when those features or titles are used.
+  Left as upstream wrote them (title-gated, not on Mopic's titles).
 - Other version gates (`is_ue_5_4_runtime`, `is_ue_5_5_runtime`, ...) use the same exe string / file-version
   detection. Only the UE5.0–5.3 layout choice has the layout-based fallback.
 - `VR_NativeStereoFixPreserveSecondaryPass` (default on, UE5.5+ only) ties the right eye's exposure to the
@@ -227,6 +270,14 @@ Results on 2026-10-02/03 (builds of this branch with the rows above; `-EngineDir
   out of memory"). A local, uncommitted patch closes the handle for non-DXGI imports (monado
   `patches-local\vk_helpers-close-imported-nt-handles.diff`): 0.07 GB per session after it. Until monado ships a fix,
   restart monado-service between long test batches.
+- An overlay that draws into the game's own back buffer (here a desktop FPS overlay, Ctrl+Shift+O) reaches the Mopic
+  display in the left eye only, since the left eye is the engine's back buffer and the right eye the scene capture.
+- Hogwarts Legacy (build 1613387) shows WB Games' 2025-01 EULA on every start while Steam is offline (accepting it
+  offline is not remembered); run it with `-SteamOnline`. The harness's `Wukong-shrine-still` recipe still has the
+  old 120x180 main-menu region for the re-saved 120x34 image, and after the campaign's autosaves its save no longer
+  starts at the shrine.
+- monado-service crashed once (2026-10-14 23:19, access violation in `nvoglv64.dll`) at the start of a Dead as Disco
+  run; the next runs got NO_VR until it was restarted.
 - Intermittent, not reproduced: TEKKEN 8 froze once in ~38 runs right after UEVR's stereo-projection bootstrap
   (game thread dispatching an access violation in non-module executable memory; `freeze.dmp` kept), and Wukong
   crashed once while quitting with a null call on a game thread (Wukong also crashes at quit without UEVR).
