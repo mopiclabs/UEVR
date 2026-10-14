@@ -876,6 +876,14 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
 // Legacy, XeFG X2, 2026-10-03: 14 lone-eye lags/min with it, 0 without, engine ~20 fps either way). Checked once a
 // second because games re-apply their own settings (level loads, the options menu); the values from before are put back
 // once the fix is off.
+//
+// UE ignores a Set below the priority the value was last set with. Our default is SetByCode; a game that sets the cvar
+// from a higher source (Black Myth: Wukong keeps r.Streamline.DLSSG.Enable at 1, which matters once HAGS lets DLSS-G run)
+// would refuse it, so a refused write is retried once with SetByConsole, the highest source a game normally uses.
+// Wukong with HAGS, 2026-10-14: DLSS-G off (Presents per engine tick 2.00 -> 1.00), the eyes stay in sync on fast
+// turns and the flicker on the way into gameplay is gone.
+static constexpr uint32_t frame_generation_set_by_console = 0x9000000; // ECVF_SetByConsole
+
 void CVarManager::enforce_frame_generation_cvars() {
     static constexpr std::array<const wchar_t*, 3> frame_generation_cvars{
         L"r.XeFG.Enabled",            // Intel XeSS frame generation (XeSS UE plugin)
@@ -932,12 +940,19 @@ void CVarManager::enforce_frame_generation_cvars() {
                     original = before;
                 }
 
-                const auto ok = variable->Set(L"0");
-                const auto after = variable->GetInt();
+                auto ok = variable->Set(L"0");
+                auto after = variable->GetInt();
 
                 if (after == before) {
-                    // The game keeps it (Black Myth: Wukong's r.Streamline.DLSSG.Enable stays 1): stop asking until the
-                    // fix is off again, and leave nothing to put back.
+                    ok = variable->Set(L"0", frame_generation_set_by_console);
+                    after = variable->GetInt();
+                    SPDLOG_INFO("[FrameGen] {} refused 0 at SetByCode; with SetByConsole: {} -> {} (ok={})",
+                        utility::narrow(name), before, after, ok);
+                }
+
+                if (after == before) {
+                    // The game keeps it even at console priority: stop asking until the fix is off again, and leave
+                    // nothing to put back.
                     m_frame_generation_cvar_refused[i] = true;
                     original.reset();
                     SPDLOG_WARN("[FrameGen] Native Stereo Fix is on, but {} stays {} after setting it to 0 (ok={}); not "
@@ -956,7 +971,14 @@ void CVarManager::enforce_frame_generation_cvars() {
             } else if (m_frame_generation_cvar_refused[i]) {
                 m_frame_generation_cvar_refused[i] = false;
             } else if (original.has_value()) {
-                const auto ok = variable->Set(std::to_wstring(*original).c_str());
+                const auto value = std::to_wstring(*original);
+                auto ok = variable->Set(value.c_str());
+
+                if (variable->GetInt() != *original) {
+                    // It was turned off at console priority: put it back at the same priority.
+                    ok = variable->Set(value.c_str(), frame_generation_set_by_console);
+                }
+
                 SPDLOG_INFO("[FrameGen] Native Stereo Fix is off: {} put back {} -> {} (ok={})",
                     utility::narrow(name), before, variable->GetInt(), ok);
                 original.reset();
