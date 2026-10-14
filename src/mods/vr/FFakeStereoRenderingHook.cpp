@@ -24839,12 +24839,12 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                         const bool views_readable =
                             views != nullptr && is_readable_process_range((uintptr_t)views, sizeof(*views));
                         return fmt::format(
-                            "arg={:x} arg_word={} tarrayview={} array_count={} family={:x} vtable={} learned={} "
+                            "arg={:x} arg_word={} tarrayview={} families={} family={:x} vtable={} learned={} "
                             "offsets={} views={}/{} rt={:x} scene={:x}",
                             (uintptr_t)view_family_candidate,
                             with_module(first_word),
                             uses_tarrayview,
-                            view_family_array.count,
+                            view_families.size(),
                             (uintptr_t)family,
                             with_module(actual_vtable),
                             with_module(expected_vtable),
