@@ -1145,6 +1145,10 @@ private:
     mutable TracyLockable(std::recursive_mutex, m_openvr_mtx);
     mutable TracyLockable(std::recursive_mutex, m_reinitialize_mtx);
     mutable TracyLockable(std::recursive_mutex, m_actions_mtx);
+    // Held shared by the XInput callbacks while they use the OpenXR session, and exclusively by
+    // end_openxr_session_for_exit() while it destroys it. Not m_actions_mtx: XInput bookkeeping must not wait behind
+    // the driver's action updates (upstream 7893b9f3, tests/GamepadRecoveryTests.cpp).
+    mutable std::shared_mutex m_openxr_session_exit_mtx{};
     mutable std::shared_mutex m_rotation_mtx{};
 
     uevr::steam_frame::DigitalInput read_digital_input(vr::VRActionHandle_t action, vr::VRInputValueHandle_t source) const;

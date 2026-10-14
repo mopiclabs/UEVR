@@ -3651,9 +3651,9 @@ void VR::on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE
     }
 
     // The action queries below use the OpenXR session. Games still poll XInput once their window is gone, and
-    // end_openxr_session_for_exit() only destroys the session while it holds this lock (it then fails
+    // end_openxr_session_for_exit() only destroys the session while it holds this lock exclusively (it then fails
     // is_using_controllers()). Released before the ImGui update at the end.
-    std::unique_lock actions_lock{m_actions_mtx};
+    std::shared_lock session_lock{m_openxr_session_exit_mtx};
 
     if (!is_using_controllers()) {
         return;
@@ -3943,7 +3943,7 @@ void VR::on_xinput_get_state(uint32_t* retval, uint32_t user_index, XINPUT_STATE
         }
     }
 
-    actions_lock.unlock();
+    session_lock.unlock();
 
     // Do it again after all the VR buttons have been spoofed
     update_imgui_state_from_xinput_state(*state, true);
@@ -3957,7 +3957,7 @@ void VR::on_xinput_set_state(uint32_t* retval, uint32_t user_index, XINPUT_VIBRA
     }
 
     // Haptics use the OpenXR session (see on_xinput_get_state).
-    std::scoped_lock actions_lock{m_actions_mtx};
+    std::shared_lock session_lock{m_openxr_session_exit_mtx};
 
     if (!is_using_controllers()) {
         return;
@@ -8889,8 +8889,9 @@ VR::ExitSessionResult VR::end_openxr_session_for_exit() {
         return ExitSessionResult::NO_SESSION;
     }
 
-    // m_actions_mtx: update_action_states() and the controller mapping in on_xinput_get_state/on_xinput_set_state,
-    // which XInputGetState/XInputSetState still reach once engine ticks have stopped.
+    // m_actions_mtx: update_action_states(). m_openxr_session_exit_mtx: the controller mapping in
+    // on_xinput_get_state/on_xinput_set_state, which XInputGetState/XInputSetState still reach once engine ticks
+    // have stopped.
     auto& component_mtx = m_is_d3d12 ? m_d3d12.openxr().mtx : m_d3d11.openxr().mtx;
     std::unique_lock component_lock{component_mtx, std::defer_lock};
     std::unique_lock sync_lock{openxr.sync_mtx, std::defer_lock};
@@ -8898,8 +8899,10 @@ VR::ExitSessionResult VR::end_openxr_session_for_exit() {
     std::unique_lock event_lock{openxr.event_mtx, std::defer_lock};
     std::unique_lock swapchain_lock{openxr.swapchain_mtx, std::defer_lock};
     std::unique_lock actions_lock{m_actions_mtx, std::defer_lock};
+    std::unique_lock session_exit_lock{m_openxr_session_exit_mtx, std::defer_lock};
 
-    if (std::try_lock(component_lock, sync_lock, assignment_lock, event_lock, swapchain_lock, actions_lock) != -1) {
+    if (std::try_lock(component_lock, sync_lock, assignment_lock, event_lock, swapchain_lock, actions_lock,
+            session_exit_lock) != -1) {
         return ExitSessionResult::BUSY;
     }
 
