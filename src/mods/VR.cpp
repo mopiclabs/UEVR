@@ -8548,7 +8548,7 @@ void VR::update_perf_state() {
     set(g_framework->is_drawing_ui(), perf::flag::MENU);
     set(is_hmd_active(), perf::flag::HMD);
     set(runtime != nullptr && runtime->is_openxr() && m_openxr->session_state == XR_SESSION_STATE_FOCUSED, perf::flag::FOCUSED);
-    set(is_using_mono(), perf::flag::MONO);
+    // perf::flag::MONO stays defined (CSV format unchanged) but is never set: the ue57performance line has no Mono mode.
 
     perf::set_state(perf::flag::pack(flags, static_cast<uint32_t>(get_synchronize_stage()),
         static_cast<uint32_t>(m_rendering_method->value())));
