@@ -66,9 +66,9 @@ GPU_BOUND_UTIL = 90.0
 # against PerfLog.cpp
 FRAMES_COLUMNS = ("frame", "display_time", "period_ns", "end_us", "wait_us", "callsite", "nsf", "nsf_pair", "flags",
                   "presents", "dup_presents", "present_us", "ticks", "ticks_skipped", "tick_us", "uevr_gt_us",
-                  "uevr_rt_us", "rt_blocked_us")
+                  "uevr_rt_us", "rt_blocked_us", "game_gpu_span_us")
 ONEHZ_COLUMNS = ("qpc_ns", "unix_ms", "window_ms", "xr_new", "xr_repeat", "xr_empty", "xr_fail", "wait_ok",
-                 "engine_delta_ms", "frames_dropped", "frame_rows_unwritten", "xr_pair_qpc_ns", "xr_pair_time")
+                 "engine_delta_ms", "frames_dropped", "frame_rows_unwritten", "xr_pair_qpc_ns", "xr_pair_time", "sp_read")
 # monado's app_frame_stats.csv (comp_window_mopic.c MOPIC_AFS_CSV_HEADER)
 MONADO_COLUMNS = ("qpc_ns", "unix_ms", "window_ms", "pid", "exe", "mode", "presents", "new", "repeated", "no_layer",
                   "dropped", "gap_max_ms")
@@ -498,13 +498,15 @@ class Acc:
         self.no_submit_s = 0.0
         self.delta_ms = 0.0
         self.delta_window_ms = 0.0
+        self.gpu_span = []             # perf-frames.csv game_gpu_span_us of the measured rows, in ms (D3D12 experiment)
+        self.sp_read = []              # perf.csv sp_read (r.ScreenPercentage readback) of the measured seconds, in order
         # pilot
         self.captures = 0
         self.capture_s = 0.0
         self.cpu_s = 0.0
         self.spans = []
         # PresentMon
-        self.flat = {"between": [], "sim": [], "gpu_busy": [], "display": [], "in_present": [], "rows": 0,
+        self.flat = {"between": [], "sim": [], "gpu_busy": [], "gpu_time": [], "display": [], "in_present": [], "rows": 0,
                      "sync": {}, "mode": {}, "runtime": {}, "type": {}}
         self.comp = {"between": [], "display": [], "rows": 0, "mode": {}}
         # monado
@@ -646,6 +648,9 @@ def acc_uevr(acc, fr, a, b, cls, refresh_ns, xr_offset):
         acc.rows += 1
         kind = fr.kind[i]
         acc.kinds[kind] = acc.kinds.get(kind, 0) + 1
+        span = fr.game_gpu_span_us[i] if fr.game_gpu_span_us is not None else None
+        if span:
+            acc.gpu_span.append(span / 1000)
         acc.older += fr.older[i]
         pair = fr.nsf_pair[i] if fr.nsf_pair is not None and kind in ("P", "R") else None
         if pair:
@@ -722,7 +727,7 @@ def acc_onehz(acc, t, a, b, cls):
         return
     q, w = t.col("qpc_ns"), t.col("window_ms")
     cols = {n: t.col(n) for n in ("xr_new", "xr_repeat", "xr_empty", "xr_fail", "wait_ok", "frames_dropped",
-                                  "frame_rows_unwritten", "engine_delta_ms")}
+                                  "frame_rows_unwritten", "engine_delta_ms", "sp_read")}
     get = (lambda name, k: cols[name][k] if cols[name] is not None else None)
     n = len(cls)
     for k, mid in onehz_rows(q, w, a, b):
@@ -734,6 +739,8 @@ def acc_onehz(acc, t, a, b, cls):
         if cls[bin_of(mid, a, n)] != "ok":
             continue
         acc.onehz_rows += 1
+        if get("sp_read", k) is not None:
+            acc.sp_read.append(get("sp_read", k))
         acc.wait_ok += get("wait_ok", k) or 0
         acc.xr_new += get("xr_new", k) or 0
         delta = get("engine_delta_ms", k)
@@ -766,7 +773,8 @@ def acc_flat(acc, pm, a, b, included):
             acc.flat["rows"] += 1
             if between:
                 acc.flat["between"].append(between)
-            for key, col in (("sim", "MsBetweenSimulationStart"), ("gpu_busy", "MsGPUBusy"), ("in_present", "MsInPresentAPI")):
+            for key, col in (("sim", "MsBetweenSimulationStart"), ("gpu_busy", "MsGPUBusy"), ("gpu_time", "MsGPUTime"),
+                             ("in_present", "MsInPresentAPI")):
                 v = pm_value(entry, k, col)
                 if v is not None and v > 0:
                     acc.flat[key].append(v)
@@ -1033,6 +1041,27 @@ def finish_caps(settings, mode, injected, refresh_hz):
     return out
 
 
+def p50_p95(values):
+    s = sorted(values)
+    return {"p50": rnd(pct(s, 50), 2), "p95": rnd(pct(s, 95), 2), "n": len(s)} if s else None
+
+
+def finish_gpu_span(acc):
+    """UEVR's game GPU span (perf-frames.csv game_gpu_span_us, D3D12 experiment: GPU timestamps on the game's queue
+    from after the previous Present to the end of the eye copy) next to PresentMon's MsGPUTime (the game's GPU span
+    per Present) and MsGPUBusy, over the same measured seconds."""
+    uevr, time, busy = acc.gpu_span, acc.flat["gpu_time"], acc.flat["gpu_busy"]
+    if not (uevr or time or busy):
+        return None
+    return {"uevr_span_ms": p50_p95(uevr), "pm_gpu_time_ms": p50_p95(time), "pm_gpu_busy_ms": p50_p95(busy)}
+
+
+def finish_sp_read(acc):
+    """r.ScreenPercentage as UEVR read it back once a second (perf.csv sp_read): does a user_script value stay?"""
+    v = acc.sp_read
+    return {"min": min(v), "max": max(v), "last": v[-1], "n": len(v)} if v else None
+
+
 def finish(acc, refresh_hz, ctx, settings, label=None):
     mode = mode_of(acc)
     caps = finish_caps(settings, mode, (ctx or {}).get("injected"), refresh_hz)
@@ -1052,6 +1081,8 @@ def finish(acc, refresh_hz, ctx, settings, label=None):
         "compositor": finish_compositor(acc),
         "display": finish_display(acc, vr),
         "gpu": gpu,
+        "gpu_span": finish_gpu_span(acc),
+        "sp_read": finish_sp_read(acc),
         "mode": mode,
         "capped": caps,
         "captures": {"count": acc.captures, "s": rnd(acc.capture_s, 2), "pilot_cpu_s": rnd(acc.cpu_s, 2)} if acc.captures or acc.cpu_s else None,
@@ -1362,6 +1393,14 @@ def summary_line(s):
         parts.append(f"GPU {g['util_p50'] or 0:.0f}% {g['clock_mhz_p50'] or 0:.0f} MHz {g['temp_c_max'] or 0:.0f}C"
                      + (f" {g['power_w_p50']:.0f}/{g['power_limit_w']:.0f} W" if g.get("power_w_p50") and g.get("power_limit_w") else "")
                      + (f" limits {','.join(g['limits'])}" if g.get("limits") else ""))
+    gs = s.get("gpu_span") or {}
+    if any(gs.values()):
+        fmt = (lambda d: f"{d['p50']:.2f}/{d['p95']:.2f}" if d else "n/a")
+        parts.append(f"GPU p50/p95 ms: UEVR span {fmt(gs.get('uevr_span_ms'))}, PM GPUTime {fmt(gs.get('pm_gpu_time_ms'))}, "
+                     f"PM GPUBusy {fmt(gs.get('pm_gpu_busy_ms'))}")
+    sp = s.get("sp_read")
+    if sp:
+        parts.append(f"sp_read {sp['min']:g}-{sp['max']:g} (last {sp['last']:g})")
     c = s.get("compare") or {}
     if c.get("flat"):
         parts.append(f"VR/flat60 {c['flat']['vr_vs_flat60'] * 100:.0f}% ({c['flat']['runs']} flat runs)")

@@ -39,12 +39,22 @@
 //   uevr_rt_us          UEVR's own time in the Present hook: outside the original Present and without the time it
 //                       was blocked in OpenXR calls (xrWaitFrame/xrBeginFrame/xrEndFrame, swapchain-image waits)
 //                       and D3D12 fence waits, which is rt_blocked_us
+//   game_gpu_span_us    (D3D12, EXPERIMENT) the newest game GPU span read back since the previous row, empty when none:
+//                       GPU timestamp after the previous Present (UEVR's first command list on the game's queue after
+//                       it, the backbuffer clear) to the end of the eye copy into the OpenXR scene swapchain (the Native
+//                       Stereo Fix pair copy, or the ordinary copy). A span, not GPU busy: idle gaps count. See
+//                       d3d12/GpuFrameTimer.hpp
+//   game_gpu_span_lag   how many Presents after that frame's end it was read back (3 or so; never waited for)
 //
 // perf.csv, one row per second on a fixed schedule, also while no frame arrives (xr_frames 0 = a freeze).
 // xr_older counts the R submits that carried an engine frame older than the newest one submitted; presents_per_tick
 // is presents / (ticks + ticks_skipped) of the second (2.00 with 2x frame generation, 1.00 without, also in synced
 // sequential; empty without a Tick hook pass);
 // nsf_live / nsf_snapshot count the Native Stereo Fix eye-pair copies by source (nsf_pair).
+// At the end (appended, so older readers keep working): game_gpu_span_ms / game_gpu_span_p95_ms / game_gpu_span_n,
+// the mean, nearest-rank p95 and count of the game GPU spans read back in the second (empty without any), and
+// sp_read, r.ScreenPercentage as last read back by CVarManager's read-only diagnostic sample (requested once a second
+// from here, taken on the next game tick; empty while unresolved).
 
 #include <atomic>
 #include <chrono>
@@ -178,6 +188,10 @@ struct Counters {
     std::atomic<uint64_t> nsf_live{}, nsf_snapshot{};
     std::atomic<uint8_t> pending_nsf{}, pending_pair{};
     std::atomic<uint32_t> flags{}; // flag::pack()
+
+    // The newest game GPU span (ns, 0 = none) and its read-back lag, for the next perf-frames.csv row.
+    std::atomic<int64_t> pending_gpu_span_ns{};
+    std::atomic<uint32_t> pending_gpu_span_lag{};
 };
 
 // Running totals copied into each per-frame record, so every perf-frames.csv row can say what happened since
@@ -193,6 +207,8 @@ struct FrameRecord {
     int64_t period_ns{};    // predictedDisplayPeriod of the submitted frame state
     int64_t end_ns{};       // time inside xrEndFrame
     const char* callsite{}; // last successful xrWaitFrame callsite (a string literal), null before the first
+    int64_t gpu_span_ns{};  // game GPU span read back since the previous record, 0 = none
+    uint32_t gpu_span_lag{};
     uint32_t frame{};       // engine frame of the submitted pose (0 for empty frames)
     uint32_t flags{};
     Submit kind{Submit::Empty};
@@ -360,6 +376,10 @@ inline void note_xr_end(bool ok, bool projection, uint32_t frame, int64_t end_ti
 
     record.flags = c.flags.load(std::memory_order_relaxed);
     record.callsite = c.last_callsite_name.load(std::memory_order_relaxed);
+    if (c.pending_gpu_span_ns.load(std::memory_order_relaxed) != 0) {
+        record.gpu_span_ns = c.pending_gpu_span_ns.exchange(0, std::memory_order_relaxed);
+        record.gpu_span_lag = c.pending_gpu_span_lag.load(std::memory_order_relaxed);
+    }
     record.totals = snapshot_frame_totals();
     push_frame(record);
 }
@@ -421,6 +441,17 @@ inline void note_blocked(int64_t duration_ns) noexcept {
         add_blocked_ns(duration_ns);
     }
 }
+
+// One game GPU span read back (d3d12::GpuFrameTimer), `lag` Presents after the frame ended. Goes into the next
+// perf-frames.csv row and this second's perf.csv mean/p95. Never blocks (a sample that meets the writer draining is
+// dropped).
+void note_game_gpu_span(int64_t span_ns, uint32_t lag) noexcept;
+
+// r.ScreenPercentage readback (perf.csv sp_read). The writer raises a request once a second while it runs;
+// CVarManager takes it on the game tick (take_cvar_sample_request) and, after its read-only diagnostic sample, hands
+// the value over (note_screen_percentage, NaN = unresolved).
+bool take_cvar_sample_request() noexcept;
+void note_screen_percentage(double value) noexcept;
 
 // Times one pass through a D3D11/D3D12 Present hook: the original Present call, and UEVR's own work around it.
 class PresentTimer {

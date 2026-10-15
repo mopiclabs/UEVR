@@ -32,6 +32,7 @@
 #include "shaders/Compiled/alpha_luminance_sprite_ps_SpriteVertexShader.inc"
 
 #include "d3d12/DirectXTK.hpp"
+#include "d3d12/GpuFrameTimer.hpp"
 
 #include "D3D12Component.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
@@ -6273,6 +6274,11 @@ void D3D12Component::clear_backbuffer() {
     }
     const float clear_color[] = { 0.0f, 0.0f, 0.0f, 0.0f };
     backbuffer_ctx.commands.clear_rtv(backbuffer_ctx.texture.Get(), backbuffer_ctx.get_rtv(), clear_color, D3D12_RESOURCE_STATE_PRESENT);
+    // VR_PerfLog game_gpu_span: the first list on the game's queue after the previous Present carries the begin
+    // timestamp (only once per on_post_present; see d3d12/GpuFrameTimer.hpp).
+    if (backbuffer_ctx.commands.has_commands && backbuffer_ctx.commands.ready()) {
+        d3d12::gpu_frame_timer().record_begin(backbuffer_ctx.commands.cmd_list.Get(), device, hook->get_command_queue());
+    }
     backbuffer_ctx.commands.execute();
 }
 
@@ -6287,6 +6293,9 @@ void D3D12Component::on_post_present(VR* vr) {
         }
         return;
     }
+    // VR_PerfLog game_gpu_span: read back finished frames, close the one just presented, arm the next begin.
+    d3d12::gpu_frame_timer().on_post_present();
+
     const bool collect_frame_timing = vr != nullptr && vr->is_hitch_diagnostics_enabled();
     const auto post_present_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
@@ -6479,6 +6488,7 @@ void D3D12Component::on_reset(VR* vr, bool mono_retired) {
     m_force_reset = true;
     reset_frame_timing_stats();
     m_frame_timing_collection_active = false;
+    d3d12::gpu_frame_timer().reset();
 
     auto runtime = vr->get_runtime();
 
@@ -7924,7 +7934,22 @@ bool D3D12Component::OpenXR::copy(
         (*post_copy_commands)(texture_ctx->commands, ctx.textures[texture_index].texture);
     }
 
+    // VR_PerfLog game_gpu_span: the eye copy into the scene swapchain (the Native Stereo Fix pair copy, or the
+    // ordinary copy) carries the end timestamp and resolves the frame's pair. Only a list that will be executed.
+    const bool gpu_span_end =
+        (swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE ||
+         swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::NATIVE_STEREO_ARRAY ||
+         swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_LEFT_EYE ||
+         swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_RIGHT_EYE) &&
+        texture_ctx->commands.has_commands && texture_ctx->commands.ready() &&
+        d3d12::gpu_frame_timer().record_end(texture_ctx->commands.cmd_list.Get());
+
     texture_ctx->commands.execute();
+
+    if (gpu_span_end && texture_ctx->commands.waiting_for_fence && !texture_ctx->commands.has_commands &&
+        !texture_ctx->commands.poisoned) {
+        d3d12::gpu_frame_timer().commit_end(texture_ctx->commands.fence.Get(), texture_ctx->commands.fence_value);
+    }
 
     if (swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::UI ||
         swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI) {

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <span>
 #include <atomic>
 #include <safetyhook.hpp>
@@ -25,6 +26,7 @@
 #include "../VR.hpp"
 
 #include "CVarManager.hpp"
+#include "PerfLog.hpp"
 #include "utility/ImGui.hpp"
 #include "utility/Logging.hpp"
 
@@ -664,6 +666,10 @@ void CVarManager::process_diagnostics() try {
         }
         snapshot["values"][utility::narrow(name)] = value && std::isfinite(*value)
             ? nlohmann::json(*value) : nlohmann::json(nullptr);
+        if (std::wstring_view{name} == L"r.ScreenPercentage") {
+            // VR_PerfLog perf.csv sp_read (NaN = not resolved/readable)
+            uevr::perf::note_screen_percentage(value && std::isfinite(*value) ? *value : std::numeric_limits<double>::quiet_NaN());
+        }
     }
     {
         std::scoped_lock lock{m_diagnostic_snapshot_mutex};
@@ -802,6 +808,11 @@ void CVarManager::spawn_console() {
 
 void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     ZoneScopedN(__FUNCTION__);
+
+    // VR_PerfLog asks for the read-only diagnostic sample once a second (perf.csv sp_read).
+    if (uevr::perf::take_cvar_sample_request()) {
+        request_diagnostic_snapshot();
+    }
 
     process_diagnostics();
 

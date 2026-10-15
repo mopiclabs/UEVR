@@ -49,11 +49,13 @@ constexpr std::string_view SUMMARY_HEADER =
     "callsite,callsite_mask,"
     "flags,afr,synced,skip_draw,nsf,nsf_active,nsf_array,async_wait,d3d12,framegen_sc,dlssg,menu,hmd,focused,foreground,mono,"
     "sync_stage,method,"
-    "xr_pair_qpc_ns,xr_pair_time,frames_dropped,frame_rows_unwritten\n";
+    "xr_pair_qpc_ns,xr_pair_time,frames_dropped,frame_rows_unwritten,"
+    "game_gpu_span_ms,game_gpu_span_p95_ms,game_gpu_span_n,sp_read\n";
 
 constexpr std::string_view FRAMES_HEADER =
     "qpc_ns,kind,frame,display_time,period_ns,end_us,wait_us,callsite,nsf,nsf_pair,flags,"
-    "presents,dup_presents,present_us,ticks,ticks_skipped,tick_us,uevr_gt_us,uevr_rt_us,rt_blocked_us\n";
+    "presents,dup_presents,present_us,ticks,ticks_skipped,tick_us,uevr_gt_us,uevr_rt_us,rt_blocked_us,"
+    "game_gpu_span_us,game_gpu_span_lag\n";
 
 // Shared with the frame paths, under g_frames_lock.
 SRWLOCK g_frames_lock = SRWLOCK_INIT;
@@ -61,8 +63,16 @@ FrameRecord g_frames[FRAME_CAPACITY]{};
 size_t g_frame_count{};
 int64_t g_pair_qpc_ns{};
 int64_t g_pair_xr_time{};
+int64_t g_gpu_spans[FRAME_CAPACITY]{};             // game GPU spans (ns) read back since the last drain
+size_t g_gpu_span_count{};
 std::atomic<uint64_t> g_frames_dropped{};
 std::atomic<int64_t> g_next_time_pair_ns{};
+
+// perf.csv sp_read: a once-a-second request for CVarManager's diagnostic sample, and its r.ScreenPercentage (double
+// bits, NaN until the first sample or while unresolved).
+constexpr uint64_t NAN_BITS = 0x7FF8000000000000ull;
+std::atomic_bool g_cvar_sample_due{};
+std::atomic<uint64_t> g_sp_read_bits{NAN_BITS};
 
 // Control state: start()/stop() on the caller's thread, the rest on the writer thread.
 SRWLOCK g_control_lock = SRWLOCK_INIT;
@@ -96,6 +106,8 @@ struct WriterState {
     uint64_t rows_unwritten{};   // this window's frame rows left out once perf-frames.csv reached its cap
     size_t interval_count{};
     int64_t intervals[FRAME_CAPACITY]{};
+    size_t gpu_span_count{};
+    int64_t gpu_spans[FRAME_CAPACITY]{};
     FrameRecord drained[FRAME_CAPACITY]{};
     char text[TEXT_CAPACITY]{};
 };
@@ -280,11 +292,14 @@ void close_files() noexcept {
     }
 }
 
-size_t drain_frames(FrameRecord* out, int64_t& pair_qpc_ns, int64_t& pair_xr_time) noexcept {
+size_t drain_frames(FrameRecord* out, int64_t& pair_qpc_ns, int64_t& pair_xr_time, int64_t* spans_out, size_t& span_count) noexcept {
     AcquireSRWLockExclusive(&g_frames_lock);
     const auto count = g_frame_count;
     std::copy_n(g_frames, count, out);
     g_frame_count = 0;
+    span_count = g_gpu_span_count;
+    std::copy_n(g_gpu_spans, span_count, spans_out);
+    g_gpu_span_count = 0;
     pair_qpc_ns = g_pair_qpc_ns;
     pair_xr_time = g_pair_xr_time;
     ReleaseSRWLockExclusive(&g_frames_lock);
@@ -354,8 +369,13 @@ void write_frame_rows(WriterState& w, size_t count) noexcept {
             .u(delta(t.tick_ns, p.tick_ns) / 1000).comma()
             .u(delta(t.uevr_gt_ns, p.uevr_gt_ns) / 1000).comma()
             .u(delta(t.uevr_rt_ns, p.uevr_rt_ns) / 1000).comma()
-            .u(delta(t.rt_blocked_ns, p.rt_blocked_ns) / 1000)
-            .end_line();
+            .u(delta(t.rt_blocked_ns, p.rt_blocked_ns) / 1000).comma();
+        if (r.gpu_span_ns > 0) {
+            row.u(static_cast<uint64_t>(r.gpu_span_ns) / 1000).comma().u(r.gpu_span_lag);
+        } else {
+            row.comma();
+        }
+        row.end_line();
         pos = row.pos();
         ++pending_rows;
         w.frame_totals = t;
@@ -472,8 +492,28 @@ void write_summary_row(WriterState& w, int64_t now) noexcept {
         .known(w.pair_qpc_ns).comma()
         .known(w.pair_xr_time).comma()
         .u(delta(t.frames_dropped, p.frames_dropped)).comma()
-        .u(w.rows_unwritten)
-        .end_line();
+        .u(w.rows_unwritten).comma();
+
+    // Game GPU spans read back this second (empty without any), then r.ScreenPercentage's last readback.
+    if (w.gpu_span_count != 0) {
+        int64_t span_sum{};
+        for (size_t n = 0; n < w.gpu_span_count; ++n) {
+            span_sum += w.gpu_spans[n];
+        }
+        row.f(static_cast<double>(span_sum) / static_cast<double>(w.gpu_span_count) / 1'000'000.0).comma()
+            .f(ns_to_ms(non_negative(percentile(w.gpu_spans, w.gpu_span_count, 0.95)))).comma()
+            .u(w.gpu_span_count).comma();
+    } else {
+        row.comma().comma().u(0).comma();
+    }
+
+    double sp_read{};
+    const auto sp_bits = g_sp_read_bits.load(relaxed);
+    std::memcpy(&sp_read, &sp_bits, sizeof(sp_read));
+    if (sp_read == sp_read) { // not NaN
+        row.f(sp_read, 2);
+    }
+    row.end_line();
 
     write_all(g_summary_file, w.text, static_cast<size_t>(row.pos() - w.text));
     w.totals = t;
@@ -501,7 +541,7 @@ void reset_window(WriterState& w, int64_t now) noexcept {
 void write_once(WriterState& w, int64_t now) noexcept {
     int64_t pair_qpc_ns{};
     int64_t pair_xr_time{};
-    const auto count = drain_frames(w.drained, pair_qpc_ns, pair_xr_time);
+    const auto count = drain_frames(w.drained, pair_qpc_ns, pair_xr_time, w.gpu_spans, w.gpu_span_count);
     const auto active = enabled();
 
     if (pair_qpc_ns != 0) {
@@ -513,6 +553,9 @@ void write_once(WriterState& w, int64_t now) noexcept {
         w.was_enabled = false;
         return;
     }
+
+    // sp_read: a fresh read-only CVar sample on the next game tick (CVarManager::on_pre_engine_tick).
+    g_cvar_sample_due.store(true, std::memory_order_relaxed);
 
     if (!w.was_enabled) {
         // Records drained here were pushed before the reset point and would report negative deltas.
@@ -582,6 +625,39 @@ void push_frame(const FrameRecord& record) noexcept {
     ReleaseSRWLockExclusive(&g_frames_lock);
 }
 
+void note_game_gpu_span(int64_t span_ns, uint32_t lag) noexcept {
+    if (!enabled() || span_ns <= 0) {
+        return;
+    }
+
+    auto& c = g_counters;
+    c.pending_gpu_span_lag.store(lag, std::memory_order_relaxed);
+    c.pending_gpu_span_ns.store(span_ns, std::memory_order_relaxed);
+
+    if (!TryAcquireSRWLockExclusive(&g_frames_lock)) {
+        return; // the writer is draining: this one stays out of the second's mean/p95
+    }
+
+    if (g_gpu_span_count < FRAME_CAPACITY) {
+        g_gpu_spans[g_gpu_span_count++] = span_ns;
+    }
+
+    ReleaseSRWLockExclusive(&g_frames_lock);
+}
+
+bool take_cvar_sample_request() noexcept {
+    return g_cvar_sample_due.load(std::memory_order_relaxed) &&
+        g_cvar_sample_due.exchange(false, std::memory_order_relaxed);
+}
+
+void note_screen_percentage(double value) noexcept {
+    uint64_t bits{NAN_BITS};
+    if (value == value) {
+        std::memcpy(&bits, &value, sizeof(bits));
+    }
+    g_sp_read_bits.store(bits, std::memory_order_relaxed);
+}
+
 bool time_pair_due(int64_t now) noexcept {
     return enabled() && g_running.load(std::memory_order_relaxed) && now >= g_next_time_pair_ns.load(std::memory_order_relaxed);
 }
@@ -635,7 +711,8 @@ uint32_t start(const std::filesystem::path& dir) noexcept try {
     {
         int64_t unused_qpc{};
         int64_t unused_xr{};
-        drain_frames(g_writer.drained, unused_qpc, unused_xr);
+        drain_frames(g_writer.drained, unused_qpc, unused_xr, g_writer.gpu_spans, g_writer.gpu_span_count);
+        g_writer.gpu_span_count = 0;
     }
     reset_window(g_writer, now_ns());
     g_writer.was_enabled = true;
