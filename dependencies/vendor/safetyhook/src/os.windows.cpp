@@ -316,7 +316,7 @@ private:
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        std::scoped_lock lock{mutex};
+        std::unique_lock lock{mutex};
         auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
 
         // A write in progress: a thread that reached the bytes being rewritten continues in their copy at `to`, one
@@ -332,12 +332,35 @@ private:
             }
         }
 
-        // No write in progress there. Only a fault from a write that has finished since (the page allows the access
-        // again) runs again. A page that stays inaccessible is not ours to wait on: retrying it would spin forever
-        // (TEKKEN 8 demo's boot freeze). Older registrations only ever match pages: their memory may have been freed
-        // and reused by another trampoline or mid hook stub, so redirecting into their `to` would run stale code.
+        // No write of ours in progress there. Older registrations only ever match pages: their memory may have been
+        // freed and reused by another trampoline or mid hook stub, so redirecting into their `to` would run stale code.
+        const bool on_trap_page = instance->find_trap_page(faulting_address) != nullptr;
+
         if (!access_allowed_now(exp->ExceptionRecord)) {
-            return EXCEPTION_CONTINUE_SEARCH;
+            if (!on_trap_page) {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            // Someone else may have the page unprotected for a moment (another hooking library patching next to one
+            // of ours): wait for it like before, but not forever. A page that stays inaccessible was left that way
+            // (TEKKEN 8 demo's boot freeze) and the fault goes on to the game's handlers instead of spinning.
+            thread_local uint8_t* waiting_on{};
+            thread_local ULONGLONG waiting_since{};
+            const auto now = GetTickCount64();
+
+            if (waiting_on != faulting_address) {
+                waiting_on = faulting_address;
+                waiting_since = now;
+            }
+
+            if (now - waiting_since > 2000) {
+                waiting_on = nullptr;
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            lock.unlock();
+            Sleep(1);
+            return EXCEPTION_CONTINUE_EXECUTION;
         }
 
         if (instance->m_last && instance->m_last->in_from(faulting_address)) {
@@ -345,7 +368,7 @@ private:
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
-        if (instance->find_trap_page(faulting_address) != nullptr) {
+        if (on_trap_page) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
 
