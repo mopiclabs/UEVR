@@ -8,8 +8,9 @@ bool is_executable(uint8_t* address) {
 }
 
 std::recursive_mutex& protection_change_mutex() {
-    static std::recursive_mutex mutex;
-    return mutex;
+    // Never destroyed: hooks owned by static objects can still be removed during static destruction.
+    static auto* mutex = new std::recursive_mutex{};
+    return *mutex;
 }
 
 UnprotectMemory::~UnprotectMemory() {
