@@ -225,6 +225,17 @@ add_test(NAME nascar-hook-compatibility-tests COMMAND nascar-hook-compatibility-
 set_tests_properties(nascar-hook-compatibility-tests PROPERTIES TIMEOUT 60)
 """
 
+[target.safetyhook-trap-race-tests]
+condition = "compatibility-policy-tests"
+type = "executable"
+sources = ["tests/SafetyhookTrapRaceTests.cpp"]
+compile-features = ["cxx_std_23"]
+link-libraries = ["safetyhook"]
+cmake-after = """
+add_test(NAME safetyhook-trap-race-tests COMMAND safetyhook-trap-race-tests)
+set_tests_properties(safetyhook-trap-race-tests PROPERTIES TIMEOUT 60)
+"""
+
 [target.input-hook-installation-tests]
 condition = "compatibility-policy-tests"
 type = "executable"

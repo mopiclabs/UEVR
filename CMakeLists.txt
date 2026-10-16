@@ -678,6 +678,48 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	unset(CMKR_SOURCES)
 endif()
 
+# Target safetyhook-trap-race-tests
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET safetyhook-trap-race-tests)
+	set(safetyhook-trap-race-tests_SOURCES "")
+
+	list(APPEND safetyhook-trap-race-tests_SOURCES
+		"tests/SafetyhookTrapRaceTests.cpp"
+	)
+
+	list(APPEND safetyhook-trap-race-tests_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${safetyhook-trap-race-tests_SOURCES})
+	add_executable(safetyhook-trap-race-tests)
+
+	if(safetyhook-trap-race-tests_SOURCES)
+		target_sources(safetyhook-trap-race-tests PRIVATE ${safetyhook-trap-race-tests_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT safetyhook-trap-race-tests)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${safetyhook-trap-race-tests_SOURCES})
+
+	target_compile_features(safetyhook-trap-race-tests PRIVATE
+		cxx_std_23
+	)
+
+	target_link_libraries(safetyhook-trap-race-tests PRIVATE
+		safetyhook
+	)
+
+	add_test(NAME safetyhook-trap-race-tests COMMAND safetyhook-trap-race-tests)
+	set_tests_properties(safetyhook-trap-race-tests PROPERTIES TIMEOUT 60)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
 # Target input-hook-installation-tests
 if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	set(CMKR_TARGET input-hook-installation-tests)
