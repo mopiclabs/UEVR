@@ -3,6 +3,7 @@
 #ifndef SAFETYHOOK_USE_CXXMODULES
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 #else
@@ -24,6 +25,11 @@ template <typename T, typename U> constexpr T address_cast(U address) {
 
 bool is_executable(uint8_t* address);
 
+/// @brief Held across every temporary protection change safetyhook makes (save the protection, change it, put it
+/// back), so two of them never interleave on one page: the later one would put back the earlier one's temporary
+/// protection and leave the page that way. Hold it around such changes of your own to code pages as well.
+std::recursive_mutex& protection_change_mutex();
+
 class UnprotectMemory {
 public:
     UnprotectMemory() = delete;
@@ -36,12 +42,14 @@ public:
 private:
     friend std::optional<UnprotectMemory> unprotect(uint8_t*, size_t);
 
-    UnprotectMemory(uint8_t* address, size_t size, uint32_t original_protection)
-        : m_address{address}, m_size{size}, m_original_protection{original_protection} {}
+    UnprotectMemory(uint8_t* address, size_t size, uint32_t original_protection,
+        std::unique_lock<std::recursive_mutex> lock)
+        : m_address{address}, m_size{size}, m_original_protection{original_protection}, m_lock{std::move(lock)} {}
 
     uint8_t* m_address{};
     size_t m_size{};
     uint32_t m_original_protection{};
+    std::unique_lock<std::recursive_mutex> m_lock{};
 };
 
 [[nodiscard]] std::optional<UnprotectMemory> unprotect(uint8_t* address, size_t size);

@@ -29607,6 +29607,8 @@ bool FFakeStereoRenderingHook::patch_vtable_checks() {
 
         // Change the bytes to be some random number
         // this causes the vtable check to fail and will call the function within the vtable.
+        // (not while a hook write on another thread has this code page unprotected: we'd put its protection back)
+        std::scoped_lock protection_lock{safetyhook::protection_change_mutex()};
         DWORD old{};
         VirtualProtect((void*)*ref, 4, PAGE_EXECUTE_READWRITE, &old);
         *(uint32_t*)*ref = 0x12345678;
