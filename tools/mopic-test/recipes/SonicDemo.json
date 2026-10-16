@@ -20,7 +20,7 @@
     "cup_select": {"image": "cup_select.png", "region": [107, 331, 1067, 38], "threshold": 0.8},
     "ready": {"image": "ready.png", "region": [673, 169, 400, 228], "threshold": 0.8},
     "go_selected": {"image": "go_selected.png", "region": [790, 538, 178, 33], "threshold": 0.8, "mode": "highlight"},
-    "pause_menu": {"image": "pause_menu.png", "region": [31, 31, 284, 162], "threshold": 0.8},
+    "pause_menu": {"image": "pause_menu.png", "region": [560, 132, 160, 44], "threshold": 0.8},
     "pause_mainmenu_selected": {"image": "pause_mainmenu_selected.png", "region": [407, 436, 522, 40], "threshold": 0.8, "mode": "highlight"},
     "quit_race_confirm": {"image": "quit_race_confirm.png", "region": [449, 280, 383, 60], "threshold": 0.8},
     "quit_race_yes": {"image": "quit_race_yes.png", "region": [751, 396, 100, 38], "threshold": 0.8, "mode": "highlight"},
