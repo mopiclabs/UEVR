@@ -13,6 +13,7 @@
     "dir": "{gamedir}\\b1\\Saved\\SaveGames\\{sid64}",
     "file": "ArchiveSaveFile.9.sav"
   },
+  "save_default": "runs\\save-sets\\wukong\\minoshimameguri\\Black_Myth_Wukong_Save_Files-ef4cf4add44c69631afec74f8d9881b573420b5e\\Other\\1番轮回全收集存档_六六村.sav",
   "vars": {
     "region_y": 293,
     "area_y": 220,
@@ -38,7 +39,7 @@
         56,
         290,
         120,
-        180
+        34
       ],
       "threshold": 0.8
     },
@@ -339,7 +340,12 @@
     {
       "wait_for": "cancel_hover",
       "timeout": 10,
-      "if": "new_round"
+      "if": "new_round",
+      "move": [
+        777,
+        423
+      ],
+      "every": 2
     },
     {
       "click": [

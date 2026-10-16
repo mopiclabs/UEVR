@@ -311,6 +311,9 @@ come from one submitted frame, so they normally change in the same refresh. `ana
   `HKCU\Software\Valve\Steam\ActiveProcess` ActiveUser), `{accountid}` (ActiveUser itself), `{gamedir}` (the
   preset's install folder), `{localappdata}`, `{appdata}`, `{documents}`. The folder has to exist already.
   `-SaveFile` without a `save_slot` (or `-SaveSlot`) is an error.
+- `save_default`: the `-SaveFile` (relative to this folder) for runs that give none, for a recipe that only works
+  from one save (`Wukong-shrine`: the post-game save at the Zodiac Village shrine). Without it a run loads whatever
+  an earlier run left in the slot.
 - `vars`: `{"play_s": 120, "boss": null}`, the names the steps may use as `${name}`, with their defaults (`null`:
   no default, it must be given). `--var name=value` (`-RecipeVars`) sets one; the value is read as JSON when it
   parses (`180`, `[110, 305]`, `true`, `["hud", "loading"]`), else as text. A step string that is only `${name}`
@@ -327,7 +330,7 @@ showing right now.
 
 | Step | Does |
 | --- | --- |
-| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead; only after a failed check. |
+| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead, `"move": [x, y]` hovers again (a couple of pixels off each time; a dialog still fading in can miss the first hover); only after a failed check. |
 | `{"wait_gone": "x", "timeout": 180, "for": 3}` | wait until checkpoint x (or any of a list) has not shown for `for` seconds in a row: a loading screen going away, so gameplay starts right when the player can move |
 | `{"seek": "x", "press": "down", "max": 8}` | press until x shows (menu cursors don't always start on the same item; menus usually wrap around, so `max` should cover one lap) |
 | `{"key": "enter", "times": 1}` / `{"keys": "up enter"}` / `{"click": [x, y]}` / `{"move": [x, y]}` / `{"wait": 2}` | input (`move` hovers: menus that highlight under the mouse) / pause |

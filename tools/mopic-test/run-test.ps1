@@ -1167,6 +1167,13 @@ if ($Recipe -ne "") {
     $PilotVarArgs = @(ConvertTo-PilotVarArgs $RecipeVars)
 }
 
+# A recipe that only works from one save names it in "save_default" (a path relative to this script's folder); it is
+# the -SaveFile when none is given, so a run doesn't start from whatever an earlier run left in the slot
+if ($SaveFile -eq "" -and $Recipe -ne "" -and $recipeJson.save_default) {
+    $SaveFile = [string]$recipeJson.save_default
+    Write-Host "Save: the recipe's save_default $SaveFile"
+}
+
 # -SaveFile: the save every run starts from, copied over the file -SaveSlot or the recipe's save_slot names
 $SaveSource = $null
 $SaveSourceHash = $null

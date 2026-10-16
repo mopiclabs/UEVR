@@ -1100,12 +1100,14 @@ class Pilot:
         hwnd = self.input_ready()
         mouse_to(*self.to_screen(hwnd, x, y))
 
-    def wait_for(self, names, timeout, press_key=None, every=3.0, poll=1.0, click=None):
-        """Wait until one of the checkpoints shows; optionally press a key (or click a point) every `every` s
-        meanwhile (skipping movies, poking a scene until it reacts). A press only follows a check that failed."""
+    def wait_for(self, names, timeout, press_key=None, every=3.0, poll=1.0, click=None, move=None):
+        """Wait until one of the checkpoints shows; optionally press a key (or click a point, or hover one) every
+        `every` s meanwhile (skipping movies, poking a scene until it reacts, hovering a button again that a dialog
+        still fading in ignored). A press only follows a check that failed."""
         names = [names] if isinstance(names, str) else list(names)
         label = "|".join(names)
         end, last_press, best = time.time() + timeout, time.time(), -2.0
+        jiggle = 2
         while True:
             img, _ = self.grab()
             for name in names:
@@ -1118,9 +1120,15 @@ class Pilot:
             if time.time() >= end:
                 self.save_shot(f"FAILED-{label}", img)
                 raise Failed("checkpoint", f"{label} not reached within {timeout} s (best score {best:.2f})")
-            if (press_key or click) and time.time() - last_press >= every:
+            if (press_key or click or move) and time.time() - last_press >= every:
                 if click:
                     self.click(click[0], click[1], strict=False)
+                elif move:
+                    # a couple of pixels off each time, so the game sees the mouse move
+                    jiggle = -jiggle
+                    hwnd = self.input_ready(strict=False)
+                    if hwnd:
+                        mouse_to(*self.to_screen(hwnd, move[0] + jiggle, move[1]))
                 elif self.input_ready(strict=False):
                     press(press_key)
                 last_press = time.time()
@@ -1174,7 +1182,7 @@ class Pilot:
             self.log(f"phase {step['phase']}")
         elif "wait_for" in step:
             self.wait_for(step["wait_for"], step.get("timeout", 30), step.get("press"), step.get("every", 3.0),
-                          click=step.get("click"))
+                          click=step.get("click"), move=step.get("move"))
         elif "wait_gone" in step:
             self.wait_gone(step["wait_gone"], step.get("timeout", 60), step.get("for", 3.0))
         elif "seek" in step:
