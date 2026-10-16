@@ -450,7 +450,10 @@ can be stale. Check the top system function before concluding a thread is blocke
   spin, 1-4 spells, mouse camera; avoid E (shrine), Q (items), R (gourd), P (photo mode), M (map). After a run the
   game has re-saved slot 9 with today's date, which makes it the journey 게임 계속하기 loads (the plain `Wukong`
   recipe then plays the community save instead of the user's slot 2) until the next ladder run puts an old save
-  back. Shrine travel (`recipes\Wukong-shrine.json`, a sketch: its default path, Ch1 앞산, passed once through the harness; other rows untested): from the
+  back. After a cleared save has been played (the shrine recipes' post-game save), `ShareArchiveSaveFile.sav` grows
+  (90 -> 94 bytes) and the main menu opens a "다시 윤회하기" (NG+) explanation over it, which stops the plain `Wukong`
+  recipe at main_menu: put slot 9 and `ShareArchiveSaveFile.sav` back from a backup (2026-10-17:
+  runs\save-backups\wukong-before-cloudpick-20261017) before plain runs. Shrine travel (`recipes\Wukong-shrine.json`, a sketch: its default path, Ch1 앞산, passed once through the harness; other rows untested): from the
   post-game save, E at the Zodiac Village shrine > 축지 > region > area > shrine > E (a click only selects);
   `region_y` / `area_y` / `shrine_y` are the rows to click, listed in its notes. In the shrine menu only 축지 and
   나가기 are safe (rest, skills, crafting, shops and rematches change the save).
