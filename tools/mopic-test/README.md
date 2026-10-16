@@ -114,6 +114,11 @@ Verdicts:
 - `MENU_FAIL`: the pilot couldn't follow the recipe (a screen didn't show up, focus lost, PC locked) and UEVR was
   fine. `pilot-status.json`, `pilot\pilot.log` and `pilot\*.png` show where it stopped.
 - `NO_VR`: OpenXR never got ready (runtime not running), not a valid test. `NO_INJECTION`, `LAUNCH_FAILED`.
+  When Steam itself stopped the launch, these (and `MENU_FAIL`) carry a "Steam: ..." note from Steam's
+  `logs\console_log.txt`: a failed LaunchApp (`AppError_33` = shared library locked) or a prompt nobody answered
+  (`SynchronizingCloud cloudconflict` after a save swap with Steam online). A game borrowed through Family Sharing
+  (appmanifest `LastOwner` is another account) also gets a note: it is locked while the owner plays, and with Steam
+  offline it can stop at its own "first launch in online mode" box, which looks like `NO_VR` (UEVR keeps re-hooking).
 
 .NET's `Process.HasExited` is true as soon as the exit code is set, which is before DLL shutdown; the harness waits
 for the process handle so exits stuck in shutdown are caught (that's how UEVR's exit hang was found).
@@ -423,7 +428,10 @@ can be stale. Check the top system function before concluding a thread is blocke
   after an update compiles shaders for about a minute. Title > 게임 계속하기 (never 새 게임) > shrine > walk (never E
   there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인. A config saved by this line can have
   `FrameworkConfig_RememberMenuState=false`, which opens the UEVR menu over the title screen and swallows the keys;
-  the recipe's `config` keeps it closed.
+  the recipe's `config` keeps it closed. This PC plays it through Steam Family Sharing (another account owns it):
+  since 2026-10-16 every offline start stops at "Steam is currently in Offline Mode. For the first launch go in Online
+  Mode", and online starts fail with "shared library locked" while the owner plays. Run it with `-SteamOnline` when
+  the library is free.
   Save ladder (`recipes\Wukong-save.json`, `ladders\Wukong.json`): the rung's save goes to slot 9
   (`ArchiveSaveFile.9.sav`). 게임 계속하기 loads the journey whose save date (inside the file, not the file time)
   is newest, so it never picks an old community save; the route is 게임 로딩 > the list (newest first; the
