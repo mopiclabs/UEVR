@@ -339,6 +339,7 @@ showing right now.
 | `{"phase": "exit"}` | from here the game quitting is expected (the harness counts the exit as a menu quit) |
 | `{"expect_exit": 60}` | wait for the process to end; still running afterwards = `EXIT_HANG` |
 | `{"shot": "name"}` / `{"note": "..."}` | save a screenshot / comment |
+| `{"fail": "why", "if": "x"}` | end the recipe as `MENU_FAIL` with this message when checkpoint x shows (a screen the route can't get past, e.g. locked content), instead of timing out later |
 | `"measure": true` / `"<label>"` / `false` on a step | its frame rate is measured (see "Frame rate"): `play` and `play_until` are, as `gameplay`, unless `false`; `true` = `gameplay` |
 
 Checkpoints compare a region of the live screenshot with the saved crop (grayscale, shifts up to `margin` px,
