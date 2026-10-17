@@ -1235,6 +1235,11 @@ class Pilot:
             raise Failed("exit_timeout", f"the game was still running {step['expect_exit']} s after quitting through the menu")
         elif "shot" in step:
             self.save_shot(step["shot"])
+        elif "fail" in step:
+            # with "if": a screen the route can't get past (locked content), named instead of timing out later
+            img, _ = self.grab()
+            self.save_shot("FAILED-fail", img)
+            raise Failed("blocked", step["fail"])
         else:
             raise Failed("recipe", f"unknown step {step}")
 
