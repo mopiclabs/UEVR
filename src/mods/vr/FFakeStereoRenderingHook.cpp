@@ -23803,6 +23803,124 @@ private:
     bool m_held{false};
 };
 
+// VR_NativeStereoFixSecondEyeCVars ("name:value,name:value", default empty): holds these cvars at the given values for
+// the Native Stereo Fix's second submission (the right eye) and puts the previous values back after it, like the Lumen
+// view-origin hold. Meant for scene-wide work the left eye's render already did this frame: the second submission runs
+// with the scene's frame count stepped back (decrement_frame_count), so amortized updates keyed on the frame number
+// (Lumen surface cache captures, Lumen direct lighting / radiosity update slices) redo the same slice for the right eye.
+// Only render-thread-safe cvars make sense here (the change has to reach the render thread in order with the
+// submission). Names and values are plain ASCII; unknown names are logged once and skipped.
+class SecondEyeCVarHold {
+public:
+    explicit SecondEyeCVarHold(const std::string& spec) {
+        if (spec.empty()) {
+            return;
+        }
+
+        for (const auto& [name, value] : parsed(spec)) {
+            auto* cvar = find_cvar(name);
+
+            if (cvar == nullptr) {
+                continue;
+            }
+
+            try {
+                const auto before = cvar->GetFloat();
+
+                if (cvar->Set(value.c_str())) {
+                    m_held.push_back({cvar, before});
+                }
+            } catch (...) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix] Setting a second-eye cvar threw");
+            }
+        }
+
+        if (!m_held.empty()) {
+            SPDLOG_INFO_ONCE("[NativeStereoFix] Second-eye cvar hold active: {}", spec);
+        }
+    }
+
+    ~SecondEyeCVarHold() {
+        for (auto it = m_held.rbegin(); it != m_held.rend(); ++it) {
+            try {
+                it->first->Set(format_value(it->second).c_str());
+            } catch (...) {
+            }
+        }
+    }
+
+    SecondEyeCVarHold(const SecondEyeCVarHold&) = delete;
+    SecondEyeCVarHold& operator=(const SecondEyeCVarHold&) = delete;
+
+private:
+    using Entry = std::pair<std::wstring, std::wstring>;
+
+    static std::wstring ascii_wide(std::string_view s) {
+        return std::wstring(s.begin(), s.end());
+    }
+
+    static std::wstring format_value(float value) {
+        if (std::isfinite(value) && value == std::floor(value) && std::fabs(value) < 2147483647.0f) {
+            return std::to_wstring((int64_t)value);
+        }
+
+        return std::to_wstring(value);
+    }
+
+    // Game thread only (begin_render_viewfamily_real), so plain statics are fine.
+    static const std::vector<Entry>& parsed(const std::string& spec) {
+        static std::string last_spec{};
+        static std::vector<Entry> entries{};
+
+        if (spec == last_spec) {
+            return entries;
+        }
+
+        last_spec = spec;
+        entries.clear();
+
+        size_t pos = 0;
+        while (pos <= spec.size()) {
+            const auto end = (std::min)(spec.find(',', pos), spec.size());
+            const auto item = std::string_view{spec}.substr(pos, end - pos);
+            const auto colon = item.find(':');
+
+            if (colon != std::string_view::npos && colon > 0 && colon + 1 < item.size()) {
+                entries.emplace_back(ascii_wide(item.substr(0, colon)), ascii_wide(item.substr(colon + 1)));
+            } else if (!item.empty()) {
+                SPDLOG_WARN("[NativeStereoFix] Ignoring second-eye cvar entry \"{}\" (expected name:value)", std::string{item});
+            }
+
+            pos = end + 1;
+        }
+
+        SPDLOG_INFO("[NativeStereoFix] Second-eye cvars: {} entr{} from \"{}\"", entries.size(), entries.size() == 1 ? "y" : "ies", spec);
+        return entries;
+    }
+
+    static sdk::IConsoleVariable* find_cvar(const std::wstring& name) {
+        static std::unordered_map<std::wstring, sdk::IConsoleVariable*> cache{};
+
+        if (const auto it = cache.find(name); it != cache.end()) {
+            return it->second;
+        }
+
+        sdk::IConsoleVariable* cvar{};
+        if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
+            auto* object = console_manager->find(name.c_str());
+            if (object != nullptr && object->AsCommand() == nullptr) {
+                cvar = static_cast<sdk::IConsoleVariable*>(object);
+            }
+        }
+
+        SPDLOG_INFO("[NativeStereoFix] Second-eye cvar {} {}", utility::narrow(name), cvar != nullptr ? "found" : "not found (skipped)");
+        cache.emplace(name, cvar);
+        return cvar;
+    }
+
+    std::vector<std::pair<sdk::IConsoleVariable*, float>> m_held{};
+};
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
 
@@ -25834,6 +25952,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     // The same Lumen view-origin hold for the second submission (see VR_NativeStereoFixLumenOriginRefreshFrames above).
     LumenViewOriginHold second_hold{hold_lumen_origin};
+
+    // VR_NativeStereoFixSecondEyeCVars: cvars held for the second submission only (SecondEyeCVarHold).
+    SecondEyeCVarHold second_eye_cvars{vr->get_native_stereo_fix_second_eye_cvars()};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {

@@ -706,6 +706,12 @@ public:
         return m_native_stereo_fix_lumen_origin_refresh_frames->value();
     }
 
+    // VR_NativeStereoFixSecondEyeCVars (default empty): "name:value,name:value", cvars held at these values for the
+    // Native Stereo Fix's second submission (the right eye) only and put back after it (see SecondEyeCVarHold).
+    const std::string& get_native_stereo_fix_second_eye_cvars() const {
+        return m_native_stereo_fix_second_eye_cvars->value();
+    }
+
     bool is_native_stereo_fix_texture_array_submit_enabled() const {
         if (uevr::nascar::is_target()) { return false; }
         const auto runtime = get_runtime();
@@ -1887,6 +1893,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), true) };
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
+    const ModString::Ptr m_native_stereo_fix_second_eye_cvars{ ModString::create(generate_name("NativeStereoFixSecondEyeCVars"), "") };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
@@ -2367,6 +2374,7 @@ public:
             *m_native_stereo_fix_preserve_secondary_pass,
             *m_native_stereo_fix_share_exposure,
             *m_native_stereo_fix_lumen_origin_refresh_frames,
+            *m_native_stereo_fix_second_eye_cvars,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_native_stereo_fix_pair_snapshot,
