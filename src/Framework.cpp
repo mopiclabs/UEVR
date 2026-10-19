@@ -183,7 +183,13 @@ bool should_suppress_openxr_rehook_guard() {
 
 void Framework::notify_render_activity() {
     const auto now = std::chrono::steady_clock::now();
-    std::scoped_lock _{ m_hook_monitor_mutex };
+    // Called from the render thread on every Slate draw while the present thread holds this mutex for its whole
+    // Present. Never wait for it here: a Present stuck behind the GPU must not take the render thread down with it,
+    // and while Present runs it refreshes m_last_present_time itself.
+    std::unique_lock lock{ m_hook_monitor_mutex, std::try_to_lock };
+    if (!lock.owns_lock()) {
+        return;
+    }
     m_last_present_time = now;
     m_last_message_time = now;
     m_last_chance_time = now + std::chrono::seconds(1);
@@ -209,17 +215,17 @@ UEVRSharedMemory::UEVRSharedMemory() {
 }
 
 void Framework::hook_monitor() {
-    if (!m_hook_monitor_mutex.try_lock()) {
+    std::unique_lock lock{ m_hook_monitor_mutex, std::try_to_lock };
+    if (!lock.owns_lock()) {
         // If this happens then we can assume execution is going as planned
-        // so we can just reset the times so we dont break something
+        // so we can just reset the times so we dont break something.
+        // Look again next tick rather than queueing behind Present: a Present stuck behind the GPU
+        // would otherwise take this watchdog down with it.
         m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         m_last_chance_time = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         m_has_last_chance = true;
-    } else {
-        m_hook_monitor_mutex.unlock();
+        return;
     }
-
-    std::scoped_lock _{ m_hook_monitor_mutex };
 
     if (g_framework == nullptr) {
         return;
@@ -689,7 +695,18 @@ Framework::~Framework() {
 }
 
 void Framework::run_imgui_frame(bool from_present) {
-    std::scoped_lock _{ m_imgui_mtx };
+    // The present thread holds m_imgui_mtx for its whole frame, GPU fence waits included. When the GPU is paused
+    // (a fullscreen mode switch that needs this thread's message pump to finish, a stalled compositor) a plain lock
+    // here parks the game thread for good and the pause never ends: skip this UI frame instead. Calls from the
+    // present thread already own the mutex (recursive) and never wait.
+    std::unique_lock lock{ m_imgui_mtx, std::defer_lock };
+    if (!lock.try_lock_for(std::chrono::milliseconds{1000})) {
+        static std::atomic<uint32_t> skipped{0};
+        if ((skipped.fetch_add(1) % 64) == 0) {
+            spdlog::warn("[Framework] ImGui frame skipped: the ImGui mutex has been held by another thread for over 1 s (from_present={}, skipped {})", from_present, skipped.load());
+        }
+        return;
+    }
 
     m_has_frame = false;
 
@@ -933,8 +950,15 @@ void Framework::on_frame_d3d12() {
         return;
     }
 
-    cmd_ctx->wait(INFINITE);
-    if (auto draw_data = ImGui::GetDrawData(); draw_data != nullptr) {
+    // Bounded: this thread holds the framework mutexes; a GPU that stays paused must not wedge it (see run_imgui_frame).
+    const bool cmd_ctx_ready = cmd_ctx->wait(2000);
+    if (!cmd_ctx_ready) {
+        static std::atomic<uint32_t> busy{0};
+        if ((busy.fetch_add(1) % 64) == 0) {
+            spdlog::warn("[Framework] ImGui command context not ready after 2 s, skipping this UI draw (count {})", busy.load());
+        }
+    }
+    if (auto draw_data = ImGui::GetDrawData(); cmd_ctx_ready && draw_data != nullptr) {
         std::scoped_lock _{ cmd_ctx->mtx };
         cmd_ctx->has_commands = true;
 

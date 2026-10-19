@@ -343,7 +343,9 @@ private:
 
     std::recursive_mutex m_input_mutex{};
     std::recursive_mutex m_config_mtx{};
-    std::recursive_mutex m_imgui_mtx{};
+    // Timed: the present thread holds it for its whole frame, GPU waits included, and the game thread must be able
+    // to give up on it (run_imgui_frame) instead of parking behind a stalled GPU.
+    std::recursive_timed_mutex m_imgui_mtx{};
     std::recursive_mutex m_patch_mtx{};
 
     HWND m_wnd{0};
