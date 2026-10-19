@@ -560,6 +560,14 @@ void OpenXR::on_system_properties_acquired(const XrSystemProperties& system_prop
     spdlog::info("[OpenXR] OpenXR system orientation: {}", system_properties.trackingProperties.orientationTracking);
     spdlog::info("[OpenXR] OpenXR system position: {}", system_properties.trackingProperties.positionTracking);
 
+    std::string system_name{system_properties.systemName};
+    std::transform(system_name.begin(), system_name.end(), system_name.begin(), ::toupper);
+    this->is_mopic_display = system_name.find("MOPIC") != std::string::npos;
+
+    if (this->is_mopic_display) {
+        spdlog::info("[OpenXR] Mopic 3D display detected");
+    }
+
     const auto should_check_vd = !this->ignore_vd_checks->value();
 
     if (should_check_vd && std::string_view{system_properties.systemName}.find("SteamVR/OpenXR") != std::string_view::npos) try {

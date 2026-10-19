@@ -282,6 +282,13 @@ private:
     std::array<bool, 3> m_frame_generation_cvar_refused{}; // Set() left the value unchanged: not retried
     std::chrono::steady_clock::time_point m_next_frame_generation_cvar_check{};
 
+    // VR_MopicForceWindowedFullscreen: see enforce_mopic_windowed_fullscreen().
+    void enforce_mopic_windowed_fullscreen(sdk::UGameEngine* engine);
+    std::chrono::steady_clock::time_point m_next_mopic_fullscreen_check{};
+    bool m_mopic_windowed_fullscreen_requested{false};
+    uint32_t m_mopic_windowed_fullscreen_rerequests{0};
+    uint32_t m_mopic_fullscreen_mode_cvar_sets{0};
+
     static inline std::mutex s_change_mutex{};
     static inline ChangeSnapshot s_change_snapshot{};
 

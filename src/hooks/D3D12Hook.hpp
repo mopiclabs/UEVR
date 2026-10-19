@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -123,6 +124,12 @@ public:
         return m_inside_present;
     }
 
+    // Whether the game's swap chain held its output in exclusive fullscreen at the last check, made on the presenting
+    // thread at most once a second (see CVarManager::enforce_mopic_windowed_fullscreen).
+    bool is_exclusive_fullscreen() const {
+        return m_exclusive_fullscreen.load(std::memory_order_relaxed);
+    }
+
     // The window of the swap chain the current or last Present UEVR handled went to (null when GetHwnd fails, as
     // for a composition swap chain).
     HWND get_present_window() const {
@@ -197,6 +204,8 @@ protected:
     bool m_is_phase_1{ true };
     bool m_inside_present{false};
     bool m_ignore_next_present{false};
+    std::atomic_bool m_exclusive_fullscreen{false};
+    std::chrono::steady_clock::time_point m_next_fullscreen_state_check{};
     std::atomic<D3D12DepthStencilObserver*> m_depth_stencil_observer{nullptr};
     std::atomic<D3D12ExecuteObserver*> m_execute_observer{nullptr};
     std::unique_ptr<PointerHook> m_execute_command_lists_hook{};
