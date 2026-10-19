@@ -396,7 +396,8 @@ private:
                 }
 
                 for (auto& texture_ctx : it.second.texture_contexts) {
-                    texture_ctx->commands.wait(INFINITE);
+                    // Bounded: runs on the present thread under the OpenXR mutex; a paused GPU must not wedge it.
+                    texture_ctx->commands.wait(2000);
                 }
             }
         }

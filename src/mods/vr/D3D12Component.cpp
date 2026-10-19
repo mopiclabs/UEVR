@@ -1155,7 +1155,10 @@ void D3D12Component::wait_for_ue58_slate_ui_consumers() {
         return;
     }
 
-    WaitForSingleObject(event, INFINITE);
+    // Bounded: a paused GPU must not wedge the present thread (see Framework::run_imgui_frame).
+    if (WaitForSingleObject(event, 2000) != WAIT_OBJECT_0) {
+        SPDLOG_WARN("[UE5.8][SlateUI] consumer fence not signalled within 2 s during reset, continuing");
+    }
     CloseHandle(event);
 }
 
