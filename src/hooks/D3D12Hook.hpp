@@ -125,7 +125,7 @@ public:
     }
 
     // Whether the game's swap chain held its output in exclusive fullscreen at the last check, made on the presenting
-    // thread at most once a second (see CVarManager::enforce_mopic_windowed_fullscreen).
+    // thread at most every 250 ms (see CVarManager::enforce_mopic_windowed_fullscreen).
     bool is_exclusive_fullscreen() const {
         return m_exclusive_fullscreen.load(std::memory_order_relaxed);
     }

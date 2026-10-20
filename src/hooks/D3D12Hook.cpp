@@ -967,7 +967,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     // Asked on the presenting thread: from the game thread the call could wait on the swap chain while a Present is
     // stuck in a display mode switch that waits for the game thread's message pump.
     if (const auto now = std::chrono::steady_clock::now(); now >= d3d12->m_next_fullscreen_state_check) {
-        d3d12->m_next_fullscreen_state_check = now + std::chrono::seconds{1};
+        d3d12->m_next_fullscreen_state_check = now + std::chrono::milliseconds{250};
 
         BOOL is_fullscreen = FALSE;
 
