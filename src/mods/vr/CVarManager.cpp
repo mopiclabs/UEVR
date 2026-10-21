@@ -867,6 +867,7 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
         }
     }
 
+    enforce_mopic_windowed_fullscreen(engine);
     enforce_frame_generation_cvars();
 }
 
@@ -988,6 +989,186 @@ void CVarManager::enforce_frame_generation_cvars() {
             SPDLOG_WARN("[FrameGen] reading or setting {} threw", utility::narrow(name));
         }
     }
+}
+
+// VR_MopicForceWindowedFullscreen: on Mopic's 3D display the game must not run in exclusive fullscreen. The display is
+// a desktop monitor, and an exclusive swap chain makes DXGI switch it to the game's resolution whenever the game window
+// gets the focus back (TEKKEN 8 demo, its own FullscreenMode=0 at 2560x1440: the 4K Mopic monitor ran at 2560x1440@60
+// after every focus return). That breaks the weave, and the 2026-10-19 hang started in such a switch.
+//
+// The game's settings object (UGameUserSettings) is set to windowed fullscreen in memory (FullscreenMode and
+// PreferredFullscreenMode 1), so whenever the game applies its settings again it asks for windowed fullscreen itself.
+// TEKKEN re-applies them at every screen load (title -> menu, stage select -> VS screen -> match; Mopic test PC,
+// 2026-10-20) with the game window in the foreground all along, and a one-shot request lost to each of those. It is
+// put back on every check, in case the game reloads its settings. UEVR writes no file, but a game that saves its
+// settings (TEKKEN does on every normal exit) then stores windowed fullscreen in GameUserSettings.ini.
+//
+// The engine is also asked for that mode right away, at the game's own resolution, as the console commands
+// "r.FullScreenMode 1" and "r.setres <W>x<H>wf" would: changing the settings object alone does not move a viewport that
+// is already exclusive. r.FullScreenMode alone is not enough either: the viewport keeps its exclusive swap chain until
+// the game asks for a mode again (10-19 tests: setting the cvar left 12 of 12 focus transitions switching the monitor,
+// both commands 0 of 10).
+//
+// The swap chain itself is left alone: UE checks the swap chain's fullscreen state against its own mode and asks for
+// exclusive fullscreen again when they differ (that is how it re-enters it on focus return), so refusing
+// SetFullscreenState(TRUE) in the DXGI hook would fight the engine on every frame instead of changing what it wants.
+// The swap chain's state (sampled on the presenting thread) tells the guard that the game went exclusive anyway; it
+// asks again then. It stops asking only after three requests in a row left the swap chain exclusive, and starts again
+// once the swap chain has left exclusive fullscreen.
+void CVarManager::enforce_mopic_windowed_fullscreen(sdk::UGameEngine* engine) {
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now < m_next_mopic_fullscreen_check) {
+        return;
+    }
+
+    m_next_mopic_fullscreen_check = now + std::chrono::milliseconds{250};
+
+    const auto& vr = VR::get();
+
+    if (engine == nullptr || vr == nullptr || !vr->should_force_mopic_windowed_fullscreen()) {
+        return;
+    }
+
+    const auto exec = [engine](const std::string& command) {
+        CVarManager::record_global_command(command, "mopic_windowed_fullscreen");
+        engine->exec(utility::widen(command));
+    };
+
+    // Held at 1 for the whole session, so a fullscreen request that goes by it picks windowed fullscreen.
+    std::optional<int32_t> fullscreen_mode_cvar{};
+
+    if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
+        if (const auto variable = (sdk::IConsoleVariable*)console_manager->find(L"r.FullScreenMode"); variable != nullptr) {
+            try {
+                const auto before = variable->GetInt();
+                fullscreen_mode_cvar = before;
+
+                if (before != 1) {
+                    exec("r.FullScreenMode 1");
+
+                    const auto count = ++m_mopic_fullscreen_mode_cvar_sets;
+
+                    // A game that keeps putting it back would fill the log otherwise.
+                    if (count <= 3 || count % 60 == 0) {
+                        SPDLOG_INFO("[Mopic] r.FullScreenMode {} -> {} (time {}; VR_MopicForceWindowedFullscreen)",
+                            before, variable->GetInt(), count);
+                    }
+                }
+            } catch (...) {
+                SPDLOG_WARN_ONCE("[Mopic] Reading or setting r.FullScreenMode threw");
+            }
+        }
+    }
+
+    // The game's own settings (UGameUserSettings): FullscreenMode 0 = exclusive, 1 = windowed fullscreen, 2 = windowed.
+    std::optional<int32_t> settings_mode{};
+    uint32_t width{};
+    uint32_t height{};
+
+    if (const auto settings = (sdk::UObject**)engine->get_property_data(L"GameUserSettings"); settings != nullptr && *settings != nullptr) {
+        if (const auto mode = (int32_t*)(*settings)->get_property_data(L"FullscreenMode"); mode != nullptr) {
+            settings_mode = *mode;
+
+            if (*mode == 0) {
+                *mode = 1;
+
+                if (const auto preferred = (int32_t*)(*settings)->get_property_data(L"PreferredFullscreenMode");
+                    preferred != nullptr && *preferred == 0)
+                {
+                    *preferred = 1;
+                }
+
+                const auto count = ++m_mopic_settings_mode_sets;
+
+                if (count <= 3 || count % 60 == 0) {
+                    SPDLOG_INFO("[Mopic] The game's settings say exclusive fullscreen: FullscreenMode 0 -> 1 in memory "
+                        "(time {}; VR_MopicForceWindowedFullscreen)", count);
+                }
+            }
+        }
+
+        const auto size_x = (uint32_t*)(*settings)->get_property_data(L"ResolutionSizeX");
+        const auto size_y = (uint32_t*)(*settings)->get_property_data(L"ResolutionSizeY");
+
+        if (size_x != nullptr && size_y != nullptr) {
+            width = *size_x;
+            height = *size_y;
+        }
+    }
+
+    bool swapchain_exclusive = false;
+
+    if (g_framework->is_dx12()) {
+        const auto& hook = g_framework->get_d3d12_hook();
+        swapchain_exclusive = hook != nullptr && hook->is_exclusive_fullscreen();
+    } else if (g_framework->is_dx11()) {
+        const auto& hook = g_framework->get_d3d11_hook();
+        swapchain_exclusive = hook != nullptr && hook->is_exclusive_fullscreen();
+    }
+
+    // As the game had it before this check.
+    const auto settings_exclusive = settings_mode.has_value() && *settings_mode == 0;
+
+    SPDLOG_INFO_ONCE("[Mopic] Windowed fullscreen guard on: r.FullScreenMode was {}, the game's FullscreenMode={} at {}x{}, "
+        "swap chain exclusive={} (VR_MopicForceWindowedFullscreen)",
+        fullscreen_mode_cvar.has_value() ? std::to_string(*fullscreen_mode_cvar) : std::string{"not found"},
+        settings_mode.has_value() ? std::to_string(*settings_mode) : std::string{"?"}, width, height, swapchain_exclusive);
+
+    // The first check after a request (the settle time below has passed): still exclusive means it did not take.
+    if (!swapchain_exclusive) {
+        m_mopic_windowed_fullscreen_failed_requests = 0;
+    } else if (m_mopic_windowed_fullscreen_request_pending) {
+        ++m_mopic_windowed_fullscreen_failed_requests;
+    }
+
+    m_mopic_windowed_fullscreen_request_pending = false;
+
+    if (!settings_exclusive && !swapchain_exclusive) {
+        return;
+    }
+
+    if (m_mopic_windowed_fullscreen_failed_requests >= 3) {
+        const auto count = ++m_mopic_windowed_fullscreen_give_ups;
+
+        if (count == 1 || count % 240 == 0) {
+            SPDLOG_WARN("[Mopic] The game's swap chain stayed in exclusive fullscreen after {} windowed fullscreen requests "
+                "in a row; not asking again until it leaves it (VR_MopicForceWindowedFullscreen)",
+                m_mopic_windowed_fullscreen_failed_requests);
+        }
+
+        return;
+    }
+
+    m_mopic_windowed_fullscreen_give_ups = 0;
+
+    // No settings object: the size of the game's back buffer.
+    if (width == 0 || height == 0) {
+        const auto rt_size = g_framework->get_rt_size();
+        width = (uint32_t)rt_size.x;
+        height = (uint32_t)rt_size.y;
+    }
+
+    if (width == 0 || height == 0) {
+        return;
+    }
+
+    const auto command = fmt::format("r.setres {}x{}wf", width, height);
+    const auto count = ++m_mopic_windowed_fullscreen_requests;
+
+    if (count <= 10 || count % 60 == 0) {
+        SPDLOG_INFO("[Mopic] The game {} exclusive fullscreen (FullscreenMode={}, swap chain exclusive={}); asking for "
+            "windowed fullscreen: {} (time {}; VR_MopicForceWindowedFullscreen)",
+            count == 1 ? "uses" : "went back to",
+            settings_mode.has_value() ? std::to_string(*settings_mode) : std::string{"?"},
+            swapchain_exclusive, command, count);
+    }
+
+    exec(command);
+    m_mopic_windowed_fullscreen_request_pending = true;
+
+    // The engine applies the new mode on a later tick; give it time before the swap chain's state counts again.
+    m_next_mopic_fullscreen_check = std::chrono::steady_clock::now() + std::chrono::seconds{2};
 }
 
 void CVarManager::on_draw_ui() {

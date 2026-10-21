@@ -651,6 +651,17 @@ HRESULT WINAPI D3D11Hook::present(IDXGISwapChain* swap_chain, UINT sync_interval
     d3d11->m_inside_present = true;
     d3d11->m_present_wnd = swap_desc.OutputWindow;
 
+    // See D3D12Hook::present_internal.
+    if (const auto now = std::chrono::steady_clock::now(); now >= d3d11->m_next_fullscreen_state_check) {
+        d3d11->m_next_fullscreen_state_check = now + std::chrono::milliseconds{250};
+
+        BOOL is_fullscreen = FALSE;
+
+        if (SUCCEEDED(swap_chain->GetFullscreenState(&is_fullscreen, nullptr))) {
+            d3d11->m_exclusive_fullscreen = is_fullscreen != FALSE;
+        }
+    }
+
     if (d3d11->m_swapchain_0 == nullptr) {
         d3d11->m_swapchain_0 = swap_chain;
         d3d11->m_swap_chain = swap_chain;
