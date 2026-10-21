@@ -108,6 +108,7 @@ void test_shared_trampoline_page() {
     Page first, second, shared;
     std::recursive_mutex monitor;
     int unguarded_nx{};
+    int unguarded_serialized{};
     constexpr int iterations = 30;
 
     for (const bool guarded : {false, true}) {
@@ -128,7 +129,13 @@ void test_shared_trampoline_page() {
                     std::scoped_lock lock{monitor};
                     safetyhook::trap_threads(first.data, shared.data, 5, [&] {
                         a_entered.set_value();
-                        wait_ready(b_ready);
+                        if (guarded) {
+                            wait_ready(b_ready);
+                        } else if (b_ready.wait_for(200ms) != std::future_status::ready) {
+                            // SafetyHook holds protection_change_mutex() across every hook write, so the
+                            // unguarded installation cannot start its write until this one has restored.
+                            ++unguarded_serialized;
+                        }
                     });
                     a_restored.store(true, std::memory_order_release);
                 }
@@ -170,7 +177,12 @@ void test_shared_trampoline_page() {
             require(!safetyhook::has_protection_override(), "no global protection override is introduced");
         }
     }
+    // SafetyHook serializes protection changes itself now, so even the unguarded control never overlaps two writes
+    // on the shared page and never leaves it non-executable.
+    require(unguarded_serialized == iterations, "SafetyHook serializes unguarded hook writes");
+    require(unguarded_nx == 0, "unguarded control leaves the shared page executable");
     std::cout << "Unguarded NX observations: " << unguarded_nx << '/' << iterations
+              << "; unguarded writes serialized by SafetyHook: " << unguarded_serialized << '/' << iterations
               << "; guarded executable restores: " << iterations << '/' << iterations << '\n';
 }
 } // namespace
