@@ -751,6 +751,13 @@ public:
         return m_native_stereo_fix_disable_frame_generation->value() && is_native_stereo_fix_enabled();
     }
 
+    // VR_MopicForceWindowedFullscreen (default on): on Mopic's 3D display CVarManager keeps the game out of exclusive
+    // fullscreen (see CVarManager::enforce_mopic_windowed_fullscreen).
+    bool should_force_mopic_windowed_fullscreen() const {
+        const auto openxr = m_openxr.get();
+        return m_mopic_force_windowed_fullscreen->value() && openxr != nullptr && openxr->is_mopic_display;
+    }
+
     // VR_SubmitOncePerEngineFrame (default on): see should_skip_duplicate_present().
     bool is_submit_once_per_engine_frame_enabled() const {
         return m_submit_once_per_engine_frame->value();
@@ -1667,6 +1674,7 @@ private:
     const ModToggle::Ptr m_ghosting_fix_bootstrap_view_states{ ModToggle::create(generate_name("GhostingFixBootstrapViewStates"), false) };
     // Version of the Mopic config defaults this config.txt has been migrated to (see Mods::reload_config).
     const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 1, true) };
+    const ModToggle::Ptr m_mopic_force_windowed_fullscreen{ ModToggle::create(generate_name("MopicForceWindowedFullscreen"), true) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), true) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
@@ -1995,6 +2003,7 @@ public:
             *m_ghosting_fix,
             *m_ghosting_fix_bootstrap_view_states,
             *m_mopic_config_version,
+            *m_mopic_force_windowed_fullscreen,
             *m_native_stereo_fix,
             *m_native_stereo_fix_same_pass,
             *m_native_stereo_fix_preserve_secondary_pass,

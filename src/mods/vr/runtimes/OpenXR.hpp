@@ -450,6 +450,8 @@ public:
     uint32_t last_applied_resolution_width{};
     uint32_t last_applied_resolution_height{};
     bool push_dummy_projection{ false };
+    // The system is Mopic's 3D display ("Monado: MOPIC 3D Display"), a desktop monitor rather than a headset.
+    std::atomic_bool is_mopic_display{false};
     bool ever_submitted{false};
     bool has_valid_projection_data{false};
     std::mutex everspace2_pose_capture_mtx{};

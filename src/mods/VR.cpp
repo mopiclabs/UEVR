@@ -9799,6 +9799,13 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
     if (selected_page == PAGE_COMPATIBILITY) {
         ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
         if (ImGui::TreeNode("Compatibility Options")) {
+            m_mopic_force_windowed_fullscreen->draw("Mopic: Keep the Game in Windowed Fullscreen");
+            ImGui::TextWrapped(
+                "Default on, Mopic 3D display only. Asks the game for windowed fullscreen at its own resolution "
+                "(r.FullScreenMode 1, r.setres <W>x<H>wf, and its in-memory settings) when it uses exclusive fullscreen, "
+                "which switches the Mopic monitor's display mode on every focus change and screen load. UEVR writes no "
+                "file, but a game that saves its settings on exit then keeps windowed fullscreen. Turning it off stops "
+                "the guard; a mode it already set stays until the game restarts.");
             m_compatibility_ahud->draw("AHUD UI Compatibility");
             m_compatibility_skip_uobjectarray_init->draw("Skip UObjectArray Init");
             m_compatibility_skip_pip->draw("Skip PostInitProperties");
