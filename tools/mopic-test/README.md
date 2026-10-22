@@ -56,6 +56,7 @@ powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game <pr
 | `-InjectDelay <s>` | late injection (inject this many seconds after the game started) |
 | `-SaveFile <path> [-SaveAs <name>]` | before each run, copy this save over the file the recipe's `save_slot` names (`-SaveAs`: another file name in that folder), stamped with the current time so Steam Cloud keeps it. The file there before goes to `<run>\save-before\`, the file after the run (also after a crash or a hang) to `<run>\save-after\`; source, sha256 and target are in result.json / summary.txt. Nothing in the save folder is deleted. A relative path is tried from the current folder, then from `tools\mopic-test`. A failed install makes that run `HARNESS_ERROR` without launching the game. |
 | `-SaveSlot <file>` | with `-SaveFile`: the file it replaces, with `save_slot`'s placeholders (`"{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"`), instead of the recipe's `save_slot`; also works without a recipe (discovery with `-WaitForExit`) |
+| `-NoSave` | install no save, not even the recipe's `save_default`: the run plays the game's own progress as it is (run-ladder's rungs without `save`). Not with `-SaveFile` / `-SaveSlot` / `-SaveAs` |
 | `-RecipeVars "k=v;k2=v2"` | values for the recipe's `vars` (`${k}` in its steps; gamepilot `run --var k=v`). A name the recipe doesn't declare, or a declared var without a default that isn't given, stops the harness before the first run. Values can't contain `;`. |
 | `-GameIni "file\|Section\|Key=Value;Key2=Value2"` | the game's own settings for this run only (frame generation, a cvar in Engine.ini): `file` is a file name in the game's config folder (where its GameUserSettings.ini is), or a full path with `save_slot`'s placeholders; an entry without `file\|` keeps the previous file (the first defaults to GameUserSettings.ini), one with only `Key=Value` the previous section too; the value is everything after the first `=` (quotes, `\|`, parentheses), no `;`. A recipe's `game_ini` does the same. Each file is copied to `runs\game-ini-pending\` (with a journal) and `<run>\game-ini-before\` before it changes, keeps its encoding, line breaks and every other line, and goes back byte for byte once the game is gone (also after a crash or a hang; its time and attributes too, sha256 checked); the file as the game left it is in `<run>\game-ini-after\`. A harness that dies in between is undone by the next harness start, which stops that run's game first; a file that couldn't be put back is retried before the next run's change, and while that fails the run is `HARNESS_ERROR` without touching anything (the pending copies are the only originals). A file that wouldn't be written back byte for byte unchanged (UTF-16 without its BOM, bytes its encoding doesn't map back) is refused before anything is copied. A section that appears twice counts as one, as in UE. result.json `game_ini` has each key's value before and after the run; a value the game changed is a WARN note. Not with `-KeepGame`. |
 | `-MopicSbs` | monado-service runs with `MOPIC_MODE=sbs`: the pilot reads a `"source": "mopic"` recipe's screens from the left eye (gamepilot `--source mopic-sbs`) |
@@ -78,7 +79,9 @@ runs a save ladder: one harness run per rung of `ladders\<Game>.json`, each from
 one), its recipe (exists, has a `save_slot`, declares the rung's vars, gets every var it has no default for). It
 stops after a rung that ended `HARNESS_ERROR` or `NO_VR` (the runs after it wouldn't be valid tests; `-StopOn`
 sets the list). A rung whose harness wrote no result.json is a `HARNESS_ERROR` row with the harness's error
-message. Other rung fields (notes, descriptions) are ignored.
+message. Other rung fields (notes, descriptions) are ignored. A rung without `save` runs with `-NoSave`: it plays
+the game's own progress as it is (demos, games whose progress is several files), also when its recipe has a
+`save_default`; its recipe needs no `save_slot`.
 
 ```
 {"game": "Wukong", "recipe": "Wukong-save",
@@ -313,8 +316,8 @@ come from one submitted frame, so they normally change in the same refresh. `ana
   preset's install folder), `{localappdata}`, `{appdata}`, `{documents}`. The folder has to exist already.
   `-SaveFile` without a `save_slot` (or `-SaveSlot`) is an error.
 - `save_default`: the `-SaveFile` (relative to this folder) for runs that give none, for a recipe that only works
-  from one save (`Wukong-shrine`: the post-game save at the Zodiac Village shrine). Without it a run loads whatever
-  an earlier run left in the slot.
+  from one save (`Wukong-shrine`: the post-game save at the Zodiac Village shrine; `Wukong-still`: ladder rung
+  1.0). Without it a run loads whatever an earlier run left in the slot. `-NoSave` skips it.
 - `vars`: `{"play_s": 120, "boss": null}`, the names the steps may use as `${name}`, with their defaults (`null`:
   no default, it must be given). `--var name=value` (`-RecipeVars`) sets one; the value is read as JSON when it
   parses (`180`, `[110, 305]`, `true`, `["hud", "loading"]`), else as text. A step string that is only `${name}`

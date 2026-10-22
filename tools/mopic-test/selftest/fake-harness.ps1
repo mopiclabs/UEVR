@@ -5,6 +5,7 @@ param(
     [string]$Game = "",
     [string]$Recipe = "",
     [string]$SaveFile = "",
+    [switch]$NoSave,
     [string]$RecipeVars = "",
     [int]$Runs = 1,
     [string]$EngineDir = "",
@@ -17,7 +18,7 @@ foreach ($pair in ($RecipeVars -split ";")) { if ($pair -match '^([^=]+)=(.*)$')
 $verdict = $(if ($vars.ContainsKey("verdict")) { $vars["verdict"] } else { "PASS" })
 $nsf = $(if ($vars.ContainsKey("nsf")) { [int]$vars["nsf"] } else { 2 })
 # record exactly what the ladder passed, for the self-test to check
-$received = [ordered]@{ Game = $Game; Recipe = $Recipe; SaveFile = $SaveFile; RecipeVars = $RecipeVars; Runs = $Runs; EngineDir = $EngineDir; Label = $Label; save_exists = (Test-Path -LiteralPath $SaveFile) }
+$received = [ordered]@{ Game = $Game; Recipe = $Recipe; SaveFile = $SaveFile; NoSave = [bool]$NoSave; RecipeVars = $RecipeVars; Runs = $Runs; EngineDir = $EngineDir; Label = $Label; save_exists = ($SaveFile -ne "" -and (Test-Path -LiteralPath $SaveFile)) }
 if ($vars.ContainsKey("nores")) {
     Write-Host "fake harness: no result"
     throw "fake harness refused $Label (nores)"
@@ -30,11 +31,11 @@ for ($run = 1; $run -le $Runs; $run++) {
     for ($i = 0; $i -lt $nsf; $i++) { $lines += "[2026-10-02 00:00:01.000] [UnrealVR] [info] [FFakeStereoRenderingHook.cpp:26313] [NativeStereoFix] state=active (validated right-eye resource submitted)" }
     $lines += "[2026-10-02 00:00:02.000] [UnrealVR] [info] [NativeStereoFix] state=learning"
     [System.IO.File]::WriteAllLines((Join-Path $runDir "log.txt"), [string[]]$lines)
-    $saveSize = (Get-Item -LiteralPath $SaveFile).Length
+    $saveSize = $(if ($SaveFile -ne "") { (Get-Item -LiteralPath $SaveFile).Length } else { 0 })
     $result = [ordered]@{
         verdict = $verdict; game = $Game; label = $Label; run = $run; exit_code = "0x00000000"
         recipe = $Recipe; recipe_vars = $RecipeVars
-        save = [ordered]@{ source = $SaveFile; after = [ordered]@{ size = $saveSize + 10; changed = $true; missing = $false } }
+        save = $(if ($SaveFile -ne "") { [ordered]@{ source = $SaveFile; after = [ordered]@{ size = $saveSize + 10; changed = $true; missing = $false } } } else { $null })
         pilot = [ordered]@{ state = "done"; reached = @("title", "main_menu", "hud") }
         perf = $(if ($verdict -eq "PASS") { [ordered]@{ label = "gameplay"; headline = [ordered]@{ kind = "vr"; fps = 47.78; low1_fps = 30.0; hitches = 2; hitch_per_min = 2.4; fg = $false; measured_s = 50.0 } } } else { $null })
         notes = @("fake note | with a pipe", "WARN: PostInitProperties slot not found (filtered)")
@@ -42,7 +43,7 @@ for ($run = 1; $run -le $Runs; $run++) {
     }
     $result | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $runDir "result.json") -Encoding UTF8
     Write-Host "$verdict  $Game/$Label run $run"
-    Write-Host "save after: $($saveSize + 10) B, changed"
+    if ($SaveFile -ne "") { Write-Host "save after: $($saveSize + 10) B, changed" }
 }
 if ($verdict -ne "PASS") { exit 1 }
 exit 0

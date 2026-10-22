@@ -12,13 +12,13 @@
 #    "rungs": [{"name": "...", "save": "<path relative to tools\mopic-test>", "vars": {"k": "v"}, "tier": 1}]}
 # "game" is the run-test.ps1 preset (default: -Game). A rung may name its own "recipe". "tier" defaults to 1;
 # -Tier N runs the rungs with tier <= N. A rung's "vars" go to run-test.ps1 -RecipeVars (null: the recipe's
-# default). A rung without "save" runs without -SaveFile: it plays the game's own progress as it is (demos, games
-# whose progress is several files). Before the first launch every selected rung is checked: its save exists (and
-# matches its "sha256", when it has one), its recipe exists, has a "save_slot" (rungs with a save) and declares the
-# rung's vars, and every var the recipe needs is given. Other fields (notes...) are ignored. Stops after the
-# first rung whose verdict is in -StopOn (HARNESS_ERROR, NO_VR: nothing after it would be a valid test). The VR fps /
-# 1% low / Hitches columns are each run's perf headline (result.json "perf", README "Frame rate"; " FG" = frame
-# generation on).
+# default). A rung without "save" runs with -NoSave: it plays the game's own progress as it is (demos, games whose
+# progress is several files), also when its recipe names a "save_default". Before the first launch every selected
+# rung is checked: its save exists (and matches its "sha256", when it has one), its recipe exists, has a
+# "save_slot" (rungs with a save) and declares the rung's vars, and every var the recipe needs is given. Other
+# fields (notes...) are ignored. Stops after the first rung whose verdict is in -StopOn (HARNESS_ERROR, NO_VR:
+# nothing after it would be a valid test). The VR fps / 1% low / Hitches columns are each run's perf headline
+# (result.json "perf", README "Frame rate"; " FG" = frame generation on).
 # Keep the PC unlocked and unused meanwhile.
 
 param(
@@ -259,7 +259,7 @@ try {
 foreach ($rung in $selected) {
     $rungNo++
     $harnessArgs = @("-ExecutionPolicy", "Bypass", "-File", $Harness, "-Game", $preset, "-Recipe", $rung.recipe)
-    if ($rung.save -ne "") { $harnessArgs += @("-SaveFile", $rung.save) }
+    if ($rung.save -ne "") { $harnessArgs += @("-SaveFile", $rung.save) } else { $harnessArgs += "-NoSave" }
     $harnessArgs += @("-Runs", "$Runs", "-Label", $rung.label)
     if ($rung.vars -ne "") { $harnessArgs += @("-RecipeVars", $rung.vars) }
     if ($EngineDir -ne "") { $harnessArgs += @("-EngineDir", $EngineDir) }

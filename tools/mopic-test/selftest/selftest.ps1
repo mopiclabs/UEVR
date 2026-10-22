@@ -575,6 +575,7 @@ if ($busy.Count -gt 0 -or $NoWindows) {
             @{ name = "-SaveFile that doesn't exist"; argv = @("-Recipe", $recipeOk, "-SaveFile", "C:\nope\x.sav"); msg = "*-SaveFile not found*" },
             @{ name = "-SaveAs without -SaveFile"; argv = @("-Recipe", $recipeOk, "-SaveAs", "a.sav"); msg = "*-SaveAs and -SaveSlot need -SaveFile*" },
             @{ name = "-SaveSlot without -SaveFile"; argv = @("-SaveSlot", "C:\x\a.sav"); msg = "*-SaveAs and -SaveSlot need -SaveFile*" },
+            @{ name = "-NoSave with -SaveFile"; argv = @("-Recipe", $recipeOk, "-SaveFile", $src, "-NoSave"); msg = "*-NoSave can't go with -SaveFile*" },
             @{ name = "-SaveAs with a path"; argv = @("-Recipe", $recipeOk, "-SaveFile", $src, "-SaveAs", "..\a.sav"); msg = "*plain file name*" },
             @{ name = "-SaveSlot without a folder"; argv = @("-SaveFile", $src, "-SaveSlot", "a.sav"); msg = "*needs a*dir*" },
             @{ name = "-SaveSlot with an unknown placeholder"; argv = @("-SaveFile", $src, "-SaveSlot", "C:\{nope}\a.sav"); msg = "*unknown placeholder {nope}*" },
@@ -608,6 +609,17 @@ if ($busy.Count -gt 0 -or $NoWindows) {
     $h = Invoke-Harness $baseNo @("-Recipe", $recipeOk, "-SaveFile", $src, "-SaveSlot", "$e2eSgDir\ArchiveSaveFile.8.sav") "selftest-e2e-slot2"
     $r = $h.results | Select-Object -First 1
     Check "e2e: -SaveSlot instead of the recipe's save_slot" ($r -and $r.save.target -eq $slot8) $h.text
+    # save_default: the -SaveFile when none is given; -NoSave (a ladder rung without "save") installs nothing
+    $recipeDefault = New-Recipe "e2e-recipe-default" $null
+    $rd = Read-Json $recipeDefault
+    $rd | Add-Member -NotePropertyName save_default -NotePropertyValue $rel
+    Write-Json $recipeDefault $rd
+    $h = Invoke-Harness $baseNo @("-Recipe", $recipeDefault) "selftest-e2e-default"
+    $r = $h.results | Select-Object -First 1
+    Check "e2e: the recipe's save_default installed without -SaveFile" ($r -and $r.save.source -eq $src -and $r.save.target -eq $slot9 -and $h.flat -like "*Save: the recipe's save_default*") (Show-Out $h)
+    $h = Invoke-Harness $baseNo @("-Recipe", $recipeDefault, "-NoSave") "selftest-e2e-nosave"
+    $r = $h.results | Select-Object -First 1
+    Check "e2e: -NoSave installs no save, not even save_default" ($r -and $null -eq $r.save -and $h.flat -like "*Save: -NoSave*" -and @($h.dirs | Where-Object { Test-Path -LiteralPath (Join-Path $_ "save-before") }).Count -eq 0) (Show-Out $h)
 
     Write-Host "   -- with the stand-in game"
     # vars with quotes, spaces, a trailing backslash, Chinese and an empty value reach the pilot as given
@@ -855,11 +867,12 @@ foreach ($case in $refusals) {
 $l = Invoke-Ladder (Join-Path $Work "ladder-refuse4.json") @("-DryRun")
 Check "ladder -DryRun only warns about a missing recipe" ($l.code -eq 0 -and $l.flat -like "*WARNING*recipe not found*") $l.text
 
-# a rung without "save" plays the game's own progress: no -SaveFile, and its recipe needs no save_slot
+# a rung without "save" plays the game's own progress: -NoSave (no -SaveFile, not even the recipe's save_default),
+# and its recipe needs no save_slot
 $noSaveLadder = Join-Path $Work "ladder-nosave.json"
 Write-Json $noSaveLadder ([ordered]@{ game = "Wukong"; recipe = $recipeLadderNoSlot; rungs = @([ordered]@{ name = "demo"; tier = 1 }) })
 $l = Invoke-Ladder $noSaveLadder @("-DryRun")
-Check "ladder: a rung without save dry-runs without -SaveFile" ($l.code -eq 0 -and $l.flat -like "*demo (tier 1) <- (no save: the game's own progress)*" -and $l.flat -notlike "*-SaveFile*") $l.text
+Check "ladder: a rung without save dry-runs with -NoSave, without -SaveFile" ($l.code -eq 0 -and $l.flat -like "*demo (tier 1) <- (no save: the game's own progress)*" -and $l.flat -like "*-Recipe $recipeLadderNoSlot -NoSave -Runs 1*" -and $l.flat -notlike "*-SaveFile*") $l.text
 $noSaveSha = Join-Path $Work "ladder-nosave-sha.json"
 Write-Json $noSaveSha ([ordered]@{ game = "Wukong"; recipe = $recipeLadderNoSlot; rungs = @([ordered]@{ name = "demo"; sha256 = ("0" * 64) }) })
 $l = Invoke-Ladder $noSaveSha @("-DryRun")
@@ -898,6 +911,9 @@ $rows2 = @(Get-Content -LiteralPath (Get-NewestLadder ".md").FullName -Encoding 
 Check "ladder -Runs 2: one row per run, exit 0 when all pass" ($rows2.Count -eq 2 -and $l.code -eq 0) (($rows2 -join " / ") + " exit $($l.code)")
 $recvCn = Get-RunResult "*-Wukong-lt2-ch4-four-r1"
 Check "ladder passed the Chinese save path intact, -Runs 2" ($recvCn.received.save_exists -and $recvCn.received.SaveFile -ceq $cnSave -and $recvCn.received.Runs -eq 2) ($recvCn.received | ConvertTo-Json -Compress)
+$l = Invoke-Ladder $noSaveLadder @("-Harness", $fakeHarness, "-RunsDir", $env:MOPIC_SELFTEST_RUNS, "-Label", "lt6")
+$recvNo = Get-RunResult "*-Wukong-lt6-demo-r1"
+Check "ladder passed -NoSave and no -SaveFile for a rung without save" ($l.code -eq 0 -and $recvNo -and $recvNo.received.NoSave -eq $true -and $recvNo.received.SaveFile -eq "") ($recvNo.received | ConvertTo-Json -Compress)
 
 # a rung whose harness writes no result (stops with an error): HARNESS_ERROR row with the message, stop
 $ladderNores = Join-Path $Work "ladder-nores.json"
