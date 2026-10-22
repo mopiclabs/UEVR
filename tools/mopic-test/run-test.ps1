@@ -245,6 +245,44 @@ function Get-SteamAccountId {
     return [uint64]$n
 }
 
+# SteamID64 of the account whose license the installed copy uses (appmanifest LastOwner). It differs from the
+# logged-in user for a game borrowed through Steam Family Sharing, which is locked while the owner plays and can stop
+# at its own "first launch in online mode" box when Steam is offline.
+function Get-SteamAppOwner([string]$appId) {
+    foreach ($lib in Get-SteamLibraries) {
+        $acf = Join-Path $lib "steamapps\appmanifest_$appId.acf"
+        if ((Test-Path $acf) -and ((Get-Content $acf -Raw) -match '"LastOwner"\s+"(\d+)"')) { return [uint64]$Matches[1] }
+    }
+    return $null
+}
+
+# Steam's own launch problems for this app since $since (logs\console_log.txt): a failed LaunchApp (AppError_N) or a
+# prompt still waiting for the user (a cloud conflict, ...). Steam answers its routine steps itself within a second.
+$SteamAppErrors = @{ "AppError_33" = "shared library locked: the Family Sharing owner is using their library" }
+function Get-SteamLaunchIssues([string]$appId, [DateTime]$since) {
+    $issues = @()
+    if ($appId -eq "") { return $issues }
+    $log = Join-Path @(Get-SteamLibraries)[0] "logs\console_log.txt"
+    $waiting = [ordered]@{}
+    foreach ($line in ((Read-Shared $log) -split "`n")) {
+        if ($line -notmatch "^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] GameAction \[AppID $appId, ActionID (\d+)\] : LaunchApp (.*)$") { continue }
+        $t = [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss", $null)
+        if ($t -lt $since.AddSeconds(-2)) { continue }
+        $action = $Matches[2]; $what = $Matches[3].Trim()
+        if ($what -match '^failed with (\S+)') {
+            $code = $Matches[1]
+            $why = if ($SteamAppErrors.ContainsKey($code)) { " ($($SteamAppErrors[$code]))" } else { "" }
+            $issues += "Steam: launch failed with $code$why"
+        } elseif ($what -match '^waiting for user response to (\S+) "([^"]*)"') {
+            $waiting[$action] = "$($Matches[1]) $($Matches[2])".Trim()
+        } elseif ($what -match '^continues with user response') {
+            $waiting.Remove($action)
+        }
+    }
+    foreach ($w in $waiting.Values) { $issues += "Steam: launch is waiting for a prompt the harness can't answer ($w)" }
+    return $issues
+}
+
 # Values for the placeholders in a recipe's save_slot "dir"; $null = not available on this PC / for this game
 function Get-SavePlaceholderValues([string]$gameDir) {
     $account = Get-SteamAccountId
@@ -1050,6 +1088,15 @@ if ($LaunchTarget -eq "") {
     if (-not $appId) { throw "Could not find the Steam app id for '$SteamInstallDir', pass -LaunchTarget" }
     $LaunchTarget = "steam://rungameid/$appId"
 }
+$SteamAppId = if ($LaunchTarget -match '^steam://rungameid/(\d+)') { $Matches[1] } else { "" }
+$SharedLicenseNote = ""
+if ($SteamAppId) {
+    $owner = Get-SteamAppOwner $SteamAppId
+    $account = Get-SteamAccountId
+    if ($owner -and $account -and $owner -ne ([uint64]76561197960265728 + [uint64]$account)) {
+        $SharedLicenseNote = "Steam: this game is borrowed through Family Sharing (owner $owner): locked while the owner plays, and offline mode can stop it at a 'first launch in online mode' box"
+    }
+}
 
 $PersistentDir = Join-Path $env:APPDATA "UnrealVRMod\$ProcessName"
 $LogPath = Join-Path $PersistentDir "log.txt"
@@ -1118,6 +1165,13 @@ if ($Recipe -ne "") {
     $unset = @($required | Where-Object { -not $given.Contains($_) })
     if ($unset.Count -gt 0) { throw "$Recipe needs -RecipeVars for $($unset -join ', ') (no default in its `"vars`")" }
     $PilotVarArgs = @(ConvertTo-PilotVarArgs $RecipeVars)
+}
+
+# A recipe that only works from one save names it in "save_default" (a path relative to this script's folder); it is
+# the -SaveFile when none is given, so a run doesn't start from whatever an earlier run left in the slot
+if ($SaveFile -eq "" -and $Recipe -ne "" -and $recipeJson.save_default) {
+    $SaveFile = [string]$recipeJson.save_default
+    Write-Host "Save: the recipe's save_default $SaveFile"
 }
 
 # -SaveFile: the save every run starts from, copied over the file -SaveSlot or the recipe's save_slot names
@@ -1596,6 +1650,12 @@ for ($run = 1; $run -le $Runs; $run++) {
         if ($verdict -in @("PASS", "MENU_FAIL") -and -not $NoInject -and ($counts["xr_instance_fail"] -gt 0 -or $counts["xr_ready"] -eq 0)) {
             $verdict = "NO_VR"
             if ($counts["xr_instance_fail"] -gt 0) { $notes += "OpenXR instance creation failed (runtime not available? check Mopic Hub / monado-service)" } else { $notes += "OpenXR session never reached READY" }
+        }
+        # a game that never got going: say when Steam itself stopped it
+        if ($verdict -in @("LAUNCH_FAILED", "NO_INJECTION", "NO_VR", "MENU_FAIL")) {
+            $steamIssues = @(Get-SteamLaunchIssues $SteamAppId $t0)
+            $notes += $steamIssues
+            if ($SharedLicenseNote -and ($steamIssues.Count -gt 0 -or $verdict -ne "MENU_FAIL")) { $notes += $SharedLicenseNote }
         }
 
         if ($verdict -eq "PASS") {

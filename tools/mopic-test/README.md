@@ -114,6 +114,11 @@ Verdicts:
 - `MENU_FAIL`: the pilot couldn't follow the recipe (a screen didn't show up, focus lost, PC locked) and UEVR was
   fine. `pilot-status.json`, `pilot\pilot.log` and `pilot\*.png` show where it stopped.
 - `NO_VR`: OpenXR never got ready (runtime not running), not a valid test. `NO_INJECTION`, `LAUNCH_FAILED`.
+  When Steam itself stopped the launch, these (and `MENU_FAIL`) carry a "Steam: ..." note from Steam's
+  `logs\console_log.txt`: a failed LaunchApp (`AppError_33` = shared library locked) or a prompt nobody answered
+  (`SynchronizingCloud cloudconflict` after a save swap with Steam online). A game borrowed through Family Sharing
+  (appmanifest `LastOwner` is another account) also gets a note: it is locked while the owner plays, and with Steam
+  offline it can stop at its own "first launch in online mode" box, which looks like `NO_VR` (UEVR keeps re-hooking).
 
 .NET's `Process.HasExited` is true as soon as the exit code is set, which is before DLL shutdown; the harness waits
 for the process handle so exits stuck in shutdown are caught (that's how UEVR's exit hang was found).
@@ -137,7 +142,7 @@ from these sources, all timed in QueryPerformanceCounter ns ("QPC ns": Python's 
 its summary is result.json's `perf`, its line goes into summary.txt:
 
 ```
-perf[gameplay 50.0s, settle 4.0s, excluded menu 10s]: VR 47.8 fps (1% low 30.0, p99 33.3 ms, 2 hitches, 1 stalls) | paced 60:60% 30:40% <=20:0% (max period 33 ms) | work 8.7 ms | display: new frame on 80% of refreshes (48.0/s), 1 dropped | game Present 120.0 fps (sim 60.0) | FG on | GPU 95% 2100 MHz 79C 120/160 W | hint paced
+perf[gameplay 50.0s, settle 4.0s, excluded menu 10s]: VR 47.8 fps (1% low 30.0, p99 33.3 ms, 2 hitches, 1 >=100 ms, 1 stalls) | paced 60:60% 30:40% <=20:0% (max period 33 ms) | work 8.7 ms | display: new frame on 80% of refreshes (48.0/s), 1 dropped | game Present 120.0 fps (sim 60.0) | FG on | GPU 95% 2100 MHz 79C 120/160 W | hint paced
 ```
 
 What is measured:
@@ -160,7 +165,8 @@ Fields (summary; `perf.json` has the same per segment):
 | --- | --- |
 | `vr.fps` | new engine frames submitted (`P` rows: an engine frame newer than every one submitted before) per measured second: the VR frame rate. monado paces in whole refreshes, so it moves in steps of 60 / 30 / 20. With 2x frame generation every engine frame is submitted twice (the second Present resubmits the previous one): those are `R`. perf-frames.csv files from before UEVR counted them as `R` are reclassified from their `frame` column (with a warning) |
 | `vr.frame_ms` {p50, p95, p99, p999, max}, `low1_fps`, `low01_fps` | wall-clock intervals between new-frame submits; 1% low = 1000 / p99; p99.9 only with 10000+ intervals |
-| `vr.hitches`, `hitch_per_min`, `stalls`, `hitches_in_capture` | interval >= max(50 ms, 2x median); stall >= 250 ms; hitches overlapping a pilot screen capture |
+| `vr.hitches`, `hitch_per_min`, `hitches_100`, `hitch100_per_min`, `stalls`, `hitches_in_capture` | hitch: new-frame interval >= 50 ms (`hitch_ms`), the same limit for every build; `hitches_100`: interval >= 100 ms; stall >= 250 ms; hitches overlapping a pilot screen capture. Compare builds with these two: the limit does not move with a build's own speed. Results from before 2026-10-21 have `hitches` against max(50 ms, 2x the run's median) and no `hitches_100`: a faster build got a lower limit and counted more hitches for the same long frames (Wukong wk60 vs the build before: 2.4x the hitches, the same >= 50 ms and >= 100 ms counts) |
+| `vr.hitches_rel`, `hitch_rel_ms` | the old relative rule: interval >= max(50 ms, 2x the run's median), `hitch_rel_ms` its limit. Only for a game below 25 fps, where 50 ms is an ordinary frame time; the perf line adds `(N rel)` to `hitches` when it differs (median above 25 ms). `flat` has `hitches`, `hitch_per_min`, `hitches_100`, `hitch100_per_min` and `hitches_rel` the same way |
 | `vr.paced_pct` {1, 2, 3+}, `s_at_3plus`, `period_max_ms` | time at the predicted display period of 1 / 2 / 3+ refreshes |
 | `vr.predicted_slot_ms` | steps of the predicted display time between new frames. monado's display timing is a synthetic 60 Hz grid: not what the viewer saw (that is `display`) |
 | `vr.work_ms` | median of (submit interval - time in xrWaitFrame): the game's cost, continuous where fps moves in steps. Null with a note unless the very-late sync runs on one thread (no async wait, xrWaitFrame at `vr_very_late_post_present`) and no frame cap applies |
@@ -172,7 +178,7 @@ Fields (summary; `perf.json` has the same per segment):
 | `framegen` | `on`, `measured`, `presents_per_tick`, `evidence`. Measured first: UEVR Present passes per engine tick (1.7 or more, not in AFR) and PresentMon frame types / presents per simulated frame; when one of them could be measured they decide (`measured` true). UEVR's Streamline frame-generation swapchain flag, nvngx_dlssg.dll loaded (UEVR, or the harness's module probe) and the log line only show it is available, and decide only without a measurement. `setting` from GameUserSettings.ini. Measured and flagged, never changed |
 | `capped` | the game's FrameRateLimit (and VSync without UEVR); with UEVR it binds when the limit, halved in AFR, is at most the refresh rate |
 | `mode`, `gpu`, `window`, `power`, `settings`, `render_config` | UEVR's mode (AFR, NSF, D3D12, sync stage, rendering method, the xrWaitFrame `callsite` of most frames, foreground share); GPU load, clock, temperature, power limit and throttle reasons; the game window's monitor and adapter; AC/battery and power mode; the settings fingerprint and what changed; a fingerprint of the run's `VR_*` config |
-| `compare` | `flat`: the newest PASS `-NoInject` runs with the same game, recipe, vars, label, settings, monitor and variant (perf-context.json `variant`: `-EyeSampler` on, the `-GameIni` / `game_ini` values; runs with them only compare among themselves) (`vr_vs_flat60` = VR fps / (min(flat, refresh) / 2 in AFR)); `prev_build`: the newest PASS runs of another UEVRBackend.dll with the same keys. With 3+ such runs and a spread under 10 %, a 5 % lower fps below their range, a 15 % higher p99, doubled hitches or 10 % more work is a `regression`: a `WARN: perf regression` note, never a verdict |
+| `compare` | `flat`: the newest PASS `-NoInject` runs with the same game, recipe, vars, label, settings, monitor and variant (perf-context.json `variant`: `-EyeSampler` on, the `-GameIni` / `game_ini` values; runs with them only compare among themselves) (`vr_vs_flat60` = VR fps / (min(flat, refresh) / 2 in AFR)); `prev_build`: the newest PASS runs of another UEVRBackend.dll with the same keys. With 3+ such runs and a spread under 10 %, a 5 % lower fps below their range, a 15 % higher p99, doubled hitches/min (and 2 more per minute), doubled >= 100 ms hitches/min (and 1 more per minute; both only against previous runs that have `hitches_100`) or 10 % more work is a `regression`: a `WARN: perf regression` note, never a verdict |
 | `headline` | what the matrix and ladder tables show: fps, 1% low, hitches, FG |
 
 PresentMon needs admin rights or the "Performance Log Users" group (add the account in `compmgmt.msc`, then sign
@@ -306,6 +312,9 @@ come from one submitted frame, so they normally change in the same refresh. `ana
   `HKCU\Software\Valve\Steam\ActiveProcess` ActiveUser), `{accountid}` (ActiveUser itself), `{gamedir}` (the
   preset's install folder), `{localappdata}`, `{appdata}`, `{documents}`. The folder has to exist already.
   `-SaveFile` without a `save_slot` (or `-SaveSlot`) is an error.
+- `save_default`: the `-SaveFile` (relative to this folder) for runs that give none, for a recipe that only works
+  from one save (`Wukong-shrine`: the post-game save at the Zodiac Village shrine). Without it a run loads whatever
+  an earlier run left in the slot.
 - `vars`: `{"play_s": 120, "boss": null}`, the names the steps may use as `${name}`, with their defaults (`null`:
   no default, it must be given). `--var name=value` (`-RecipeVars`) sets one; the value is read as JSON when it
   parses (`180`, `[110, 305]`, `true`, `["hud", "loading"]`), else as text. A step string that is only `${name}`
@@ -322,7 +331,7 @@ showing right now.
 
 | Step | Does |
 | --- | --- |
-| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead; only after a failed check. |
+| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead, `"move": [x, y]` hovers again (a couple of pixels off each time; a dialog still fading in can miss the first hover); only after a failed check. |
 | `{"wait_gone": "x", "timeout": 180, "for": 3}` | wait until checkpoint x (or any of a list) has not shown for `for` seconds in a row: a loading screen going away, so gameplay starts right when the player can move |
 | `{"seek": "x", "press": "down", "max": 8}` | press until x shows (menu cursors don't always start on the same item; menus usually wrap around, so `max` should cover one lap) |
 | `{"key": "enter", "times": 1}` / `{"keys": "up enter"}` / `{"click": [x, y]}` / `{"move": [x, y]}` / `{"wait": 2}` | input (`move` hovers: menus that highlight under the mouse) / pause |
@@ -331,6 +340,7 @@ showing right now.
 | `{"phase": "exit"}` | from here the game quitting is expected (the harness counts the exit as a menu quit) |
 | `{"expect_exit": 60}` | wait for the process to end; still running afterwards = `EXIT_HANG` |
 | `{"shot": "name"}` / `{"note": "..."}` | save a screenshot / comment |
+| `{"fail": "why", "if": "x"}` | end the recipe as `MENU_FAIL` with this message when checkpoint x shows (a screen the route can't get past, e.g. locked content), instead of timing out later |
 | `"measure": true` / `"<label>"` / `false` on a step | its frame rate is measured (see "Frame rate"): `play` and `play_until` are, as `gameplay`, unless `false`; `true` = `gameplay` |
 
 Checkpoints compare a region of the live screenshot with the saved crop (grayscale, shifts up to `margin` px,
@@ -423,7 +433,10 @@ can be stale. Check the top system function before concluding a thread is blocke
   after an update compiles shaders for about a minute. Title > 게임 계속하기 (never 새 게임) > shrine > walk (never E
   there) > Esc > 설정 > 게임 종료 > 바탕 화면으로 > 확인. A config saved by this line can have
   `FrameworkConfig_RememberMenuState=false`, which opens the UEVR menu over the title screen and swallows the keys;
-  the recipe's `config` keeps it closed.
+  the recipe's `config` keeps it closed. This PC plays it through Steam Family Sharing (another account owns it):
+  since 2026-10-16 every offline start stops at "Steam is currently in Offline Mode. For the first launch go in Online
+  Mode", and online starts fail with "shared library locked" while the owner plays. Run it with `-SteamOnline` when
+  the library is free.
   Save ladder (`recipes\Wukong-save.json`, `ladders\Wukong.json`): the rung's save goes to slot 9
   (`ArchiveSaveFile.9.sav`). 게임 계속하기 loads the journey whose save date (inside the file, not the file time)
   is newest, so it never picks an old community save; the route is 게임 로딩 > the list (newest first; the
@@ -439,7 +452,10 @@ can be stale. Check the top system function before concluding a thread is blocke
   spin, 1-4 spells, mouse camera; avoid E (shrine), Q (items), R (gourd), P (photo mode), M (map). After a run the
   game has re-saved slot 9 with today's date, which makes it the journey 게임 계속하기 loads (the plain `Wukong`
   recipe then plays the community save instead of the user's slot 2) until the next ladder run puts an old save
-  back. Shrine travel (`recipes\Wukong-shrine.json`, a sketch: its default path, Ch1 앞산, passed once through the harness; other rows untested): from the
+  back. After a cleared save has been played (the shrine recipes' post-game save), `ShareArchiveSaveFile.sav` grows
+  (90 -> 94 bytes) and the main menu opens a "다시 윤회하기" (NG+) explanation over it, which stops the plain `Wukong`
+  recipe at main_menu: put slot 9 and `ShareArchiveSaveFile.sav` back from a backup (2026-10-17:
+  runs\save-backups\wukong-before-cloudpick-20261017) before plain runs. Shrine travel (`recipes\Wukong-shrine.json`, a sketch: its default path, Ch1 앞산, passed once through the harness; other rows untested): from the
   post-game save, E at the Zodiac Village shrine > 축지 > region > area > shrine > E (a click only selects);
   `region_y` / `area_y` / `shrine_y` are the rows to click, listed in its notes. In the shrine menu only 축지 and
   나가기 are safe (rest, skills, crafting, shops and rematches change the save).

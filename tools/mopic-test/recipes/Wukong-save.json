@@ -51,7 +51,7 @@
     {"note": "a cleared save asks to start a new round (NG+): 취소 loads it as it is"},
     {"wait_for": ["new_round", "loading", "loading_band"], "timeout": 30},
     {"move": [777, 423], "if": "new_round"},
-    {"wait_for": "cancel_hover", "timeout": 10, "if": "new_round"},
+    {"wait_for": "cancel_hover", "timeout": 10, "if": "new_round", "move": [777, 423], "every": 2},
     {"click": [777, 423], "if": "new_round"},
     {"wait_for": ["loading", "loading_band"], "timeout": 60},
     {"note": "the loading screen (20-60 s) animates its bottom ornament (the icon and the swirls fade out, at times all of it for 5 s and more), so the band behind the tip title (loading_band, the same on every tip) decides; play starts when neither has shown for 5 s"},
