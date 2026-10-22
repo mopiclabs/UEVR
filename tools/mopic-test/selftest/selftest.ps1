@@ -80,7 +80,7 @@ $wanted = @("Get-SteamLibraries", "Find-SteamAppId", "Find-SteamGameDir", "Get-S
     "Save-MonadoSlice",
     "ConvertFrom-GameIniSpec", "ConvertFrom-GameIniBlock", "Resolve-GameIniPath", "Read-IniText", "Write-IniText", "Find-IniSection",
     "Find-IniKeyLines", "Split-IniLines", "Get-IniValue", "Set-IniValue", "Clear-ReadOnly", "Restore-GameIniFile", "Install-GameIni", "Restore-GameIni",
-    "Restore-PendingGameIni")
+    "Restore-PendingGameIni", "Get-LogTime", "Get-SteamLaunchIssues")
 foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
     if ($wanted -contains $fn.Name) { . ([scriptblock]::Create($fn.Extent.Text)) }
 }
@@ -131,6 +131,24 @@ Check "-RecipeVars names are case-sensitive" ($rv.PSBase.Count -eq 2 -and $rv["a
 # a dictionary's .Keys / .Count / .Values would give the entry of that name instead
 $pv = ConvertTo-PilotVarArgs "Keys=w a s d;Count=2;Values=3"
 Check "vars named Keys / Count / Values" (($pv -join " ") -eq '--var "Keys=w a s d" --var "Count=2" --var "Values=3"') ($pv -join " ")
+
+# UEVR's and Steam's log times read alike on every locale (with the current culture a Thai PC's calendar makes
+# 2026 the year 1483); a stand-in Steam folder for console_log.txt
+$steamFake = Join-Path $Work "steam"
+New-Item -ItemType Directory -Force -Path (Join-Path $steamFake "logs") | Out-Null
+[System.IO.File]::WriteAllLines((Join-Path $steamFake "logs\console_log.txt"), [string[]]@(
+    "[2026-10-22 11:00:00] GameAction [AppID 123, ActionID 6] : LaunchApp failed with AppError_9",
+    "[2026-10-22 12:00:00] GameAction [AppID 123, ActionID 7] : LaunchApp failed with AppError_33",
+    "[2026-10-22 12:00:01] GameAction [AppID 456, ActionID 8] : LaunchApp failed with AppError_33"))
+$SteamAppErrors = @{ "AppError_33" = "shared library locked" }
+$cultureBefore = [Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo("th-TH")
+    $lt = Get-LogTime "[2026-10-22 12:34:56.789] [UnrealVR] [info] x"
+    $si = @(& { function Get-SteamLibraries { return @($steamFake) }; Get-SteamLaunchIssues "123" ([DateTime]::new(2026, 10, 22, 11, 59, 0)) })
+} finally { [Threading.Thread]::CurrentThread.CurrentCulture = $cultureBefore }
+Check "Get-LogTime on a Thai-calendar locale" ($lt -eq [DateTime]::new(2026, 10, 22, 12, 34, 56, 789)) "$lt"
+Check "Get-SteamLaunchIssues on a Thai-calendar locale: this app's launch since the run started" ($si.Count -eq 1 -and $si[0] -eq "Steam: launch failed with AppError_33 (shared library locked)") ($si -join " / ")
 
 Write-Host "== 2b. run-test.ps1's frame-rate helpers"
 # QPC in ns as Python's time.perf_counter_ns() counts it (gamepilot's segments; UEVR's steady_clock alike)

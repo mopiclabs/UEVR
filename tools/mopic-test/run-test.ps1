@@ -186,7 +186,7 @@ function Get-MTime([string]$path) {
 
 function Get-LogTime([string]$line) {
     if ($line -match '^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]') {
-        return [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss.fff", $null)
+        return [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss.fff", [Globalization.CultureInfo]::InvariantCulture)
     }
     return $null
 }
@@ -267,7 +267,8 @@ function Get-SteamLaunchIssues([string]$appId, [DateTime]$since) {
     $waiting = [ordered]@{}
     foreach ($line in ((Read-Shared $log) -split "`n")) {
         if ($line -notmatch "^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] GameAction \[AppID $appId, ActionID (\d+)\] : LaunchApp (.*)$") { continue }
-        $t = [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss", $null)
+        # (invariant: with the current culture "yyyy" is a year of its calendar, 1483 on a Thai PC)
+        $t = [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
         if ($t -lt $since.AddSeconds(-2)) { continue }
         $action = $Matches[2]; $what = $Matches[3].Trim()
         if ($what -match '^failed with (\S+)') {
@@ -1658,7 +1659,9 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
         # a game that never got going: say when Steam itself stopped it
         if ($verdict -in @("LAUNCH_FAILED", "NO_INJECTION", "NO_VR", "MENU_FAIL")) {
-            $steamIssues = @(Get-SteamLaunchIssues $SteamAppId $t0)
+            # (outside the run's try: a throw here would skip the config restore)
+            $steamIssues = @()
+            try { $steamIssues = @(Get-SteamLaunchIssues $SteamAppId $t0) } catch { $notes += "Steam's console_log.txt not read: $($_.Exception.Message)" }
             $notes += $steamIssues
             if ($SharedLicenseNote -and ($steamIssues.Count -gt 0 -or $verdict -ne "MENU_FAIL")) { $notes += $SharedLicenseNote }
         }
