@@ -334,7 +334,7 @@ showing right now.
 
 | Step | Does |
 | --- | --- |
-| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead, `"move": [x, y]` hovers again (a couple of pixels off each time; a dialog still fading in can miss the first hover); only after a failed check. |
+| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead, `"move": [x, y]` hovers again (a couple of pixels off each time; a dialog still fading in can miss the first hover); only after a failed check. One of the three: a step with two is refused before the run starts. |
 | `{"wait_gone": "x", "timeout": 180, "for": 3}` | wait until checkpoint x (or any of a list) has not shown for `for` seconds in a row: a loading screen going away, so gameplay starts right when the player can move |
 | `{"seek": "x", "press": "down", "max": 8}` | press until x shows (menu cursors don't always start on the same item; menus usually wrap around, so `max` should cover one lap) |
 | `{"key": "enter", "times": 1}` / `{"keys": "up enter"}` / `{"click": [x, y]}` / `{"move": [x, y]}` / `{"wait": 2}` | input (`move` hovers: menus that highlight under the mouse) / pause |
