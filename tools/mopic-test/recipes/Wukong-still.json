@@ -3,7 +3,7 @@
   "process": "b1-Win64-Shipping",
   "source": "mopic",
   "max_width": 1280,
-  "notes": "Wukong-save without playing: loads the save and stands still for ${still_s} s (measured), then quits. For A/B runs that need the same picture every time (binocular brightness, rendering cvars).",
+  "notes": "Wukong-save without playing: loads the save and stands still for ${still_s} s (measured), then quits. For A/B runs that need the same picture every time (binocular brightness, rendering cvars). Without -SaveFile it loads save_default, ladder rung 1.0 (chapter 1 start, Forest of Wolves), the save every 10-05 run used.",
   "images": "Wukong-save",
   "config": {
     "FrameworkConfig_RememberMenuState": "true",
@@ -13,6 +13,7 @@
     "dir": "{gamedir}\\b1\\Saved\\SaveGames\\{sid64}",
     "file": "ArchiveSaveFile.9.sav"
   },
+  "save_default": "runs\\save-sets\\wukong\\minoshimameguri\\Black_Myth_Wukong_Save_Files-ef4cf4add44c69631afec74f8d9881b573420b5e\\All_Bosses\\1.0_黑风山_苍狼林_桃儿坡.sav",
   "vars": {
     "play_s": 45,
     "load_wait_s": 10,
@@ -35,7 +36,7 @@
         56,
         290,
         120,
-        180
+        34
       ],
       "threshold": 0.8
     },
@@ -304,7 +305,12 @@
     {
       "wait_for": "cancel_hover",
       "timeout": 10,
-      "if": "new_round"
+      "if": "new_round",
+      "move": [
+        777,
+        423
+      ],
+      "every": 2
     },
     {
       "click": [
