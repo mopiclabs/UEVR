@@ -7,6 +7,12 @@ bool is_executable(uint8_t* address) {
     return vm_is_executable(address);
 }
 
+std::recursive_mutex& protection_change_mutex() {
+    // Never destroyed: hooks owned by static objects can still be removed during static destruction.
+    static auto* mutex = new std::recursive_mutex{};
+    return *mutex;
+}
+
 UnprotectMemory::~UnprotectMemory() {
     if (m_address != nullptr) {
         vm_protect(m_address, m_size, m_original_protection);
@@ -22,6 +28,7 @@ UnprotectMemory& UnprotectMemory::operator=(UnprotectMemory&& other) noexcept {
         m_address = other.m_address;
         m_size = other.m_size;
         m_original_protection = other.m_original_protection;
+        m_lock = std::move(other.m_lock);
         other.m_address = nullptr;
         other.m_size = 0;
         other.m_original_protection = 0;
@@ -35,13 +42,15 @@ std::optional<UnprotectMemory> unprotect(uint8_t* address, size_t size) {
         return std::nullopt;
     }
 
+    // Kept until the protection is put back.
+    std::unique_lock lock{protection_change_mutex()};
     auto old_protection = vm_protect(address, size, VM_ACCESS_RWX);
 
     if (!old_protection) {
         return std::nullopt;
     }
 
-    return UnprotectMemory{address, size, old_protection.value()};
+    return UnprotectMemory{address, size, old_protection.value(), std::move(lock)};
 }
 
 } // namespace safetyhook

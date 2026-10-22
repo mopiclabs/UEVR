@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -82,6 +83,9 @@ public:
     auto get_swapchain_1() { return m_swapchain_1; }
     auto& get_last_depthstencil_used() { return m_last_depthstencil_used; }
 
+    // See D3D12Hook::is_exclusive_fullscreen.
+    bool is_exclusive_fullscreen() const { return m_exclusive_fullscreen.load(std::memory_order_relaxed); }
+
 protected:
     template<typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
@@ -93,6 +97,8 @@ protected:
     bool m_hooked{ false };
     bool m_inside_present{false};
     bool m_ignore_next_present{false};
+    std::atomic_bool m_exclusive_fullscreen{false};
+    std::chrono::steady_clock::time_point m_next_fullscreen_state_check{};
 
     std::optional<uint32_t> m_next_present_interval{};
 

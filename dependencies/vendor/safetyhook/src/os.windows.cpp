@@ -3,6 +3,7 @@
 #include <mutex>
 #include <atomic>
 #include <optional>
+#include <vector>
 
 #include "safetyhook/common.hpp"
 #include "safetyhook/utility.hpp"
@@ -183,7 +184,39 @@ struct TrapInfo {
     uint8_t* to_page_end;
     uint8_t* to;
     size_t len;
+
+    bool in_from(uint8_t* address) const { return address >= from && address < from + len; }
+    bool in_pages(uint8_t* address) const {
+        return (address >= from_page_start && address < from_page_end) ||
+               (address >= to_page_start && address < to_page_end);
+    }
 };
+
+// Whether the access that faulted would succeed now, i.e. the page's protection has been put back since the fault.
+bool access_allowed_now(const EXCEPTION_RECORD* record) {
+    if (record->NumberParameters < 2) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(reinterpret_cast<void*>(record->ExceptionInformation[1]), &mbi, sizeof(mbi)) == 0 ||
+        mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD) != 0) {
+        return false;
+    }
+
+    const auto protect = mbi.Protect & 0xff;
+
+    switch (record->ExceptionInformation[0]) {
+    case 8: // instruction fetch (DEP)
+        return protect == PAGE_EXECUTE || protect == PAGE_EXECUTE_READ || protect == PAGE_EXECUTE_READWRITE ||
+               protect == PAGE_EXECUTE_WRITECOPY;
+    case 1: // write
+        return protect == PAGE_READWRITE || protect == PAGE_WRITECOPY || protect == PAGE_EXECUTE_READWRITE ||
+               protect == PAGE_EXECUTE_WRITECOPY;
+    default: // read
+        return protect != PAGE_NOACCESS && protect != PAGE_EXECUTE;
+    }
+}
 
 class TrapManager final {
 public:
@@ -200,18 +233,6 @@ public:
     }
 
     bool valid() const { return m_trap_veh != nullptr; }
-
-    TrapInfo* find_trap(uint8_t* address) {
-        auto search = std::find_if(m_traps.begin(), m_traps.end(), [address](auto& trap) {
-            return address >= trap.second.from && address < trap.second.from + trap.second.len;
-        });
-
-        if (search == m_traps.end()) {
-            return nullptr;
-        }
-
-        return &search->second;
-    }
 
     TrapInfo* find_trap_page(uint8_t* address) {
         auto search = std::find_if(m_traps.begin(), m_traps.end(), [address](auto& trap) {
@@ -256,9 +277,31 @@ public:
         }
     }
 
+    // The write trap_threads is doing right now (a stack only if a protection callback ever nests one).
+    void begin_write(uint8_t* from) {
+        if (const auto entry = m_traps.find(from); entry != m_traps.end()) {
+            m_active.push_back(entry->second);
+        }
+    }
+
+    void end_write() {
+        if (!m_active.empty()) {
+            m_last = m_active.back();
+            m_active.pop_back();
+        }
+    }
+
 private:
     std::map<uint8_t*, TrapInfo> m_traps;
+    std::vector<TrapInfo> m_active;
+    std::optional<TrapInfo> m_last;
     PVOID m_trap_veh{};
+
+    static void redirect(PEXCEPTION_POINTERS exp, const TrapInfo& trap) {
+        for (size_t i = 0; i < trap.len; i++) {
+            fix_ip(exp->ContextRecord, trap.from + i, trap.to + i);
+        }
+    }
 
     static LONG CALLBACK trap_handler(PEXCEPTION_POINTERS exp) {
         auto exception_code = exp->ExceptionRecord->ExceptionCode;
@@ -273,25 +316,63 @@ private:
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        std::scoped_lock lock{mutex};
+        std::unique_lock lock{mutex};
         auto* faulting_address = reinterpret_cast<uint8_t*>(exp->ExceptionRecord->ExceptionInformation[1]);
-        auto* trap = instance->find_trap(faulting_address);
 
-        if (trap == nullptr) {
-            if (instance->find_trap_page(faulting_address) != nullptr) {
+        // A write in progress: a thread that reached the bytes being rewritten continues in their copy at `to`, one
+        // anywhere else on the unprotected pages waits until the protection is back.
+        for (auto it = instance->m_active.rbegin(); it != instance->m_active.rend(); ++it) {
+            if (it->in_from(faulting_address)) {
+                redirect(exp, *it);
                 return EXCEPTION_CONTINUE_EXECUTION;
-            } else {
-                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            if (it->in_pages(faulting_address)) {
+                return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
 
-        auto* ctx = exp->ContextRecord;
+        // No write of ours in progress there. Older registrations only ever match pages: their memory may have been
+        // freed and reused by another trampoline or mid hook stub, so redirecting into their `to` would run stale code.
+        const bool on_trap_page = instance->find_trap_page(faulting_address) != nullptr;
 
-        for (size_t i = 0; i < trap->len; i++) {
-            fix_ip(ctx, trap->from + i, trap->to + i);
+        if (!access_allowed_now(exp->ExceptionRecord)) {
+            if (!on_trap_page) {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            // Someone else may have the page unprotected for a moment (another hooking library patching next to one
+            // of ours): wait for it like before, but not forever. A page that stays inaccessible was left that way
+            // (TEKKEN 8 demo's boot freeze) and the fault goes on to the game's handlers instead of spinning.
+            thread_local uint8_t* waiting_on{};
+            thread_local ULONGLONG waiting_since{};
+            const auto now = GetTickCount64();
+
+            if (waiting_on != faulting_address) {
+                waiting_on = faulting_address;
+                waiting_since = now;
+            }
+
+            if (now - waiting_since > 2000) {
+                waiting_on = nullptr;
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            lock.unlock();
+            Sleep(1);
+            return EXCEPTION_CONTINUE_EXECUTION;
         }
 
-        return EXCEPTION_CONTINUE_EXECUTION;
+        if (instance->m_last && instance->m_last->in_from(faulting_address)) {
+            redirect(exp, *instance->m_last);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        if (on_trap_page) {
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        return EXCEPTION_CONTINUE_SEARCH;
     }
 };
 
@@ -303,6 +384,25 @@ void find_me() {
 }
 
 void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn) {
+    // One hook write at a time. A write makes its target and trampoline pages non-executable and then puts back the
+    // protection it found. Two writes on different threads touching the same page (every trampoline shares the
+    // allocator's pages) could each find the other's temporary PAGE_READWRITE and put that back, leaving the page
+    // non-executable for good.
+    std::scoped_lock write_lock{protection_change_mutex()};
+
+    struct ActiveWrite {
+        bool begun{};
+        ~ActiveWrite() {
+            if (!begun) {
+                return;
+            }
+            std::scoped_lock lock{TrapManager::mutex};
+            if (!TrapManager::is_destructed && TrapManager::instance) {
+                TrapManager::instance->end_write();
+            }
+        }
+    } active_write;
+
     MEMORY_BASIC_INFORMATION find_me_mbi{};
     MEMORY_BASIC_INFORMATION from_mbi{};
     MEMORY_BASIC_INFORMATION to_mbi{};
@@ -343,6 +443,8 @@ void trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<vo
             saved_trap = TrapManager::instance->saved_trap(from);
         }
         TrapManager::instance->add_trap(from, to, len);
+        TrapManager::instance->begin_write(from);
+        active_write.begun = true;
     }
 
     if (protection_override) {

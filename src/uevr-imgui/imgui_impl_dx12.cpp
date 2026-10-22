@@ -409,14 +409,22 @@ static void ImGui_ImplDX12_CreateFontsTexture()
         IM_ASSERT(SUCCEEDED(hr));
 
         fence->SetEventOnCompletion(1, event);
-        WaitForSingleObject(event, INFINITE);
+        // UEVR: never wait on the GPU for good here. This runs on the game's present thread with the framework's
+        // mutexes held; when the GPU is paused (a fullscreen mode switch waiting on the game thread's message pump,
+        // a stalled compositor) an infinite wait deadlocks the game. After the timeout the upload objects are
+        // leaked (the copy is still in flight and lands whenever the GPU resumes) and the texture is used as is.
+        const DWORD upload_wait = SUCCEEDED(hr) ? WaitForSingleObject(event, 2000) : WAIT_FAILED;
 
-        cmdList->Release();
-        cmdAlloc->Release();
-        cmdQueue->Release();
+        if (upload_wait == WAIT_OBJECT_0) {
+            cmdList->Release();
+            cmdAlloc->Release();
+            cmdQueue->Release();
+            fence->Release();
+            uploadBuffer->Release();
+        } else {
+            OutputDebugStringA("[UEVR] ImGui DX12 font upload did not complete within 2 s; its command objects are left in flight\n");
+        }
         CloseHandle(event);
-        fence->Release();
-        uploadBuffer->Release();
 
         // Create texture view
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;

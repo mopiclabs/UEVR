@@ -4,6 +4,7 @@
 #include <d3d11.h>
 #include <d3d12.h>
 #include <winternl.h>
+#include <psapi.h>
 
 #include <asmjit/asmjit.h>
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -9273,9 +9275,98 @@ std::optional<uint32_t> resolve_post_init_properties_index_from_uobject(uintptr_
 }
 
 namespace {
+// VirtualQuery is a syscall that takes the process address-space lock. In a busy game (Black Myth: Wukong: 10+ GB,
+// streaming and D3D12 driver threads allocating all the time) one call costs well over 100 µs, and the readable /
+// writable / executable checks below run dozens of times per frame on the render thread: looks_like_vtable_object
+// alone is 14 of them per object. On the 3080 laptop (2026-10-18) 35–53 % of the render thread's samples sat in
+// ZwQueryVirtualMemory, doubling the thread's time per frame (plain game ~11 ms, with UEVR ~23 ms, one view).
+// Addresses inside loaded modules — vtables, their function entries, static data — are answered from the modules'
+// PE section tables instead: a section's protection does not change while the module is loaded. Everything else
+// (heap objects) still goes through VirtualQuery. The table is rebuilt every 2 s so modules loaded later are seen.
+struct ModuleSectionRange {
+    uintptr_t begin{};
+    uintptr_t end{};
+    bool execute{};
+    bool write{};
+};
+
+std::vector<ModuleSectionRange> g_module_sections{};
+std::shared_mutex g_module_sections_mutex{};
+std::atomic<uint64_t> g_module_sections_refreshed_ms{0};
+constexpr uint64_t MODULE_SECTIONS_REFRESH_MS = 2000;
+
+void refresh_module_sections() {
+    std::vector<ModuleSectionRange> sections{};
+    std::array<HMODULE, 1024> modules{};
+    DWORD needed = 0;
+
+    if (K32EnumProcessModules(GetCurrentProcess(), modules.data(), (DWORD)sizeof(modules), &needed)) {
+        const auto count = (std::min)((size_t)(needed / sizeof(HMODULE)), modules.size());
+
+        for (size_t i = 0; i < count; ++i) {
+            const auto base = reinterpret_cast<uintptr_t>(modules[i]);
+            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+            if (base == 0 || dos->e_magic != IMAGE_DOS_SIGNATURE) {
+                continue;
+            }
+
+            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+            if (nt->Signature != IMAGE_NT_SIGNATURE) {
+                continue;
+            }
+
+            sections.push_back({base, base + nt->OptionalHeader.SizeOfHeaders, false, false});
+            const auto* first = IMAGE_FIRST_SECTION(nt);
+
+            for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s) {
+                const auto& sec = first[s];
+                const auto size = (std::max)(sec.Misc.VirtualSize, sec.SizeOfRawData);
+                if (size == 0) {
+                    continue;
+                }
+
+                sections.push_back({base + sec.VirtualAddress, base + sec.VirtualAddress + size,
+                    (sec.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0, (sec.Characteristics & IMAGE_SCN_MEM_WRITE) != 0});
+            }
+        }
+    }
+
+    std::sort(sections.begin(), sections.end(), [](const auto& a, const auto& b) { return a.begin < b.begin; });
+
+    std::unique_lock _{g_module_sections_mutex};
+    g_module_sections = std::move(sections);
+    g_module_sections_refreshed_ms.store(steady_clock_milliseconds(), std::memory_order_release);
+}
+
+// The loaded module's section that holds all of [address, address + size), if any.
+std::optional<ModuleSectionRange> find_module_section(uintptr_t address, size_t size) {
+    if (steady_clock_milliseconds() - g_module_sections_refreshed_ms.load(std::memory_order_acquire) > MODULE_SECTIONS_REFRESH_MS) {
+        refresh_module_sections();
+    }
+
+    std::shared_lock _{g_module_sections_mutex};
+    auto it = std::upper_bound(g_module_sections.begin(), g_module_sections.end(), address,
+        [](uintptr_t a, const ModuleSectionRange& r) { return a < r.begin; });
+
+    if (it == g_module_sections.begin()) {
+        return std::nullopt;
+    }
+
+    --it;
+    if (address >= it->begin && address + size <= it->end) {
+        return *it;
+    }
+
+    return std::nullopt;
+}
+
 bool is_writable_process_range(uintptr_t address, size_t size) {
     if (address == 0 || size == 0 || address + size < address) {
         return false;
+    }
+
+    if (const auto section = find_module_section(address, size); section.has_value()) {
+        return section->write;
     }
 
     MEMORY_BASIC_INFORMATION mbi{};
@@ -9304,6 +9395,11 @@ bool is_readable_process_range(uintptr_t address, size_t size) {
         return false;
     }
 
+    // every PE section of a loaded module is readable
+    if (find_module_section(address, size).has_value()) {
+        return true;
+    }
+
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
         return false;
@@ -9330,6 +9426,10 @@ bool is_readable_process_range(uintptr_t address, size_t size) {
 bool is_executable_process_range(uintptr_t address, size_t size) {
     if (address == 0 || size == 0 || address + size < address) {
         return false;
+    }
+
+    if (const auto section = find_module_section(address, size); section.has_value()) {
+        return section->execute;
     }
 
     MEMORY_BASIC_INFORMATION mbi{};
@@ -29607,6 +29707,8 @@ bool FFakeStereoRenderingHook::patch_vtable_checks() {
 
         // Change the bytes to be some random number
         // this causes the vtable check to fail and will call the function within the vtable.
+        // (not while a hook write on another thread has this code page unprotected: we'd put its protection back)
+        std::scoped_lock protection_lock{safetyhook::protection_change_mutex()};
         DWORD old{};
         VirtualProtect((void*)*ref, 4, PAGE_EXECUTE_READWRITE, &old);
         *(uint32_t*)*ref = 0x12345678;
@@ -31604,6 +31706,16 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
         static std::vector<uintptr_t> patch_locations{};
 
         static std::vector<Patch::Ptr> assert_patches{};
+
+        // Bootstrap calls currently running on this thread. Read by the vectored exception handler below:
+        // only threads inside a bootstrap get their exceptions handled. Per thread, so overlapping bootstraps
+        // (another thread, or nested) can't hand one thread's exceptions to the other path.
+        static thread_local uint32_t s_bootstrap_depth{0};
+
+        // What the handler saw on threads that weren't running a bootstrap, logged after each bootstrap.
+        static std::atomic<uint32_t> s_other_thread_int3s{0};
+        static std::atomic<uint32_t> s_other_thread_exceptions{0};
+
         const void (*post_init_properties)(uintptr_t) = (*(decltype(post_init_properties)**)localplayer)[*idx];
 
         const auto post_init_instruction = utility::decode_one((uint8_t*)post_init_properties);
@@ -31683,6 +31795,38 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
         // set up a handler to skip int3 assertions
         // we do this because debug builds assert when the views are already setup.
         const auto seh_handler = [](PEXCEPTION_POINTERS info) -> LONG {
+            // Only touch exceptions raised by the PostInitProperties call on this thread.
+            // This handler is registered first in the chain and it resumes execution after bumping RIP
+            // (and nops the next call after an int3), so if it's allowed to see other threads' exceptions
+            // (render thread, task graph and PSO/shader compile workers, driver threads...) it silently
+            // corrupts them. The game is often still booting here when UEVR is injected at game launch.
+            switch (info->ExceptionRecord->ExceptionCode) {
+            case 0x40010006: // DBG_PRINTEXCEPTION_C (OutputDebugStringA, the debugger flag is set during the call)
+            case 0x4001000A: // DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)
+            case 0x406D1388: // MS_VC_EXCEPTION (thread naming)
+                // Informational exceptions that are always handled by the code raising them.
+                return EXCEPTION_CONTINUE_SEARCH;
+            default:
+                break;
+            }
+
+            if (s_bootstrap_depth == 0) {
+                // The only thing our (process-wide) debugger flag can make other threads do is break into a
+                // debugger that isn't there (e.g. UE's ensure() -> PLATFORM_BREAK when IsDebuggerPresent()).
+                // Step over those plain int3s without patching anything, leave every other exception alone.
+                if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT &&
+                    !IsBadReadPtr((void*)info->ContextRecord->Rip, 1) &&
+                    *(uint8_t*)info->ContextRecord->Rip == 0xCC)
+                {
+                    s_other_thread_int3s.fetch_add(1, std::memory_order_relaxed);
+                    info->ContextRecord->Rip += 1;
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+
+                s_other_thread_exceptions.fetch_add(1, std::memory_order_relaxed);
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
             ++exception_count;
 
             if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT) {
@@ -31733,11 +31877,20 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
             return EXCEPTION_CONTINUE_EXECUTION;
         };
 
+        ++s_bootstrap_depth;
         const auto exception_handler = AddVectoredExceptionHandler(1, seh_handler);
         utility::ScopeGuard remove_exception_handler{[&]() {
             if (exception_handler != nullptr) {
                 RemoveVectoredExceptionHandler(exception_handler);
             }
+
+            --s_bootstrap_depth;
+
+            // Logged from here, never from the handler: these are the cases the thread filter keeps
+            // from being skipped or patched.
+            SPDLOG_INFO("[PostInitProperties] Other threads during the bootstrap: {} int3(s) stepped over, {} exception(s) passed on",
+                s_other_thread_int3s.exchange(0, std::memory_order_relaxed),
+                s_other_thread_exceptions.exchange(0, std::memory_order_relaxed));
         }};
 
         {
