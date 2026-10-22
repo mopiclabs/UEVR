@@ -960,6 +960,14 @@ $pyOut | Where-Object { $_ -notlike "ok *" } | ForEach-Object { Write-Host "  $_
 $pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
 Check "gamepilot --var self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
 
+Write-Host "== 7a. recipes: checkpoint images sized as their regions, steps the pilot reads as written (selftest_recipes.py)"
+& { $ErrorActionPreference = "Continue"; & $Py -W error -m py_compile (Join-Path $Here "selftest_recipes.py") 2>&1 | ForEach-Object { Write-Host "      $_" } }
+Check "py_compile selftest_recipes.py (warnings as errors)" ($LASTEXITCODE -eq 0)
+$pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py -W error (Join-Path $Here "selftest_recipes.py") (Join-Path $Work "recipes") 2>&1 | ForEach-Object { "$_" } })
+$pyOut | Where-Object { $_ -notlike "ok *" } | ForEach-Object { Write-Host "  $_" }
+$pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
+Check "recipe lint ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
+
 Write-Host "== 7b. frame rate: gamepilot's measured segments, perfreport.py on synthetic runs"
 foreach ($f in @((Join-Path $Tools "perfreport.py"), (Join-Path $Here "selftest_perf.py"))) {
     & { $ErrorActionPreference = "Continue"; & $Py -W error -m py_compile $f 2>&1 | ForEach-Object { Write-Host "      $_" } }

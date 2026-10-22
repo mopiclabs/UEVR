@@ -93,14 +93,16 @@ defaults to 1 and `-Tier N` runs the rungs with tier <= N. A rung's `vars` becom
 objects as JSON; a `null` var is left out, so the recipe's default applies). Run folders are
 `<time>-<game>-<Label>-<rung>-r<n>`.
 
-After changing run-test.ps1, run-ladder.ps1, gamepilot.py, perfreport.py or eyesampler.py, run `selftest\selftest.ps1` (about 9
-minutes, no game: a stand-in process compiled from `selftest\fakegame.cs` plays the game; it compares runs without
-`-SaveFile` against the committed run-test.ps1, never touches a real save folder or game settings file, round-trips
-`-GameIni` on temp files (and on a copy of Hogwarts' GameUserSettings.ini when there is one), checks perfreport.py on
-synthetic runs with `selftest\selftest_perf.py` and the eye sampler on synthetic side-by-side frames with
-`selftest\selftest_eyes.py`). `-NoWindows` skips the sections whose stand-in has a window (invisible, but a window) or
-that start whoami.exe in a console, for a PC someone is using; the `-GameIni` end-to-end runs (a crash, a killed
-harness) use the stand-in without a window and still run. Work folders go to `runs\selftest\work-<time>\`.
+After changing run-test.ps1, run-ladder.ps1, gamepilot.py, perfreport.py, eyesampler.py or a recipe, run
+`selftest\selftest.ps1` (about 9 minutes, no game: a stand-in process compiled from `selftest\fakegame.cs` plays the
+game; it compares runs without `-SaveFile` against the committed run-test.ps1, never touches a real save folder or
+game settings file, round-trips `-GameIni` on temp files (and on a copy of Hogwarts' GameUserSettings.ini when there
+is one), checks perfreport.py on synthetic runs with `selftest\selftest_perf.py`, the eye sampler on synthetic
+side-by-side frames with `selftest\selftest_eyes.py`, and every recipe with `selftest\selftest_recipes.py`: each
+checkpoint image there and the size of its region, where a `"draft": true` recipe may still miss images).
+`-NoWindows` skips the sections whose stand-in has a window (invisible, but a window) or that start whoami.exe in a
+console, for a PC someone is using; the `-GameIni` end-to-end runs (a crash, a killed harness) use the stand-in
+without a window and still run. Work folders go to `runs\selftest\work-<time>\`.
 
 Verdicts:
 
