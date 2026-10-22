@@ -833,10 +833,14 @@ def hitch_limit(p50):
     return max(HITCH_MIN_MS, 2 * p50) if p50 else HITCH_MIN_MS
 
 
+def is_hitch(ms):
+    return ms >= HITCH_MIN_MS
+
+
 def hitch_counts(intervals_ms, p50):
     """(hitches >= HITCH_MIN_MS, hitches_100 >= HITCH_BIG_MS, hitches_rel >= hitch_limit(p50)), the limit."""
     rel = hitch_limit(p50)
-    return (sum(1 for v in intervals_ms if v >= HITCH_MIN_MS), sum(1 for v in intervals_ms if v >= HITCH_BIG_MS),
+    return (sum(1 for v in intervals_ms if is_hitch(v)), sum(1 for v in intervals_ms if v >= HITCH_BIG_MS),
             sum(1 for v in intervals_ms if v >= rel), rel)
 
 
@@ -864,9 +868,9 @@ def finish_vr(acc, capped, mode):
         return None
     sec = acc.measured_s
     s, frame = interval_stats([iv[0] for iv in acc.intervals])
-    hitch_spans = [(st, en) for ms, st, en in acc.intervals if ms >= HITCH_MIN_MS]
-    _, big, rel, rel_limit = hitch_counts([iv[0] for iv in acc.intervals], frame["p50"])
-    in_capture = sum(1 for st, en in hitch_spans if any(cs < en and ce > st for cs, ce in acc.spans))
+    hitches, big, rel, rel_limit = hitch_counts([iv[0] for iv in acc.intervals], frame["p50"])
+    in_capture = sum(1 for ms, st, en in acc.intervals
+                     if is_hitch(ms) and any(cs < en and ce > st for cs, ce in acc.spans))
     paced_total = sum(acc.paced.values())
     slots = sorted(acc.slots)
     repeats = acc.kinds.get("R", 0)
@@ -883,10 +887,10 @@ def finish_vr(acc, capped, mode):
         "frame_ms": frame,
         "predicted_slot_ms": {"p50": rnd(pct(slots, 50), 2), "p99": rnd(pct(slots, 99), 2),
                               "max": rnd(slots[-1], 2)} if slots else None,
-        "hitches": len(hitch_spans),
+        "hitches": hitches,
         "hitch_ms": HITCH_MIN_MS,
         "stalls": sum(1 for iv in acc.intervals if iv[0] >= STALL_MS),
-        "hitch_per_min": rnd(len(hitch_spans) * 60 / sec, 2),
+        "hitch_per_min": rnd(hitches * 60 / sec, 2),
         "hitches_100": big,
         "hitch100_per_min": rnd(big * 60 / sec, 2),
         "hitches_rel": rel,
