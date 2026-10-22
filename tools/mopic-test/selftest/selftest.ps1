@@ -422,7 +422,15 @@ $fakeNames = @("mopicselftest_noproc", "mopicselftest_game")
 function Get-SamplerCount { return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq "nvidia-smi" -or $_.ProcessName -like "PresentMon-*" }).Count }
 $samplersBefore = Get-SamplerCount
 $busy = @(Get-Process -Name (@("UEVRInjector", "CrashReportClient") + $fakeNames) -ErrorAction SilentlyContinue)
-$persistentDirs = @($fakeNames | ForEach-Object { Join-Path $env:APPDATA "UnrealVRMod\$_" } | Where-Object { -not (Test-Path -LiteralPath $_) })
+# the stand-ins' UEVR folders (only this self-test uses those names): config.txt / user_script.txt an earlier
+# self-test left there (killed, or its killed-harness case) would be restored by every run and fail section 5
+$persistentDirs = @($fakeNames | ForEach-Object { Join-Path $env:APPDATA "UnrealVRMod\$_" })
+function Clear-StandInConfig {
+    foreach ($p in $persistentDirs) { foreach ($n in @("config.txt", "user_script.txt")) { $f = Join-Path $p $n; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } } }
+}
+$leftover = @($persistentDirs | ForEach-Object { $p = $_; @("config.txt", "user_script.txt") | ForEach-Object { Join-Path $p $_ } } | Where-Object { Test-Path -LiteralPath $_ })
+if ($leftover.Count -gt 0) { Write-Host "      removing what an earlier self-test left: $($leftover -join ', ')" }
+Clear-StandInConfig
 if ($busy.Count -gt 0 -or $NoWindows) {
     Write-Host "SKIP  sections 4-5: $(if ($NoWindows) { '-NoWindows' } else { "$(@($busy | ForEach-Object Name) -join ', ') running (the harness would stop it)" })"
 } else {
@@ -809,7 +817,8 @@ if ($busyNow.Count -gt 0 -or (Test-Path -LiteralPath $pendingReal)) {
     Get-ChildItem -LiteralPath (Join-Path $Tools "runs") -Directory | Where-Object { $_.Name -like "*-Custom-selftest-gameini-killed-r*" } | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Work "harness-runs\$($_.Name)") }
     Get-Process -Name "mopicselftest_game" -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); $_.WaitForExit(5000) | Out-Null }
     # the killed harness never put back the stand-in's UEVR config.txt (only made for this self-test)
-    foreach ($p in $persistentDirs) { foreach ($n in @("config.txt", "user_script.txt")) { $f = Join-Path $p $n; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } } }
+    Clear-StandInConfig
+    Check "e2e killed harness: the stand-ins' config.txt / user_script.txt removed afterwards" (@($persistentDirs | Where-Object { (Test-Path (Join-Path $_ "config.txt")) -or (Test-Path (Join-Path $_ "user_script.txt")) }).Count -eq 0)
 }
 foreach ($p in $persistentDirs) { if ((Test-Path -LiteralPath $p) -and @(Get-ChildItem -LiteralPath $p -Force).Count -eq 0) { Remove-Item -LiteralPath $p } }
 
