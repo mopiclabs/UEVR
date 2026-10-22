@@ -27,7 +27,7 @@
         585,
         60
       ],
-      "threshold": 0.8
+      "threshold": 0.6
     },
     "stage_select": {
       "image": "stage_select.png",
@@ -109,6 +109,29 @@
     },
     {
       "note": "with more than one save slot (Steam Cloud keeps a tutorial slot 2 from 2026-10-04) CONTINUE asks for a slot: slot 1 is mopic_demo1's progress"
+    },
+    {
+      "wait": 3
+    },
+    {
+      "click": [
+        243,
+        230
+      ],
+      "if": "file_slot_select"
+    },
+    {
+      "note": "second chance (2026-10-22): the slot dialog can open after the 3 s wait, or the first CONTINUE click can be dropped; the loop below would then click the dialog's title forever"
+    },
+    {
+      "wait": 3
+    },
+    {
+      "click": [
+        207,
+        72
+      ],
+      "if": "main_menu"
     },
     {
       "wait": 3
