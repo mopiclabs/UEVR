@@ -56,6 +56,7 @@ OBSERVE_AFTER_S = 30.0   # runs without a recipe: measured from XR focus (or the
 HITCH_MIN_MS = 58.0      # hitch: an interval >= this, the same limit for every build; 3.5 refreshes at 60 Hz, between
 HITCH_BIG_MS = 108.0     # the 3 and 4 refreshes a frame is shown for. Big hitch (hitches_100): 6.5 refreshes
 HITCH_RULE = f"fixed {HITCH_MIN_MS:g}/{HITCH_BIG_MS:g} ms"   # perf.json "hitch_rule"; a reader compares counts of one rule
+REL_FLOOR_MS = 50.0      # hitches_rel: the rule before 2026-10-21 as it was, for comparisons with older results
 STALL_MS = 250.0         # stall: an interval >= this (UEVR's tick-gap warning threshold)
 LOW01_MIN = 10000        # 0.1% lows (p99.9) only with this many intervals
 LATE_MARGIN_MS = 4.0     # monado shows a frame 4 ms after its present (u_pacing_compositor_fake.c)
@@ -827,12 +828,12 @@ def interval_stats(intervals_ms):
 
 
 def hitch_limit(p50):
-    """The relative hitch limit (`hitches_rel`): max(HITCH_MIN_MS, 2x the run's median), the rule before 2026-10-21
-    (with 50 ms). A faster build gets a lower limit than a slower one: Black Myth: Wukong's wk60 build (median 19-28
-    ms, limit 50 ms) counted about 2.4x the hitches of the build before it (median 30 ms, limit 60 ms) for the same
-    number of long frames. Only a game whose median frame is over half of HITCH_MIN_MS (under about 34 fps), where a
-    frame that long is an ordinary one, needs it."""
-    return max(HITCH_MIN_MS, 2 * p50) if p50 else HITCH_MIN_MS
+    """The relative hitch limit (`hitches_rel`), the rule before 2026-10-21: max(REL_FLOOR_MS, 2x the run's median),
+    kept as it was for comparisons with older results. A faster build gets a lower limit than a slower one: Black
+    Myth: Wukong's wk60 build (median 19-28 ms, limit 50 ms) counted about 2.4x the hitches of the build before it
+    (median 30 ms, limit 60 ms) for the same number of long frames. Beyond that, only a game whose median frame is
+    over half of HITCH_MIN_MS (under about 34 fps), where a frame that long is an ordinary one, needs it."""
+    return max(REL_FLOOR_MS, 2 * p50) if p50 else REL_FLOOR_MS
 
 
 def hitch_rule_of(counts):
@@ -1358,7 +1359,9 @@ def summary_line(s):
     if vr:
         p99 = (vr.get("frame_ms") or {}).get("p99")
         rel = vr.get("hitches_rel")
-        rel_text = f" ({rel} rel)" if rel is not None and rel != vr["hitches"] else ""   # only past a median of half the limit
+        # only for a slow game, where the relative limit is above the fixed one (a median over 29 ms)
+        rel_text = (f" ({rel} rel)" if rel is not None and rel != vr["hitches"] and (vr.get("hitch_rel_ms") or 0) > HITCH_MIN_MS
+                    else "")
         big_text = f", {vr['hitches_100']} >={HITCH_BIG_MS:g} ms" if vr.get("hitches_100") is not None else ""
         text = (f"VR {vr['fps']:.1f} fps (1% low {vr['low1_fps'] or 0:.1f}, p99 {p99 or 0:.1f} ms, "
                 f"{vr['hitches']} hitches{rel_text}{big_text}, {vr['stalls']} stalls)")

@@ -399,8 +399,8 @@ check("perf: 2 hitches (100 / 300 ms), 1 stall, 2.4 per minute, no interval acro
       and vr["hitch_big_ms"] == 108.0 and vr["hitch_rule"] == "fixed 58/108 ms", vr)
 # 3 x 33.333333 ms = 99.999999 ms: the "100 ms" hitch is under the 108 ms limit, only the 300 ms stall is above
 check("perf: 1 hitch of 108 ms or more (the 300 ms, not the 100 ms one), 1.2 per minute; the relative rule "
-      "(median 16.67 ms, limit 58 ms) counts the same 2 as the absolute one",
-      vr["hitches_100"] == 1 and near(vr["hitch100_per_min"], 1.2, 0.001) and vr["hitches_rel"] == 2 and vr["hitch_rel_ms"] == 58.0, vr)
+      "(median 16.67 ms, limit 50 ms as before 2026-10-21) counts the same 2",
+      vr["hitches_100"] == 1 and near(vr["hitch100_per_min"], 1.2, 0.001) and vr["hitches_rel"] == 2 and vr["hitch_rel_ms"] == 50.0, vr)
 check("perf: one hitch overlaps a capture", vr["hitches_in_capture"] == 1, vr["hitches_in_capture"])
 check("perf: paced 60 / 40 % at 1 / 2 refreshes, max period 33.3 ms", near(vr["paced_pct"]["1"], 60.0, 0.2)
       and near(vr["paced_pct"]["2"], 40.0, 0.2) and vr["paced_pct"]["3+"] == 0 and near(vr["period_max_ms"], 33.3, 0.05), vr["paced_pct"])
@@ -667,10 +667,32 @@ check("perf hitch rule: 9 hitches (>= 58 ms), limit 58 ms, 2 of 108 ms or more, 
 check("perf hitch rule: the relative rule (twice the median, 66.7 ms) keeps 5, and the line says so",
       v9["hitches_rel"] == 5 and v9["hitch_rel_ms"] == 66.7
       and "9 hitches (5 rel), 2 >=108 ms, 0 stalls)" in doc9["line"], (v9["hitches_rel"], v9["hitch_rel_ms"], doc9["line"]))
-check("perf hitch rule: hitch_limit is the relative rule (max of 58 ms and 2x median), hitch_counts counts all three",
-      perfreport.hitch_limit(16.7) == 58.0 and near(perfreport.hitch_limit(33.3), 66.6, 0.01) and perfreport.hitch_limit(0) == 58.0
-      and perfreport.hitch_counts([20, 57.9, 58, 60, 107.9, 108, 300], 40.0) == (5, 2, 3, 80.0),
-      perfreport.hitch_counts([20, 57.9, 58, 60, 107.9, 108, 300], 40.0))
+check("perf hitch rule: hitch_limit is the relative rule as before 2026-10-21 (max of 50 ms and 2x median), hitch_counts "
+      "counts all three",
+      perfreport.hitch_limit(16.7) == 50.0 and near(perfreport.hitch_limit(33.3), 66.6, 0.01) and perfreport.hitch_limit(0) == 50.0
+      and perfreport.hitch_counts([20, 57.9, 58, 60, 107.9, 108, 300], 40.0) == (5, 2, 3, 80.0)
+      and perfreport.hitch_counts([20, 52, 57.9, 58, 60], 20.0) == (2, 0, 4, 50.0),
+      (perfreport.hitch_counts([20, 57.9, 58, 60, 107.9, 108, 300], 40.0), perfreport.hitch_counts([20, 52, 57.9, 58, 60], 20.0)))
+
+# a 60 fps run with 3 intervals of 54 ms and 2 of 70 ms: 2 hitches (>= 58 ms); the relative rule (limit 50 ms, below
+# the fixed one) counts 5, which the line leaves out (it only adds it for a slow game)
+run10 = make_run("20261002-120320-Custom-hitchfast-r1")
+long_at = {100: 54, 200: 54, 300: 54, 400: 70, 500: 70}
+lines = [FRAMES_HEADER]
+q = S + 100 * MS
+lines.append(frame_row(q, "P", 0, P60, 1000, BASE, 0, 1))
+for k in range(1200):
+    q += long_at[k] * MS if k in long_at else P60
+    lines.append(frame_row(q, "P", 0, P60, 1000, BASE, 0, k + 2))
+write(os.path.join(run10, "perf-frames.csv"), lines)
+with open(os.path.join(run10, "pilot-status.json"), "w", encoding="utf-8") as f:
+    json.dump({"clock": {"qpc_ns": T0, "unix_ns": U0, "qpc_freq": 10_000_000},
+               "segments": [{"label": "gameplay", "step": 1, "start_qpc_ns": S, "end_qpc_ns": q + 1 * MS, "ok": True}]}, f)
+doc10 = perfreport.report(run10, do_compare=False)
+v10 = doc10["summary"]["vr"]
+check("perf hitch rule at 60 fps: 2 hitches, the relative rule 5 (limit 50 ms), the line says 2 hitches without (5 rel)",
+      v10["hitches"] == 2 and v10["hitches_rel"] == 5 and v10["hitch_rel_ms"] == 50.0
+      and "2 hitches, 0 >=108 ms, 0 stalls)" in doc10["line"], (v10["hitches"], v10["hitches_rel"], doc10["line"]))
 check("perf hitch rule: hitch_rule_of a result, also of one from before the field",
       perfreport.hitch_rule_of(v9) == "fixed 58/108 ms" and perfreport.hitch_rule_of({"hitches": 3, "hitches_100": 1}) == "fixed 50/100 ms"
       and perfreport.hitch_rule_of({"hitches": 3}) == "max(50 ms, 2x median)", v9.get("hitch_rule"))
