@@ -31707,8 +31707,14 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
 
         static std::vector<Patch::Ptr> assert_patches{};
 
-        // Thread that is currently running the bootstrap call (0 = none). Read by the vectored exception handler below.
-        static std::atomic<DWORD> s_bootstrap_thread_id{0};
+        // Bootstrap calls currently running on this thread. Read by the vectored exception handler below:
+        // only threads inside a bootstrap get their exceptions handled. Per thread, so overlapping bootstraps
+        // (another thread, or nested) can't hand one thread's exceptions to the other path.
+        static thread_local uint32_t s_bootstrap_depth{0};
+
+        // What the handler saw on threads that weren't running a bootstrap, logged after each bootstrap.
+        static std::atomic<uint32_t> s_other_thread_int3s{0};
+        static std::atomic<uint32_t> s_other_thread_exceptions{0};
 
         const void (*post_init_properties)(uintptr_t) = (*(decltype(post_init_properties)**)localplayer)[*idx];
 
@@ -31794,21 +31800,6 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
             // (and nops the next call after an int3), so if it's allowed to see other threads' exceptions
             // (render thread, task graph and PSO/shader compile workers, driver threads...) it silently
             // corrupts them. The game is often still booting here when UEVR is injected at game launch.
-            if (GetCurrentThreadId() != s_bootstrap_thread_id.load(std::memory_order_acquire)) {
-                // The only thing our (process-wide) debugger flag can make other threads do is break into a
-                // debugger that isn't there (e.g. UE's ensure() -> PLATFORM_BREAK when IsDebuggerPresent()).
-                // Step over those plain int3s without patching anything, leave every other exception alone.
-                if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT &&
-                    !IsBadReadPtr((void*)info->ContextRecord->Rip, 1) &&
-                    *(uint8_t*)info->ContextRecord->Rip == 0xCC)
-                {
-                    info->ContextRecord->Rip += 1;
-                    return EXCEPTION_CONTINUE_EXECUTION;
-                }
-
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
             switch (info->ExceptionRecord->ExceptionCode) {
             case 0x40010006: // DBG_PRINTEXCEPTION_C (OutputDebugStringA, the debugger flag is set during the call)
             case 0x4001000A: // DBG_PRINTEXCEPTION_WIDE_C (OutputDebugStringW)
@@ -31817,6 +31808,23 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
                 return EXCEPTION_CONTINUE_SEARCH;
             default:
                 break;
+            }
+
+            if (s_bootstrap_depth == 0) {
+                // The only thing our (process-wide) debugger flag can make other threads do is break into a
+                // debugger that isn't there (e.g. UE's ensure() -> PLATFORM_BREAK when IsDebuggerPresent()).
+                // Step over those plain int3s without patching anything, leave every other exception alone.
+                if (info->ExceptionRecord->ExceptionCode == EXCEPTION_BREAKPOINT &&
+                    !IsBadReadPtr((void*)info->ContextRecord->Rip, 1) &&
+                    *(uint8_t*)info->ContextRecord->Rip == 0xCC)
+                {
+                    s_other_thread_int3s.fetch_add(1, std::memory_order_relaxed);
+                    info->ContextRecord->Rip += 1;
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+
+                s_other_thread_exceptions.fetch_add(1, std::memory_order_relaxed);
+                return EXCEPTION_CONTINUE_SEARCH;
             }
 
             ++exception_count;
@@ -31869,14 +31877,20 @@ void FFakeStereoRenderingHook::post_init_properties(uintptr_t localplayer) {
             return EXCEPTION_CONTINUE_EXECUTION;
         };
 
-        s_bootstrap_thread_id.store(GetCurrentThreadId(), std::memory_order_release);
+        ++s_bootstrap_depth;
         const auto exception_handler = AddVectoredExceptionHandler(1, seh_handler);
         utility::ScopeGuard remove_exception_handler{[&]() {
             if (exception_handler != nullptr) {
                 RemoveVectoredExceptionHandler(exception_handler);
             }
 
-            s_bootstrap_thread_id.store(0, std::memory_order_release);
+            --s_bootstrap_depth;
+
+            // Logged from here, never from the handler: these are the cases the thread filter keeps
+            // from being skipped or patched.
+            SPDLOG_INFO("[PostInitProperties] Other threads during the bootstrap: {} int3(s) stepped over, {} exception(s) passed on",
+                s_other_thread_int3s.exchange(0, std::memory_order_relaxed),
+                s_other_thread_exceptions.exchange(0, std::memory_order_relaxed));
         }};
 
         {
