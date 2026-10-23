@@ -35,13 +35,14 @@ public:
     void execute_console_script(sdk::UGameEngine* engine, const std::string& filename);
 
     // Live-resolution experiment (VR_AutoResActuator): set a percentage cvar (r.ScreenPercentage,
-    // r.DynamicRes.MaxScreenPercentage) with a console exec at the next engine tick (callable from any thread). While
-    // the experiment is on, the resolution-related cvars are logged at the start and whenever one changes, to see what
-    // the game and its upscaler do with them.
+    // r.DynamicRes.MaxScreenPercentage) to the game's own value times a ladder scale, with a console exec at the next
+    // engine tick (callable from any thread); the game's value is the one read before the first change. While the
+    // experiment is on, the resolution-related cvars are logged at the start and whenever one changes, to see what the
+    // game and its upscaler do with them.
     void set_autores_watch(bool on) { m_autores_watch.store(on, std::memory_order_release); }
-    void request_autores_cvar(const wchar_t* name, int percent) {
+    void request_autores_cvar(const wchar_t* name, float scale) {
+        m_requested_autores_scale.store(scale, std::memory_order_release);
         m_requested_autores_cvar.store(name, std::memory_order_release);
-        m_requested_autores_percent.store(percent, std::memory_order_release);
     }
 
     struct ChangeSnapshot {
@@ -278,7 +279,8 @@ private:
     void process_autores_cvars(sdk::UGameEngine* engine);
     std::atomic<bool> m_autores_watch{false};
     std::atomic<const wchar_t*> m_requested_autores_cvar{nullptr};
-    std::atomic<int> m_requested_autores_percent{0};
+    std::atomic<float> m_requested_autores_scale{0.0f};
+    std::optional<float> m_autores_cvar_base{};
     bool m_autores_resize_method_set{false};
     std::vector<std::optional<float>> m_autores_cvars_last{};
     std::chrono::steady_clock::time_point m_autores_cvars_next_read{};

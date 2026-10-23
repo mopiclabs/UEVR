@@ -205,7 +205,7 @@ public:
         uint32_t new_height);
 
     // Live-resolution experiment (VR_AutoResActuator / VR_AutoResLiveMode, off by default).
-    void request_autores_cvar(const wchar_t* name, int percent);
+    void request_autores_cvar(const wchar_t* name, float scale);
 
 
     Vector4f get_position(uint32_t index, bool grip = true)  const;

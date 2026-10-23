@@ -792,7 +792,18 @@ void CVarManager::process_autores_cvars(sdk::UGameEngine* engine) {
         try {
             const auto console_manager = sdk::FConsoleManager::get();
             const auto variable = console_manager != nullptr ? (sdk::IConsoleVariable*)console_manager->find(name) : nullptr;
-            return variable != nullptr ? variable->TryGetFloat() : std::nullopt;
+            if (variable == nullptr) {
+                return std::nullopt;
+            }
+
+            // TryGetFloat only uses vtable indices someone already located for this cvar class; float cvars may
+            // have none yet, and a GetFloat locates them.
+            auto value = variable->TryGetFloat();
+            if (!value) {
+                (void)variable->GetFloat();
+                value = variable->TryGetFloat();
+            }
+            return value;
         } catch (...) {
             return std::nullopt;
         }
@@ -800,8 +811,18 @@ void CVarManager::process_autores_cvars(sdk::UGameEngine* engine) {
     const auto str = [](std::optional<float> v) { return v ? fmt::format("{:.2f}", *v) : std::string{"?"}; };
 
     const auto name = m_requested_autores_cvar.exchange(nullptr, std::memory_order_acq_rel);
-    const auto percent = m_requested_autores_percent.exchange(0, std::memory_order_acq_rel);
-    if (name != nullptr && percent > 0) {
+    const auto scale = m_requested_autores_scale.load(std::memory_order_acquire);
+    if (name != nullptr && scale > 0.0f) {
+        // The game's own value, before the first change: the steps are relative to it (Tekken runs at 58).
+        if (!m_autores_cvar_base) {
+            const auto base = read(name);
+            m_autores_cvar_base = base && *base > 0.0f ? *base : 100.0f;
+            SPDLOG_INFO("[autores] cvar qpc={} {} base {} (read {})", uevr::perf::now_ns(), utility::narrow(name),
+                str(m_autores_cvar_base), str(base));
+        }
+
+        const auto percent = (int)std::lround(*m_autores_cvar_base * scale);
+
         // Keep the scene textures at their largest size so a lower screen percentage renders into a sub-rect instead
         // of reallocating them ("least prone to allocation stalls").
         if (std::wstring_view{name} == L"r.ScreenPercentage" && !m_autores_resize_method_set) {
@@ -815,8 +836,9 @@ void CVarManager::process_autores_cvars(sdk::UGameEngine* engine) {
         const auto start_ns = uevr::perf::now_ns();
         engine->exec(std::wstring{name} + L" " + std::to_wstring(percent));
         const auto after = read(name);
-        SPDLOG_INFO("[autores] cvar qpc={} {} {} -> {} (requested {}, exec {:.2f} ms)", start_ns, utility::narrow(name), str(before),
-            str(after), percent, (double)(uevr::perf::now_ns() - start_ns) / 1e6);
+        SPDLOG_INFO("[autores] cvar qpc={} {} {} -> {} (requested {} = {:.3f} x {}, exec {:.2f} ms)", start_ns,
+            utility::narrow(name), str(before), str(after), percent, scale, str(m_autores_cvar_base),
+            (double)(uevr::perf::now_ns() - start_ns) / 1e6);
         m_autores_cvars_next_read = {};
     }
 

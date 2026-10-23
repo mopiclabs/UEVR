@@ -188,9 +188,9 @@ bool VR::on_openxr_resolution_scale_changed(
     return true;
 }
 
-void VR::request_autores_cvar(const wchar_t* name, int percent) {
+void VR::request_autores_cvar(const wchar_t* name, float scale) {
     if (m_cvar_manager != nullptr) {
-        m_cvar_manager->request_autores_cvar(name, percent);
+        m_cvar_manager->request_autores_cvar(name, scale);
     }
 }
 

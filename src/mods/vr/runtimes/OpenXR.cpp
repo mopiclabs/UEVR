@@ -625,10 +625,10 @@ void OpenXR::apply_autores_step() {
         const auto cvar = this->autores.actuator == 1 ? L"r.ScreenPercentage" : L"r.DynamicRes.MaxScreenPercentage";
         const auto from = this->autores.sp_scale;
         this->autores.sp_scale = to;
-        VR::get()->request_autores_cvar(cvar, (int)std::lround(to * 100.0f));
+        VR::get()->request_autores_cvar(cvar, to);
         uevr::perf::set_autores(this->autores.last_event_code, to);
-        spdlog::info("[autores] scale qpc={} {:.3f}->{:.3f} actuator={} requested={}", uevr::perf::now_ns(), from, to,
-            utility::narrow(cvar), std::lround(to * 100.0f));
+        spdlog::info("[autores] scale qpc={} {:.3f}->{:.3f} actuator={} (times the game's own value)", uevr::perf::now_ns(),
+            from, to, utility::narrow(cvar));
         return;
     }
 
