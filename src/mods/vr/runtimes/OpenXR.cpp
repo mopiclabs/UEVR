@@ -591,7 +591,7 @@ void OpenXR::on_perf_settings_event(const XrEventDataPerfSettingsEXT& ev) {
         return;
     }
 
-    const auto current = this->resolution_scale->value();
+    const auto current = this->autores.actuator != 0 ? this->autores.sp_scale : this->resolution_scale->value();
     const auto index = autores_ladder_index(current);
     std::optional<size_t> target{};
 
@@ -615,11 +615,24 @@ void OpenXR::apply_autores_step() {
         return;
     }
 
-    const auto from = this->resolution_scale->value();
     const auto to = *this->autores.pending_scale;
     this->autores.pending_scale.reset();
     this->autores.last_change = std::chrono::steady_clock::now();
 
+    // The render resolution inside the same render targets and swapchain; CVarManager sets the cvar on the game thread
+    // and logs "[autores] cvar" with the value it reads back.
+    if (this->autores.actuator != 0) {
+        const auto cvar = this->autores.actuator == 1 ? L"r.ScreenPercentage" : L"r.DynamicRes.MaxScreenPercentage";
+        const auto from = this->autores.sp_scale;
+        this->autores.sp_scale = to;
+        VR::get()->request_autores_cvar(cvar, (int)std::lround(to * 100.0f));
+        uevr::perf::set_autores(this->autores.last_event_code, to);
+        spdlog::info("[autores] scale qpc={} {:.3f}->{:.3f} actuator={} requested={}", uevr::perf::now_ns(), from, to,
+            utility::narrow(cvar), std::lround(to * 100.0f));
+        return;
+    }
+
+    const auto from = this->resolution_scale->value();
     const auto start_ns = uevr::perf::now_ns();
     this->resolution_scale->value() = to;
     const auto applied_live = this->apply_resolution_scale("autores");

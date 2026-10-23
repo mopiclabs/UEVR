@@ -131,7 +131,20 @@ bool VR::on_openxr_resolution_scale_changed(
         return result;
     }();
 
-    if (!ue57_invalidated && !legacy_live_policy.live_allowed) {
+    const auto live_mode = m_autores_live_mode->value();
+    const auto forced_live = !ue57_invalidated && !legacy_live_policy.live_allowed && live_mode != 0;
+
+    if (forced_live) {
+        SPDLOG_WARN("[autores] Forcing live resolution-scale reconfigure on a deferred engine path; version={} reason={} "
+            "VR_AutoResLiveMode={} [{}x{}]->[{}x{}]", legacy_live_policy.version, legacy_live_policy.reason, live_mode,
+            old_width, old_height, new_width, new_height);
+
+        if (live_mode == 2 && m_fake_stereo_hook != nullptr) {
+            m_fake_stereo_hook->invalidate_resolution_dependent_targets();
+        }
+    }
+
+    if (!ue57_invalidated && !legacy_live_policy.live_allowed && !forced_live) {
         if (is_stalker2_executable_cached()) {
             SPDLOG_WARN(
                 "[Stalker2][OpenXR] Live resolution-scale reconfigure is intentionally disabled for UE5.1/Stalker2; saved value will apply after reinject/restart [{}x{}]->[{}x{}]",
@@ -173,6 +186,12 @@ bool VR::on_openxr_resolution_scale_changed(
 
     reinitialize_renderer();
     return true;
+}
+
+void VR::request_autores_cvar(const wchar_t* name, int percent) {
+    if (m_cvar_manager != nullptr) {
+        m_cvar_manager->request_autores_cvar(name, percent);
+    }
 }
 
 namespace {
@@ -14438,6 +14457,8 @@ void VR::on_present() {
 
     if (runtime->is_openxr()) {
         m_openxr->autores.executor = m_autores_executor->value();
+        m_openxr->autores.actuator = m_autores_actuator->value();
+        m_cvar_manager->set_autores_watch(m_autores_executor->value());
     }
 
     runtime->consume_events(nullptr);

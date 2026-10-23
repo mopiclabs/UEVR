@@ -456,6 +456,8 @@ public:
     // edges and, with the executor on, queues one resolution-scale step; apply_autores_step carries it out.
     struct AutoRes {
         bool executor{false};                        // VR_AutoResExecutor, refreshed before each consume_events
+        int actuator{0};                             // VR_AutoResActuator: 1/2 steps set a percentage cvar instead
+        float sp_scale{1.0f};                        // the ladder value that cvar was last set from
         std::optional<float> pending_scale{};        // queued by an edge, applied outside the event lock
         uint32_t last_event_code{};                  // domain * 1000 + sub domain * 100 + to level (PerfLog autores_event)
         std::chrono::steady_clock::time_point last_change{};

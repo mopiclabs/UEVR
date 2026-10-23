@@ -1008,6 +1008,9 @@ public:
         uint32_t new_width,
         uint32_t new_height);
 
+    // Live-resolution experiment (VR_AutoResLiveMode 2): the render-target managers' size-dependent state, on any engine.
+    void invalidate_resolution_dependent_targets();
+
     void on_config_load(const utility::Config& cfg, bool set_defaults) {
         for (IModValue& option : m_options) {
             option.config_load(cfg, set_defaults);

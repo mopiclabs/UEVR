@@ -34,6 +34,16 @@ public:
 
     void execute_console_script(sdk::UGameEngine* engine, const std::string& filename);
 
+    // Live-resolution experiment (VR_AutoResActuator): set a percentage cvar (r.ScreenPercentage,
+    // r.DynamicRes.MaxScreenPercentage) with a console exec at the next engine tick (callable from any thread). While
+    // the experiment is on, the resolution-related cvars are logged at the start and whenever one changes, to see what
+    // the game and its upscaler do with them.
+    void set_autores_watch(bool on) { m_autores_watch.store(on, std::memory_order_release); }
+    void request_autores_cvar(const wchar_t* name, int percent) {
+        m_requested_autores_cvar.store(name, std::memory_order_release);
+        m_requested_autores_percent.store(percent, std::memory_order_release);
+    }
+
     struct ChangeSnapshot {
         uint64_t counter{};
         std::string name{};
@@ -264,6 +274,14 @@ private:
     size_t m_cvar_refresh_cursor{0};
     size_t m_cvar_freeze_cursor{0};
     std::deque<std::string> m_pending_console_script_commands{};
+
+    void process_autores_cvars(sdk::UGameEngine* engine);
+    std::atomic<bool> m_autores_watch{false};
+    std::atomic<const wchar_t*> m_requested_autores_cvar{nullptr};
+    std::atomic<int> m_requested_autores_percent{0};
+    bool m_autores_resize_method_set{false};
+    std::vector<std::optional<float>> m_autores_cvars_last{};
+    std::chrono::steady_clock::time_point m_autores_cvars_next_read{};
     std::chrono::steady_clock::time_point m_next_console_script_command_time{};
     bool m_ue51_fsr3_runtime_cvars_done{false};
     int m_ue51_fsr3_runtime_cvar_attempts{0};

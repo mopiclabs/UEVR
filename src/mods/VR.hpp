@@ -204,6 +204,9 @@ public:
         uint32_t new_width,
         uint32_t new_height);
 
+    // Live-resolution experiment (VR_AutoResActuator / VR_AutoResLiveMode, off by default).
+    void request_autores_cvar(const wchar_t* name, int percent);
+
 
     Vector4f get_position(uint32_t index, bool grip = true)  const;
     Vector4f get_velocity(uint32_t index)  const;
@@ -1491,6 +1494,18 @@ private:
     std::chrono::nanoseconds m_last_input_delay{};
     std::chrono::nanoseconds m_avg_input_delay{};
 
+    static const inline std::vector<std::string> s_autores_actuator_names{
+        "OpenXR resolution scale",
+        "r.ScreenPercentage",
+        "r.DynamicRes.MaxScreenPercentage",
+    };
+
+    static const inline std::vector<std::string> s_autores_live_mode_names{
+        "Engine version policy",
+        "Force live",
+        "Force live + invalidate render targets",
+    };
+
     static const inline std::vector<std::string> s_sync_mode_names{
         "Early",
         "Late",
@@ -1616,6 +1631,11 @@ private:
     const ModToggle::Ptr m_autores_ext{ ModToggle::create(generate_name("AutoResExt"), false, true) };
     const ModToggle::Ptr m_autores_executor{ ModToggle::create(generate_name("AutoResExecutor"), false, true) };
     const ModToggle::Ptr m_autores_hint{ ModToggle::create(generate_name("AutoResHint"), false, true) };
+    // Live-resolution experiment (off by default): what the executor's steps change (the OpenXR resolution scale, or a
+    // percentage cvar inside the same render targets), and whether a resolution-scale change may rebuild live on engine paths the version policy
+    // defers (UE 5.0-5.2, unknown versions), optionally dropping the render-target managers' size-dependent state first.
+    const ModCombo::Ptr m_autores_actuator{ ModCombo::create(generate_name("AutoResActuator"), s_autores_actuator_names, 0) };
+    const ModCombo::Ptr m_autores_live_mode{ ModCombo::create(generate_name("AutoResLiveMode"), s_autores_live_mode_names, 0) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -2159,6 +2179,8 @@ public:
             *m_autores_ext,
             *m_autores_executor,
             *m_autores_hint,
+            *m_autores_actuator,
+            *m_autores_live_mode,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,

@@ -13752,6 +13752,17 @@ bool FFakeStereoRenderingHook::invalidate_ue57_resolution_dependent_state(
     return true;
 }
 
+void FFakeStereoRenderingHook::invalidate_resolution_dependent_targets() {
+    SPDLOG_INFO("[autores] Invalidating the render-target managers' size-dependent state (VR_AutoResLiveMode)");
+
+    m_wants_texture_recreation = true;
+    m_skip_next_adjust_view_rect = true;
+
+    m_rtm.invalidate_resolution_dependent_targets();
+    m_rtm_418.invalidate_resolution_dependent_targets();
+    m_rtm_special.invalidate_resolution_dependent_targets();
+}
+
 void FFakeStereoRenderingHook::attempt_hooking() {
     if (uevr::nascar::is_target() &&
         (!uevr::nascar::is_validated_build() || !m_nascar_slate_getter.active() ||

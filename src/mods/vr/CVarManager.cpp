@@ -23,6 +23,7 @@
 #include "../VR.hpp"
 
 #include "CVarManager.hpp"
+#include "PerfLog.hpp"
 #include "utility/ImGui.hpp"
 #include "utility/Logging.hpp"
 
@@ -775,6 +776,72 @@ void CVarManager::process_pending_console_script(sdk::UGameEngine* engine) {
     }
 }
 
+void CVarManager::process_autores_cvars(sdk::UGameEngine* engine) {
+    static constexpr std::array watched{L"r.ScreenPercentage", L"r.SecondaryScreenPercentage.GameViewport",
+        L"r.ScreenPercentage.Mode", L"sg.ResolutionQuality", L"r.DynamicRes.OperationMode", L"r.DynamicRes.MinScreenPercentage",
+        L"r.DynamicRes.MaxScreenPercentage", L"r.DynamicRes.FrameTimeBudget", L"r.DynamicRes.TargetedGPUHeadRoomPercentage",
+        L"r.SceneRenderTargetResizeMethod", L"r.AntiAliasingMethod", L"r.TemporalAA.Upsampling", L"r.NGX.DLSS.Enable",
+        L"r.NGX.DLSS.Quality", L"r.XeSS.Enabled", L"r.XeSS.Quality", L"r.FidelityFX.FSR.Enabled", L"r.FidelityFX.FSR3.Enabled",
+        L"r.FidelityFX.FSR3.QualityMode", L"r.Streamline.DLSSG.Enable", L"vr.PixelDensity", L"vr.InstancedStereo"};
+
+    if (!m_autores_watch.load(std::memory_order_acquire) || engine == nullptr) {
+        return;
+    }
+
+    const auto read = [](const wchar_t* name) -> std::optional<float> {
+        try {
+            const auto console_manager = sdk::FConsoleManager::get();
+            const auto variable = console_manager != nullptr ? (sdk::IConsoleVariable*)console_manager->find(name) : nullptr;
+            return variable != nullptr ? variable->TryGetFloat() : std::nullopt;
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+    const auto str = [](std::optional<float> v) { return v ? fmt::format("{:.2f}", *v) : std::string{"?"}; };
+
+    const auto name = m_requested_autores_cvar.exchange(nullptr, std::memory_order_acq_rel);
+    const auto percent = m_requested_autores_percent.exchange(0, std::memory_order_acq_rel);
+    if (name != nullptr && percent > 0) {
+        // Keep the scene textures at their largest size so a lower screen percentage renders into a sub-rect instead
+        // of reallocating them ("least prone to allocation stalls").
+        if (std::wstring_view{name} == L"r.ScreenPercentage" && !m_autores_resize_method_set) {
+            m_autores_resize_method_set = true;
+            engine->exec(L"r.SceneRenderTargetResizeMethod 2");
+            SPDLOG_INFO("[autores] cvar qpc={} r.SceneRenderTargetResizeMethod -> {}", uevr::perf::now_ns(),
+                str(read(L"r.SceneRenderTargetResizeMethod")));
+        }
+
+        const auto before = read(name);
+        const auto start_ns = uevr::perf::now_ns();
+        engine->exec(std::wstring{name} + L" " + std::to_wstring(percent));
+        const auto after = read(name);
+        SPDLOG_INFO("[autores] cvar qpc={} {} {} -> {} (requested {}, exec {:.2f} ms)", start_ns, utility::narrow(name), str(before),
+            str(after), percent, (double)(uevr::perf::now_ns() - start_ns) / 1e6);
+        m_autores_cvars_next_read = {};
+    }
+
+    // Once a second: a game, its settings or an upscaler that puts its own value back shows up here.
+    const auto now = std::chrono::steady_clock::now();
+    if (now < m_autores_cvars_next_read) {
+        return;
+    }
+
+    m_autores_cvars_next_read = now + std::chrono::seconds{1};
+    std::vector<std::optional<float>> values{};
+    for (const auto cvar : watched) {
+        values.push_back(read(cvar));
+    }
+
+    if (values != m_autores_cvars_last) {
+        std::string line{};
+        for (size_t i = 0; i < watched.size(); ++i) {
+            line += fmt::format(" {}={}", utility::narrow(watched[i]), str(values[i]));
+        }
+        SPDLOG_INFO("[autores] cvars qpc={}{}", uevr::perf::now_ns(), line);
+        m_autores_cvars_last = std::move(values);
+    }
+}
+
 void CVarManager::spawn_console() {
     if (m_native_console_spawned) {
         return;
@@ -838,6 +905,7 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     }
 
     process_pending_console_script(engine);
+    process_autores_cvars(engine);
 
     if (!m_ue51_fsr3_runtime_cvars_done) {
         ++m_ue51_fsr3_runtime_cvar_attempts;
