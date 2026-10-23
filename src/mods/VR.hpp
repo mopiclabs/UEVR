@@ -1636,6 +1636,9 @@ private:
     // defers (UE 5.0-5.2, unknown versions), optionally dropping the render-target managers' size-dependent state first.
     const ModCombo::Ptr m_autores_actuator{ ModCombo::create(generate_name("AutoResActuator"), s_autores_actuator_names, 0) };
     const ModCombo::Ptr m_autores_live_mode{ ModCombo::create(generate_name("AutoResLiveMode"), s_autores_live_mode_names, 0) };
+    // Every N seconds from 60 s in (0 = off), step the actuator between 1.0 and 0.7 of the starting value, so the GPU
+    // saving and the hitch of one change can be measured over many changes despite the scene changing.
+    const ModInt32::Ptr m_autores_toggle_seconds{ ModInt32::create(generate_name("AutoResToggleSeconds"), 0, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -2181,6 +2184,7 @@ public:
             *m_autores_hint,
             *m_autores_actuator,
             *m_autores_live_mode,
+            *m_autores_toggle_seconds,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,

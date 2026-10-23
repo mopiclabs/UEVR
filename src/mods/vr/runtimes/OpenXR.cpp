@@ -611,6 +611,19 @@ void OpenXR::on_perf_settings_event(const XrEventDataPerfSettingsEXT& ev) {
 }
 
 void OpenXR::apply_autores_step() {
+    // VR_AutoResToggleSeconds: alternate between 1.0 and 0.7, starting 60 s after the first frame.
+    if (this->autores.toggle_seconds > 0) {
+        const auto now = std::chrono::steady_clock::now();
+
+        if (this->autores.toggle_next.time_since_epoch().count() == 0) {
+            this->autores.toggle_next = now + std::chrono::seconds{60};
+        } else if (now >= this->autores.toggle_next) {
+            this->autores.toggle_next = now + std::chrono::seconds{this->autores.toggle_seconds};
+            const auto current = this->autores.actuator != 0 ? this->autores.sp_scale : this->resolution_scale->value();
+            this->autores.pending_scale = current < 0.85f ? 1.0f : 0.7f;
+        }
+    }
+
     if (!this->autores.pending_scale) {
         return;
     }

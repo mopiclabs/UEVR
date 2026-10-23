@@ -14458,6 +14458,7 @@ void VR::on_present() {
     if (runtime->is_openxr()) {
         m_openxr->autores.executor = m_autores_executor->value();
         m_openxr->autores.actuator = m_autores_actuator->value();
+        m_openxr->autores.toggle_seconds = m_autores_toggle_seconds->value();
         m_cvar_manager->set_autores_watch(m_autores_executor->value());
     }
 
