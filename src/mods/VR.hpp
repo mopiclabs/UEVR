@@ -1498,6 +1498,7 @@ private:
         "OpenXR resolution scale",
         "r.ScreenPercentage",
         "r.DynamicRes.MaxScreenPercentage",
+        "DLSS mode (UDLSSLibrary)",
     };
 
     static const inline std::vector<std::string> s_autores_live_mode_names{

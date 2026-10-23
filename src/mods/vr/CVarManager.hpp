@@ -277,6 +277,8 @@ private:
     std::deque<std::string> m_pending_console_script_commands{};
 
     void process_autores_cvars(sdk::UGameEngine* engine);
+    void set_autores_dlss_mode(sdk::UGameEngine* engine, float scale);
+    std::optional<uint8_t> m_autores_dlss_base{};
     std::atomic<bool> m_autores_watch{false};
     std::atomic<const wchar_t*> m_requested_autores_cvar{nullptr};
     std::atomic<float> m_requested_autores_scale{0.0f};

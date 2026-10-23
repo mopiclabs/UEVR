@@ -635,7 +635,9 @@ void OpenXR::apply_autores_step() {
     // The render resolution inside the same render targets and swapchain; CVarManager sets the cvar on the game thread
     // and logs "[autores] cvar" with the value it reads back.
     if (this->autores.actuator != 0) {
-        const auto cvar = this->autores.actuator == 1 ? L"r.ScreenPercentage" : L"r.DynamicRes.MaxScreenPercentage";
+        const auto cvar = this->autores.actuator == 1 ? L"r.ScreenPercentage"
+            : this->autores.actuator == 2 ? L"r.DynamicRes.MaxScreenPercentage"
+            : L"DLSSMode"; // CVarManager calls UDLSSLibrary for this one
         const auto from = this->autores.sp_scale;
         this->autores.sp_scale = to;
         VR::get()->request_autores_cvar(cvar, to);

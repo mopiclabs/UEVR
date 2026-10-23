@@ -16,7 +16,11 @@
 #include <sdk/MafiaDiscovery.hpp>
 #include <sdk/threading/GameThreadWorker.hpp>
 #include <sdk/ConsoleManager.hpp>
+#include <sdk/FProperty.hpp>
+#include <sdk/UClass.hpp>
+#include <sdk/UFunction.hpp>
 #include <sdk/UGameplayStatics.hpp>
+#include <sdk/UObjectArray.hpp>
 #include <sdk/Utility.hpp>
 
 #include "Framework.hpp"
@@ -812,7 +816,9 @@ void CVarManager::process_autores_cvars(sdk::UGameEngine* engine) {
 
     const auto name = m_requested_autores_cvar.exchange(nullptr, std::memory_order_acq_rel);
     const auto scale = m_requested_autores_scale.load(std::memory_order_acquire);
-    if (name != nullptr && scale > 0.0f) {
+    if (name != nullptr && scale > 0.0f && std::wstring_view{name} == L"DLSSMode") {
+        set_autores_dlss_mode(engine, scale);
+    } else if (name != nullptr && scale > 0.0f) {
         // The game's own value, before the first change: the steps are relative to it (Tekken runs at 58).
         if (!m_autores_cvar_base) {
             const auto base = read(name);
@@ -862,6 +868,93 @@ void CVarManager::process_autores_cvars(sdk::UGameEngine* engine) {
         SPDLOG_INFO("[autores] cvars qpc={}{}", uevr::perf::now_ns(), line);
         m_autores_cvars_last = std::move(values);
     }
+}
+
+// Live-resolution experiment (VR_AutoResActuator 3): the DLSS mode through the DLSS plugin's Blueprint library, for a
+// game whose DLSS keeps its own input resolution whatever r.ScreenPercentage says (Black Myth: Wukong). The mode is
+// read once as the base; a step below 1.0 picks the next lower-resolution mode, above 1.0 the next higher one. The
+// UDLSSMode values are assumed to be the DLSS 3.x ones (3 UltraQuality ... 7 UltraPerformance); any other base is
+// only logged.
+void CVarManager::set_autores_dlss_mode(sdk::UGameEngine* engine, float scale) try {
+    static sdk::UClass* library = nullptr;
+    static sdk::UFunction* get_mode = nullptr;
+    static sdk::UFunction* set_mode = nullptr;
+    static bool looked_up = false;
+
+    const auto describe = [](sdk::UFunction* function) {
+        std::string out = fmt::format("parms {} return@{}", function->get_parms_size(), function->get_return_value_offset());
+        for (auto field = function->get_child_properties(); field != nullptr; field = field->get_next()) {
+            out += fmt::format(" {}@{}", utility::narrow(field->get_field_name().to_string()),
+                ((sdk::FProperty*)field)->get_offset());
+        }
+        return out;
+    };
+    const auto offset_of = [](sdk::UFunction* function, std::wstring_view property) -> std::optional<int32_t> {
+        for (auto field = function->get_child_properties(); field != nullptr; field = field->get_next()) {
+            if (field->get_field_name().to_string() == property) {
+                return ((sdk::FProperty*)field)->get_offset();
+            }
+        }
+        return std::nullopt;
+    };
+    const auto call = [&](sdk::UFunction* function, std::vector<uint8_t>& parms) {
+        if (const auto world_context = offset_of(function, L"WorldContextObject"); world_context) {
+            *(sdk::UObject**)(parms.data() + *world_context) = (sdk::UObject*)engine;
+        }
+        library->get_class_default_object()->process_event(function, parms.data());
+    };
+
+    if (!looked_up) {
+        looked_up = true;
+        library = sdk::find_uobject<sdk::UClass>(L"Class /Script/DLSSBlueprint.DLSSLibrary");
+        if (library != nullptr) {
+            get_mode = library->find_function(L"GetDLSSMode");
+            set_mode = library->find_function(L"SetDLSSMode");
+        }
+        SPDLOG_INFO("[autores] dlss library={:x} GetDLSSMode={} SetDLSSMode={}", (uintptr_t)library,
+            get_mode != nullptr ? describe(get_mode) : "missing", set_mode != nullptr ? describe(set_mode) : "missing");
+    }
+
+    if (library == nullptr || get_mode == nullptr || set_mode == nullptr) {
+        return;
+    }
+
+    const auto read_mode = [&]() {
+        std::vector<uint8_t> parms(get_mode->get_parms_size());
+        call(get_mode, parms);
+        return parms[get_mode->get_return_value_offset()];
+    };
+
+    const auto before = read_mode();
+    if (!m_autores_dlss_base) {
+        m_autores_dlss_base = before;
+        SPDLOG_INFO("[autores] dlss qpc={} base mode {}", uevr::perf::now_ns(), before);
+    }
+
+    const auto base = (int)*m_autores_dlss_base;
+    if (base < 3 || base > 7) {
+        SPDLOG_WARN("[autores] dlss base mode {} is not a DLSS 3.x UltraQuality..UltraPerformance value; not changing it", base);
+        return;
+    }
+
+    const auto steps = scale < 0.68f ? 2 : scale < 0.99f ? 1 : scale > 1.01f ? -1 : 0;
+    const auto target = (uint8_t)std::clamp(base + steps, 3, 7);
+    const auto offset = offset_of(set_mode, L"DLSSMode");
+    if (!offset) {
+        SPDLOG_WARN("[autores] dlss SetDLSSMode has no DLSSMode parameter");
+        return;
+    }
+
+    std::vector<uint8_t> parms(set_mode->get_parms_size());
+    parms[*offset] = target;
+    const auto start_ns = uevr::perf::now_ns();
+    call(set_mode, parms);
+    const auto after = read_mode();
+    SPDLOG_INFO("[autores] dlss qpc={} mode {} -> {} (requested {} = base {} {:+d}, call {:.2f} ms)", start_ns, before, after,
+        target, base, steps, (double)(uevr::perf::now_ns() - start_ns) / 1e6);
+    m_autores_cvars_next_read = {};
+} catch (...) {
+    SPDLOG_WARN("[autores] dlss call threw");
 }
 
 void CVarManager::spawn_console() {
