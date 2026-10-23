@@ -178,6 +178,10 @@ struct Counters {
     std::atomic<uint64_t> nsf_live{}, nsf_snapshot{};
     std::atomic<uint8_t> pending_nsf{}, pending_pair{};
     std::atomic<uint32_t> flags{}; // flag::pack()
+
+    // XR_EXT_performance_settings experiment: the last edge (domain * 1000 + sub domain * 100 + to level, 0 = none)
+    // and the resolution scale in thousandths.
+    std::atomic<uint32_t> autores_event{}, autores_scale_milli{1000};
 };
 
 // Running totals copied into each per-frame record, so every perf-frames.csv row can say what happened since
@@ -198,6 +202,8 @@ struct FrameRecord {
     Submit kind{Submit::Empty};
     NativeStereo nsf{NativeStereo::None};
     NativePair pair{NativePair::None};
+    uint32_t autores_event{};
+    uint32_t autores_scale_milli{};
     FrameTotals totals{};
 };
 
@@ -219,6 +225,12 @@ inline void set_enabled(bool value) noexcept {
 // `flags` = flag::pack(mode bits, sync stage, rendering method).
 inline void set_state(uint32_t flags) noexcept {
     g_counters.flags.store(flags, std::memory_order_relaxed);
+}
+
+// The perf-frames.csv autores_event / autores_scale columns (XR_EXT_performance_settings experiment).
+inline void set_autores(uint32_t event_code, float scale) noexcept {
+    g_counters.autores_event.store(event_code, std::memory_order_relaxed);
+    g_counters.autores_scale_milli.store(static_cast<uint32_t>(scale * 1000.0f + 0.5f), std::memory_order_relaxed);
 }
 
 inline void add(std::atomic<uint64_t>& counter, uint64_t value = 1) noexcept {
@@ -322,6 +334,8 @@ inline void note_xr_end(bool ok, bool projection, uint32_t frame, int64_t end_ti
     record.period_ns = period_ns;
     record.end_ns = duration_ns;
     record.frame = projection ? frame : 0;
+    record.autores_event = c.autores_event.load(std::memory_order_relaxed);
+    record.autores_scale_milli = c.autores_scale_milli.load(std::memory_order_relaxed);
 
     if (!ok) {
         record.kind = Submit::Failed;

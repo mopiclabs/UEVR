@@ -4421,6 +4421,10 @@ std::optional<std::string> VR::initialize_openxr() {
                     wanted_extensions.insert(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
                 }
 
+                if (m_autores_ext->value()) {
+                    wanted_extensions.insert(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+                }
+
                 for (const auto& extension_property : extension_properties) {
                     if (wanted_extensions.contains(extension_property.extensionName)) {
                         spdlog::info("[VR] Enabling {} extension", extension_property.extensionName);
@@ -4428,6 +4432,9 @@ std::optional<std::string> VR::initialize_openxr() {
                         extensions.push_back(extension_property.extensionName);
                     }
                 }
+
+                spdlog::info("[autores] XR_EXT_performance_settings requested={} enabled={}", m_autores_ext->value(),
+                    m_openxr->enabled_extensions.contains(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME));
             }
         } catch(...) {
             spdlog::error("[VR] Unknown error while enumerating OpenXR extensions");
@@ -14429,7 +14436,17 @@ void VR::on_present() {
         return;
     }
 
+    if (runtime->is_openxr()) {
+        m_openxr->autores.executor = m_autores_executor->value();
+    }
+
     runtime->consume_events(nullptr);
+
+    // Outside consume_events' event lock: a resolution step it queued, then the 1 Hz performance level hint.
+    if (runtime->is_openxr()) {
+        m_openxr->apply_autores_step();
+        m_openxr->send_autores_hint(m_autores_hint->value());
+    }
 
     m_fake_stereo_hook->on_frame();
 

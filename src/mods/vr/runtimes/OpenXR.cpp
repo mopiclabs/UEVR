@@ -472,6 +472,217 @@ void emit_openxr_state_probes(OpenXR* openxr, const char* context) {
 }
 }
 
+bool OpenXR::apply_resolution_scale(const char* reason) {
+    auto vr = VR::get();
+    if (vr == nullptr) {
+        return false;
+    }
+
+    const auto old_scale = this->last_applied_resolution_scale;
+    const auto new_scale = this->resolution_scale->value();
+    const auto old_width = this->last_applied_resolution_width != 0 ? this->last_applied_resolution_width : this->get_width_for_scale(old_scale);
+    const auto old_height = this->last_applied_resolution_height != 0 ? this->last_applied_resolution_height : this->get_height_for_scale(old_scale);
+    const auto new_width = this->get_width_for_scale(new_scale);
+    const auto new_height = this->get_height_for_scale(new_scale);
+
+    spdlog::info(
+        "[OpenXR] Resolution scale changed {:.3f}->{:.3f} [{}x{}]->[{}x{}] ({}); recreating renderer textures and swapchains",
+        old_scale,
+        new_scale,
+        old_width,
+        old_height,
+        new_width,
+        new_height,
+        reason
+    );
+
+    const auto applied_live = vr->on_openxr_resolution_scale_changed(old_width, old_height, new_width, new_height);
+
+    if (applied_live) {
+        this->resolution_scale_live_apply_deferred = false;
+        this->last_applied_resolution_scale = new_scale;
+        this->last_applied_resolution_width = new_width;
+        this->last_applied_resolution_height = new_height;
+    } else {
+        this->resolution_scale_live_apply_deferred = true;
+    }
+
+    return applied_live;
+}
+
+namespace {
+// The experiment's resolution ladder (auto_resolution_design_v1.md 1, uniform for now: UEVR has no width-only scale).
+constexpr std::array<float, 4> AUTORES_LADDER{1.25f, 1.0f, 0.833f, 0.667f};
+// An edge this soon after the last change is skipped.
+constexpr auto AUTORES_MIN_CHANGE_GAP = std::chrono::seconds(10);
+
+const char* perf_domain_name(XrPerfSettingsDomainEXT domain) {
+    switch (domain) {
+    case XR_PERF_SETTINGS_DOMAIN_CPU_EXT: return "CPU";
+    case XR_PERF_SETTINGS_DOMAIN_GPU_EXT: return "GPU";
+    default: return "?";
+    }
+}
+
+const char* perf_sub_domain_name(XrPerfSettingsSubDomainEXT sub_domain) {
+    switch (sub_domain) {
+    case XR_PERF_SETTINGS_SUB_DOMAIN_COMPOSITING_EXT: return "COMPOSITING";
+    case XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT: return "RENDERING";
+    case XR_PERF_SETTINGS_SUB_DOMAIN_THERMAL_EXT: return "THERMAL";
+    default: return "?";
+    }
+}
+
+const char* perf_notify_level_name(XrPerfSettingsNotificationLevelEXT level) {
+    switch (level) {
+    case XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT: return "NORMAL";
+    case XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT: return "WARNING";
+    case XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT: return "IMPAIRED";
+    default: return "?";
+    }
+}
+
+const char* perf_level_name(XrPerfSettingsLevelEXT level) {
+    switch (level) {
+    case XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT: return "POWER_SAVINGS";
+    case XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT: return "SUSTAINED_LOW";
+    case XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT: return "SUSTAINED_HIGH";
+    case XR_PERF_SETTINGS_LEVEL_BOOST_EXT: return "BOOST";
+    default: return "?";
+    }
+}
+
+size_t autores_ladder_index(float scale) {
+    size_t best = 0;
+    for (size_t i = 1; i < AUTORES_LADDER.size(); ++i) {
+        if (std::abs(AUTORES_LADDER[i] - scale) < std::abs(AUTORES_LADDER[best] - scale)) {
+            best = i;
+        }
+    }
+    return best;
+}
+}
+
+void OpenXR::on_perf_settings_event(const XrEventDataPerfSettingsEXT& ev) {
+    const auto now = std::chrono::steady_clock::now();
+    this->autores.last_event_code = (uint32_t)ev.domain * 1000 + (uint32_t)ev.subDomain * 100 + (uint32_t)ev.toLevel;
+    uevr::perf::set_autores(this->autores.last_event_code, this->resolution_scale->value());
+
+    spdlog::info("[autores] event qpc={} domain={} sub={} from={} to={}", uevr::perf::now_ns(), perf_domain_name(ev.domain),
+        perf_sub_domain_name(ev.subDomain), perf_notify_level_name(ev.fromLevel), perf_notify_level_name(ev.toLevel));
+
+    if (!this->autores.executor) {
+        return;
+    }
+
+    if (ev.domain != XR_PERF_SETTINGS_DOMAIN_GPU_EXT || ev.subDomain != XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT) {
+        spdlog::info("[autores] executor: {}/{} is logged only", perf_domain_name(ev.domain), perf_sub_domain_name(ev.subDomain));
+        return;
+    }
+
+    if (ev.toLevel == XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT) {
+        spdlog::info("[autores] executor: WARNING, holding the current scale");
+        return;
+    }
+
+    if (this->autores.last_change.time_since_epoch().count() != 0 && now - this->autores.last_change < AUTORES_MIN_CHANGE_GAP) {
+        spdlog::info("[autores] executor: skipped, last change {} ms ago",
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - this->autores.last_change).count());
+        return;
+    }
+
+    const auto current = this->resolution_scale->value();
+    const auto index = autores_ladder_index(current);
+    std::optional<size_t> target{};
+
+    if (ev.toLevel == XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT && index + 1 < AUTORES_LADDER.size()) {
+        target = index + 1;
+    } else if (ev.toLevel == XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT && index > 0) {
+        target = index - 1;
+    }
+
+    if (!target) {
+        spdlog::info("[autores] executor: no step from {:.3f} (end of the ladder)", current);
+        return;
+    }
+
+    this->autores.pending_scale = AUTORES_LADDER[*target];
+    spdlog::info("[autores] executor: queued {:.3f}->{:.3f}", current, AUTORES_LADDER[*target]);
+}
+
+void OpenXR::apply_autores_step() {
+    if (!this->autores.pending_scale) {
+        return;
+    }
+
+    const auto from = this->resolution_scale->value();
+    const auto to = *this->autores.pending_scale;
+    this->autores.pending_scale.reset();
+    this->autores.last_change = std::chrono::steady_clock::now();
+
+    const auto start_ns = uevr::perf::now_ns();
+    this->resolution_scale->value() = to;
+    const auto applied_live = this->apply_resolution_scale("autores");
+    const auto end_ns = uevr::perf::now_ns();
+
+    // This engine path can't rebuild live: keep rendering and stepping from the scale actually in use, not a saved
+    // value for the next injection.
+    if (!applied_live) {
+        this->resolution_scale->value() = from;
+        this->resolution_scale_live_apply_deferred = false;
+    }
+
+    uevr::perf::set_autores(this->autores.last_event_code, applied_live ? to : from);
+    spdlog::info("[autores] scale qpc={} {:.3f}->{:.3f} applied_live={} took_ms={:.1f}{}", start_ns, from, to, applied_live,
+        (double)(end_ns - start_ns) / 1e6, applied_live ? "" : " (reverted)");
+}
+
+void OpenXR::send_autores_hint(bool enabled) {
+    if (!enabled || this->session == XR_NULL_HANDLE || !this->session_ready) {
+        return;
+    }
+
+    if (!this->autores.set_performance_level_looked_up) {
+        this->autores.set_performance_level_looked_up = true;
+
+        if (!this->enabled_extensions.contains(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME)) {
+            spdlog::warn("[autores] hint: XR_EXT_performance_settings is not enabled, no hints");
+            return;
+        }
+
+        const auto result = xrGetInstanceProcAddr(this->instance, "xrPerfSettingsSetPerformanceLevelEXT",
+            (PFN_xrVoidFunction*)&this->autores.set_performance_level);
+        spdlog::info("[autores] hint: xrGetInstanceProcAddr(xrPerfSettingsSetPerformanceLevelEXT) = {}",
+            this->get_result_string(result));
+        this->autores.hint_start = std::chrono::steady_clock::now();
+    }
+
+    if (this->autores.set_performance_level == nullptr) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - this->autores.last_hint < std::chrono::seconds(1)) {
+        return;
+    }
+    this->autores.last_hint = now;
+
+    // Wiring check: a fixed cycle, five seconds per level.
+    constexpr std::array<XrPerfSettingsLevelEXT, 4> cycle{
+        XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT,
+        XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT,
+        XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT,
+        XR_PERF_SETTINGS_LEVEL_BOOST_EXT,
+    };
+    const auto step = std::chrono::duration_cast<std::chrono::seconds>(now - this->autores.hint_start).count() / 5;
+    const auto level = cycle[(size_t)step % cycle.size()];
+
+    const auto sent_ns = uevr::perf::now_ns();
+    const auto result = this->autores.set_performance_level(this->session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, level);
+    spdlog::info("[autores] hint qpc={} domain=GPU level={} result={}", sent_ns, perf_level_name(level),
+        this->get_result_string(result));
+}
+
 void OpenXR::on_draw_ui() {
     ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     if (ImGui::TreeNode("OpenXR Options")) {
@@ -487,36 +698,7 @@ void OpenXR::on_draw_ui() {
 
         if (this->resolution_scale_reconfigure_pending && !ImGui::IsItemActive()) {
             this->resolution_scale_reconfigure_pending = false;
-
-            if (auto vr = VR::get(); vr != nullptr) {
-                const auto old_scale = this->last_applied_resolution_scale;
-                const auto new_scale = this->resolution_scale->value();
-                const auto old_width = this->last_applied_resolution_width != 0 ? this->last_applied_resolution_width : this->get_width_for_scale(old_scale);
-                const auto old_height = this->last_applied_resolution_height != 0 ? this->last_applied_resolution_height : this->get_height_for_scale(old_scale);
-                const auto new_width = this->get_width_for_scale(new_scale);
-                const auto new_height = this->get_height_for_scale(new_scale);
-
-                spdlog::info(
-                    "[OpenXR] Resolution scale changed {:.3f}->{:.3f} [{}x{}]->[{}x{}]; recreating renderer textures and swapchains",
-                    old_scale,
-                    new_scale,
-                    old_width,
-                    old_height,
-                    new_width,
-                    new_height
-                );
-
-                const auto applied_live = vr->on_openxr_resolution_scale_changed(old_width, old_height, new_width, new_height);
-
-                if (applied_live) {
-                    this->resolution_scale_live_apply_deferred = false;
-                    this->last_applied_resolution_scale = new_scale;
-                    this->last_applied_resolution_width = new_width;
-                    this->last_applied_resolution_height = new_height;
-                } else {
-                    this->resolution_scale_live_apply_deferred = true;
-                }
-            }
+            this->apply_resolution_scale("slider");
         }
 
         if (this->resolution_scale_live_apply_deferred) {
@@ -1917,6 +2099,8 @@ VRRuntime::Error OpenXR::consume_events(std::function<void(void*)> callback) {
             }
         } else if (bh->type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             this->wants_reset_origin = true;
+        } else if (bh->type == XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT) {
+            this->on_perf_settings_event(*(const XrEventDataPerfSettingsEXT*)&edb);
         }
 
         edb = {XR_TYPE_EVENT_DATA_BUFFER};

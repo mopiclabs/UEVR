@@ -1611,6 +1611,11 @@ private:
     // perf.csv / perf-frames.csv next to log.txt (see PerfLog.hpp). Off by default: perf-frames.csv grows by a row per
     // frame for as long as the game runs; the test harness turns it on for its runs.
     const ModToggle::Ptr m_perf_log{ ModToggle::create(generate_name("PerfLog"), false, true) };
+    // XR_EXT_performance_settings wiring experiment (M0, off by default): request the extension, act on the runtime's
+    // GPU rendering edges with one resolution-scale step, send the runtime a GPU performance level once a second.
+    const ModToggle::Ptr m_autores_ext{ ModToggle::create(generate_name("AutoResExt"), false, true) };
+    const ModToggle::Ptr m_autores_executor{ ModToggle::create(generate_name("AutoResExecutor"), false, true) };
+    const ModToggle::Ptr m_autores_hint{ ModToggle::create(generate_name("AutoResHint"), false, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -2151,6 +2156,9 @@ public:
             *m_openxr_afr_depth_target_stability,
             *m_enable_hitch_diagnostics,
             *m_perf_log,
+            *m_autores_ext,
+            *m_autores_executor,
+            *m_autores_hint,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,

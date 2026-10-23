@@ -1,11 +1,13 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <unordered_set>
 #include <deque>
 #include <chrono>
 #include <limits>
 #include <mutex>
+#include <optional>
 
 #include <d3d11.h>
 #include <d3d12.h>
@@ -170,6 +172,13 @@ public:
     bool close_synced_frame_without_layers(const char* reason);
     bool discard_synced_frame_without_layers(const char* reason);
     void prepare_resolution_scale_reconfigure(const char* reason);
+    // Rebuild the renderer and swapchains for resolution_scale's current value (the "Resolution Scale" slider's path).
+    // Returns whether it applied live; on false the value stays saved for the next injection.
+    bool apply_resolution_scale(const char* reason);
+    // XR_EXT_performance_settings experiment, called by VR after consume_events: the step an edge queued, then the
+    // 1 Hz GPU performance level hint.
+    void apply_autores_step();
+    void send_autores_hint(bool enabled);
     bool recover_focused_stale_frame_loop(const char* caller);
     void log_frame_lifecycle_state(const char* prefix) const;
     void trace_wait_frame_success(std::optional<uint32_t> frame_count, SyncFrameCallsite callsite);
@@ -442,6 +451,21 @@ public:
     float last_applied_resolution_scale{1.0f};
     uint32_t last_applied_resolution_width{};
     uint32_t last_applied_resolution_height{};
+
+    // XR_EXT_performance_settings experiment (VR_AutoResExt/Executor/Hint). consume_events records the runtime's
+    // edges and, with the executor on, queues one resolution-scale step; apply_autores_step carries it out.
+    struct AutoRes {
+        bool executor{false};                        // VR_AutoResExecutor, refreshed before each consume_events
+        std::optional<float> pending_scale{};        // queued by an edge, applied outside the event lock
+        uint32_t last_event_code{};                  // domain * 1000 + sub domain * 100 + to level (PerfLog autores_event)
+        std::chrono::steady_clock::time_point last_change{};
+        PFN_xrPerfSettingsSetPerformanceLevelEXT set_performance_level{nullptr};
+        bool set_performance_level_looked_up{false};
+        std::chrono::steady_clock::time_point hint_start{};
+        std::chrono::steady_clock::time_point last_hint{};
+    } autores{};
+    void on_perf_settings_event(const XrEventDataPerfSettingsEXT& ev);
+
     bool push_dummy_projection{ false };
     // The system is Mopic's 3D display ("Monado: MOPIC 3D Display"), a desktop monitor rather than a headset.
     std::atomic_bool is_mopic_display{false};
