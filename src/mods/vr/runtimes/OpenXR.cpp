@@ -637,7 +637,8 @@ void OpenXR::apply_autores_step() {
     if (this->autores.actuator != 0) {
         const auto cvar = this->autores.actuator == 1 ? L"r.ScreenPercentage"
             : this->autores.actuator == 2 ? L"r.DynamicRes.MaxScreenPercentage"
-            : L"DLSSMode"; // CVarManager calls UDLSSLibrary for this one
+            : this->autores.actuator == 3 ? L"DLSSMode" // CVarManager calls UDLSSLibrary for this one
+            : L"r.NGX.DLSS.Quality";
         const auto from = this->autores.sp_scale;
         this->autores.sp_scale = to;
         VR::get()->request_autores_cvar(cvar, to);

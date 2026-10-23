@@ -818,6 +818,23 @@ void CVarManager::process_autores_cvars(sdk::UGameEngine* engine) {
     const auto scale = m_requested_autores_scale.load(std::memory_order_acquire);
     if (name != nullptr && scale > 0.0f && std::wstring_view{name} == L"DLSSMode") {
         set_autores_dlss_mode(engine, scale);
+    } else if (name != nullptr && scale > 0.0f && std::wstring_view{name} == L"r.NGX.DLSS.Quality") {
+        // The UE4-era DLSS plugin's quality, -2 (Ultra Performance) .. 2 (Ultra Quality), drives the input resolution
+        // and r.ScreenPercentage is ignored (Hogwarts Legacy): one quality down per step below 1.0, one up above.
+        const auto before = read(name);
+        if (!m_autores_cvar_base) {
+            m_autores_cvar_base = before.value_or(0.0f);
+            SPDLOG_INFO("[autores] cvar qpc={} r.NGX.DLSS.Quality base {} (read {})", uevr::perf::now_ns(),
+                str(m_autores_cvar_base), str(before));
+        }
+
+        const auto steps = scale < 0.68f ? -2 : scale < 0.99f ? -1 : scale > 1.01f ? 1 : 0;
+        const auto target = std::clamp((int)std::lround(*m_autores_cvar_base) + steps, -2, 2);
+        const auto start_ns = uevr::perf::now_ns();
+        engine->exec(L"r.NGX.DLSS.Quality " + std::to_wstring(target));
+        SPDLOG_INFO("[autores] cvar qpc={} r.NGX.DLSS.Quality {} -> {} (requested {} = base {} {:+d}, exec {:.2f} ms)", start_ns,
+            str(before), str(read(name)), target, str(m_autores_cvar_base), steps, (double)(uevr::perf::now_ns() - start_ns) / 1e6);
+        m_autores_cvars_next_read = {};
     } else if (name != nullptr && scale > 0.0f) {
         // The game's own value, before the first change: the steps are relative to it (Tekken runs at 58).
         if (!m_autores_cvar_base) {

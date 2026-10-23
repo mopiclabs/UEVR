@@ -1499,6 +1499,7 @@ private:
         "r.ScreenPercentage",
         "r.DynamicRes.MaxScreenPercentage",
         "DLSS mode (UDLSSLibrary)",
+        "r.NGX.DLSS.Quality (UE4 DLSS plugin)",
     };
 
     static const inline std::vector<std::string> s_autores_live_mode_names{
