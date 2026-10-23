@@ -56,6 +56,7 @@ powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game <pr
 | `-InjectDelay <s>` | late injection (inject this many seconds after the game started) |
 | `-SaveFile <path> [-SaveAs <name>]` | before each run, copy this save over the file the recipe's `save_slot` names (`-SaveAs`: another file name in that folder), stamped with the current time so Steam Cloud keeps it. The file there before goes to `<run>\save-before\`, the file after the run (also after a crash or a hang) to `<run>\save-after\`; source, sha256 and target are in result.json / summary.txt. Nothing in the save folder is deleted. A relative path is tried from the current folder, then from `tools\mopic-test`. A failed install makes that run `HARNESS_ERROR` without launching the game. |
 | `-SaveSlot <file>` | with `-SaveFile`: the file it replaces, with `save_slot`'s placeholders (`"{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"`), instead of the recipe's `save_slot`; also works without a recipe (discovery with `-WaitForExit`) |
+| `-NoSave` | install no save, not even the recipe's `save_default`: the run plays the game's own progress as it is (run-ladder's rungs without `save`). Not with `-SaveFile` / `-SaveSlot` / `-SaveAs` |
 | `-RecipeVars "k=v;k2=v2"` | values for the recipe's `vars` (`${k}` in its steps; gamepilot `run --var k=v`). A name the recipe doesn't declare, or a declared var without a default that isn't given, stops the harness before the first run. Values can't contain `;`. |
 | `-GameIni "file\|Section\|Key=Value;Key2=Value2"` | the game's own settings for this run only (frame generation, a cvar in Engine.ini): `file` is a file name in the game's config folder (where its GameUserSettings.ini is), or a full path with `save_slot`'s placeholders; an entry without `file\|` keeps the previous file (the first defaults to GameUserSettings.ini), one with only `Key=Value` the previous section too; the value is everything after the first `=` (quotes, `\|`, parentheses), no `;`. A recipe's `game_ini` does the same. Each file is copied to `runs\game-ini-pending\` (with a journal) and `<run>\game-ini-before\` before it changes, keeps its encoding, line breaks and every other line, and goes back byte for byte once the game is gone (also after a crash or a hang; its time and attributes too, sha256 checked); the file as the game left it is in `<run>\game-ini-after\`. A harness that dies in between is undone by the next harness start, which stops that run's game first; a file that couldn't be put back is retried before the next run's change, and while that fails the run is `HARNESS_ERROR` without touching anything (the pending copies are the only originals). A file that wouldn't be written back byte for byte unchanged (UTF-16 without its BOM, bytes its encoding doesn't map back) is refused before anything is copied. A section that appears twice counts as one, as in UE. result.json `game_ini` has each key's value before and after the run; a value the game changed is a WARN note. Not with `-KeepGame`. |
 | `-MopicSbs` | monado-service runs with `MOPIC_MODE=sbs`: the pilot reads a `"source": "mopic"` recipe's screens from the left eye (gamepilot `--source mopic-sbs`) |
@@ -78,7 +79,9 @@ runs a save ladder: one harness run per rung of `ladders\<Game>.json`, each from
 one), its recipe (exists, has a `save_slot`, declares the rung's vars, gets every var it has no default for). It
 stops after a rung that ended `HARNESS_ERROR` or `NO_VR` (the runs after it wouldn't be valid tests; `-StopOn`
 sets the list). A rung whose harness wrote no result.json is a `HARNESS_ERROR` row with the harness's error
-message. Other rung fields (notes, descriptions) are ignored.
+message. Other rung fields (notes, descriptions) are ignored. A rung without `save` runs with `-NoSave`: it plays
+the game's own progress as it is (demos, games whose progress is several files), also when its recipe has a
+`save_default`; its recipe needs no `save_slot`.
 
 ```
 {"game": "Wukong", "recipe": "Wukong-save",
@@ -90,14 +93,16 @@ defaults to 1 and `-Tier N` runs the rungs with tier <= N. A rung's `vars` becom
 objects as JSON; a `null` var is left out, so the recipe's default applies). Run folders are
 `<time>-<game>-<Label>-<rung>-r<n>`.
 
-After changing run-test.ps1, run-ladder.ps1, gamepilot.py, perfreport.py or eyesampler.py, run `selftest\selftest.ps1` (about 9
-minutes, no game: a stand-in process compiled from `selftest\fakegame.cs` plays the game; it compares runs without
-`-SaveFile` against the committed run-test.ps1, never touches a real save folder or game settings file, round-trips
-`-GameIni` on temp files (and on a copy of Hogwarts' GameUserSettings.ini when there is one), checks perfreport.py on
-synthetic runs with `selftest\selftest_perf.py` and the eye sampler on synthetic side-by-side frames with
-`selftest\selftest_eyes.py`). `-NoWindows` skips the sections whose stand-in has a window (invisible, but a window) or
-that start whoami.exe in a console, for a PC someone is using; the `-GameIni` end-to-end runs (a crash, a killed
-harness) use the stand-in without a window and still run. Work folders go to `runs\selftest\work-<time>\`.
+After changing run-test.ps1, run-ladder.ps1, gamepilot.py, perfreport.py, eyesampler.py or a recipe, run
+`selftest\selftest.ps1` (about 9 minutes, no game: a stand-in process compiled from `selftest\fakegame.cs` plays the
+game; it compares runs without `-SaveFile` against the committed run-test.ps1, never touches a real save folder or
+game settings file, round-trips `-GameIni` on temp files (and on a copy of Hogwarts' GameUserSettings.ini when there
+is one), checks perfreport.py on synthetic runs with `selftest\selftest_perf.py`, the eye sampler on synthetic
+side-by-side frames with `selftest\selftest_eyes.py`, and every recipe with `selftest\selftest_recipes.py`: each
+checkpoint image there and the size of its region, where a `"draft": true` recipe may still miss images).
+`-NoWindows` skips the sections whose stand-in has a window (invisible, but a window) or that start whoami.exe in a
+console, for a PC someone is using; the `-GameIni` end-to-end runs (a crash, a killed harness) use the stand-in
+without a window and still run. Work folders go to `runs\selftest\work-<time>\`.
 
 Verdicts:
 
@@ -142,7 +147,7 @@ from these sources, all timed in QueryPerformanceCounter ns ("QPC ns": Python's 
 its summary is result.json's `perf`, its line goes into summary.txt:
 
 ```
-perf[gameplay 50.0s, settle 4.0s, excluded menu 10s]: VR 47.8 fps (1% low 30.0, p99 33.3 ms, 2 hitches, 1 >=100 ms, 1 stalls) | paced 60:60% 30:40% <=20:0% (max period 33 ms) | work 8.7 ms | display: new frame on 80% of refreshes (48.0/s), 1 dropped | game Present 120.0 fps (sim 60.0) | FG on | GPU 95% 2100 MHz 79C 120/160 W | hint paced
+perf[gameplay 50.0s, settle 4.0s, excluded menu 10s]: VR 47.8 fps (1% low 30.0, p99 33.3 ms, 2 hitches, 1 >=108 ms, 1 stalls) | paced 60:60% 30:40% <=20:0% (max period 33 ms) | work 8.7 ms | display: new frame on 80% of refreshes (48.0/s), 1 dropped | game Present 120.0 fps (sim 60.0) | FG on | GPU 95% 2100 MHz 79C 120/160 W | hint paced
 ```
 
 What is measured:
@@ -165,8 +170,8 @@ Fields (summary; `perf.json` has the same per segment):
 | --- | --- |
 | `vr.fps` | new engine frames submitted (`P` rows: an engine frame newer than every one submitted before) per measured second: the VR frame rate. monado paces in whole refreshes, so it moves in steps of 60 / 30 / 20. With 2x frame generation every engine frame is submitted twice (the second Present resubmits the previous one): those are `R`. perf-frames.csv files from before UEVR counted them as `R` are reclassified from their `frame` column (with a warning) |
 | `vr.frame_ms` {p50, p95, p99, p999, max}, `low1_fps`, `low01_fps` | wall-clock intervals between new-frame submits; 1% low = 1000 / p99; p99.9 only with 10000+ intervals |
-| `vr.hitches`, `hitch_per_min`, `hitches_100`, `hitch100_per_min`, `stalls`, `hitches_in_capture` | hitch: new-frame interval >= 50 ms (`hitch_ms`), the same limit for every build; `hitches_100`: interval >= 100 ms; stall >= 250 ms; hitches overlapping a pilot screen capture. Compare builds with these two: the limit does not move with a build's own speed. Results from before 2026-10-21 have `hitches` against max(50 ms, 2x the run's median) and no `hitches_100`: a faster build got a lower limit and counted more hitches for the same long frames (Wukong wk60 vs the build before: 2.4x the hitches, the same >= 50 ms and >= 100 ms counts) |
-| `vr.hitches_rel`, `hitch_rel_ms` | the old relative rule: interval >= max(50 ms, 2x the run's median), `hitch_rel_ms` its limit. Only for a game below 25 fps, where 50 ms is an ordinary frame time; the perf line adds `(N rel)` to `hitches` when it differs (median above 25 ms). `flat` has `hitches`, `hitch_per_min`, `hitches_100`, `hitch100_per_min` and `hitches_rel` the same way |
+| `vr.hitches`, `hitch_per_min`, `hitches_100`, `hitch100_per_min`, `stalls`, `hitches_in_capture` | hitch: new-frame interval >= 58 ms (`hitch_ms`: 3.5 refreshes at 60 Hz), the same limit for every build; `hitches_100`: interval >= 108 ms (`hitch_big_ms`, 6.5 refreshes; the name is from the 100 ms limit before); stall >= 250 ms; hitches overlapping a pilot screen capture. Compare builds with these two: the limit does not move with a build's own speed. `hitch_rule` names the rule (`fixed 58/108 ms`); compare only counts of one rule. Results without it: from 2026-10-21/22, `hitches` >= 50 ms and `hitches_100` >= 100 ms (a 30 fps game's ordinary frame-time spread reaches 50 ms: Expedition 33 counted 5-21 per run there, 0-3 at 58 ms; 60 fps games the same either way); from before 2026-10-21, `hitches` against max(50 ms, 2x the run's median) and no `hitches_100`: a faster build got a lower limit and counted more hitches for the same long frames (Wukong wk60 vs the build before: 2.4x the hitches, the same >= 50 ms and >= 100 ms counts) |
+| `vr.hitches_rel`, `hitch_rel_ms` | the old relative rule as it was before 2026-10-21, for comparisons with older results: interval >= max(50 ms, 2x the run's median), `hitch_rel_ms` its limit. Otherwise only for a game below about 34 fps, where a frame of `hitch_ms` is an ordinary one; the perf line adds `(N rel)` to `hitches` only there (its limit above `hitch_ms`: a median above 29 ms). `flat` has `hitches`, `hitch_rule`, `hitch_per_min`, `hitches_100`, `hitch100_per_min` and `hitches_rel` the same way |
 | `vr.paced_pct` {1, 2, 3+}, `s_at_3plus`, `period_max_ms` | time at the predicted display period of 1 / 2 / 3+ refreshes |
 | `vr.predicted_slot_ms` | steps of the predicted display time between new frames. monado's display timing is a synthetic 60 Hz grid: not what the viewer saw (that is `display`) |
 | `vr.work_ms` | median of (submit interval - time in xrWaitFrame): the game's cost, continuous where fps moves in steps. Null with a note unless the very-late sync runs on one thread (no async wait, xrWaitFrame at `vr_very_late_post_present`) and no frame cap applies |
@@ -178,8 +183,8 @@ Fields (summary; `perf.json` has the same per segment):
 | `framegen` | `on`, `measured`, `presents_per_tick`, `evidence`. Measured first: UEVR Present passes per engine tick (1.7 or more, not in AFR) and PresentMon frame types / presents per simulated frame; when one of them could be measured they decide (`measured` true). UEVR's Streamline frame-generation swapchain flag, nvngx_dlssg.dll loaded (UEVR, or the harness's module probe) and the log line only show it is available, and decide only without a measurement. `setting` from GameUserSettings.ini. Measured and flagged, never changed |
 | `capped` | the game's FrameRateLimit (and VSync without UEVR); with UEVR it binds when the limit, halved in AFR, is at most the refresh rate |
 | `mode`, `gpu`, `window`, `power`, `settings`, `render_config` | UEVR's mode (AFR, NSF, D3D12, sync stage, rendering method, the xrWaitFrame `callsite` of most frames, foreground share); GPU load, clock, temperature, power limit and throttle reasons; the game window's monitor and adapter; AC/battery and power mode; the settings fingerprint and what changed; a fingerprint of the run's `VR_*` config |
-| `compare` | `flat`: the newest PASS `-NoInject` runs with the same game, recipe, vars, label, settings, monitor and variant (perf-context.json `variant`: `-EyeSampler` on, the `-GameIni` / `game_ini` values; runs with them only compare among themselves) (`vr_vs_flat60` = VR fps / (min(flat, refresh) / 2 in AFR)); `prev_build`: the newest PASS runs of another UEVRBackend.dll with the same keys. With 3+ such runs and a spread under 10 %, a 5 % lower fps below their range, a 15 % higher p99, doubled hitches/min (and 2 more per minute), doubled >= 100 ms hitches/min (and 1 more per minute; both only against previous runs that have `hitches_100`) or 10 % more work is a `regression`: a `WARN: perf regression` note, never a verdict |
-| `headline` | what the matrix and ladder tables show: fps, 1% low, hitches, FG |
+| `compare` | `flat`: the newest PASS `-NoInject` runs with the same game, recipe, vars, label, settings, monitor and variant (perf-context.json `variant`: `-EyeSampler` on, the `-GameIni` / `game_ini` values; runs with them only compare among themselves) (`vr_vs_flat60` = VR fps / (min(flat, refresh) / 2 in AFR)); `prev_build`: the newest PASS runs of another UEVRBackend.dll with the same keys. With 3+ such runs and a spread under 10 %, a 5 % lower fps below their range, a 15 % higher p99, doubled hitches/min (and 2 more per minute), doubled >= 108 ms hitches/min (and 1 more per minute; both only against previous runs with the same `hitch_rule`) or 10 % more work is a `regression`: a `WARN: perf regression` note, never a verdict |
+| `headline` | what the matrix and ladder tables show: fps, 1% low, hitches (and their `hitch_rule`), FG |
 
 PresentMon needs admin rights or the "Performance Log Users" group (add the account in `compmgmt.msc`, then sign
 out and in). Without them it stops at once with "access denied": the harness notes `PresentMon access denied` in
@@ -313,8 +318,8 @@ come from one submitted frame, so they normally change in the same refresh. `ana
   preset's install folder), `{localappdata}`, `{appdata}`, `{documents}`. The folder has to exist already.
   `-SaveFile` without a `save_slot` (or `-SaveSlot`) is an error.
 - `save_default`: the `-SaveFile` (relative to this folder) for runs that give none, for a recipe that only works
-  from one save (`Wukong-shrine`: the post-game save at the Zodiac Village shrine). Without it a run loads whatever
-  an earlier run left in the slot.
+  from one save (`Wukong-shrine`: the post-game save at the Zodiac Village shrine; `Wukong-still`: ladder rung
+  1.0). Without it a run loads whatever an earlier run left in the slot. `-NoSave` skips it.
 - `vars`: `{"play_s": 120, "boss": null}`, the names the steps may use as `${name}`, with their defaults (`null`:
   no default, it must be given). `--var name=value` (`-RecipeVars`) sets one; the value is read as JSON when it
   parses (`180`, `[110, 305]`, `true`, `["hud", "loading"]`), else as text. A step string that is only `${name}`
@@ -331,7 +336,7 @@ showing right now.
 
 | Step | Does |
 | --- | --- |
-| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead, `"move": [x, y]` hovers again (a couple of pixels off each time; a dialog still fading in can miss the first hover); only after a failed check. |
+| `{"wait_for": "x", "timeout": 30}` | wait until checkpoint x shows. A list waits for any of them. `"press": "enter", "every": 5` presses a key meanwhile (skipping movies), `"click": [x, y]` clicks instead, `"move": [x, y]` hovers again (a couple of pixels off each time; a dialog still fading in can miss the first hover); only after a failed check. One of the three: a step with two is refused before the run starts. |
 | `{"wait_gone": "x", "timeout": 180, "for": 3}` | wait until checkpoint x (or any of a list) has not shown for `for` seconds in a row: a loading screen going away, so gameplay starts right when the player can move |
 | `{"seek": "x", "press": "down", "max": 8}` | press until x shows (menu cursors don't always start on the same item; menus usually wrap around, so `max` should cover one lap) |
 | `{"key": "enter", "times": 1}` / `{"keys": "up enter"}` / `{"click": [x, y]}` / `{"move": [x, y]}` / `{"wait": 2}` | input (`move` hovers: menus that highlight under the mouse) / pause |

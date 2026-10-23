@@ -53,8 +53,10 @@ SETTLE_FIXED_S = 5.0     # without UEVR's predicted period: this much, at most a
 EXCLUDE_RUN_S = 3        # loading-like seconds (no tick, no new frame, mostly empty submits, no submit at all) in runs
                          # this long are left out; shorter ones stay in, as the stalls they are
 OBSERVE_AFTER_S = 30.0   # runs without a recipe: measured from XR focus (or the game's start) + this
-HITCH_MIN_MS = 50.0      # hitch: an interval >= this, the same limit for every build
-HITCH_BIG_MS = 100.0     # big hitch: an interval >= this (hitches_100)
+HITCH_MIN_MS = 58.0      # hitch: an interval >= this, the same limit for every build; 3.5 refreshes at 60 Hz, between
+HITCH_BIG_MS = 108.0     # the 3 and 4 refreshes a frame is shown for. Big hitch (hitches_100): 6.5 refreshes
+HITCH_RULE = f"fixed {HITCH_MIN_MS:g}/{HITCH_BIG_MS:g} ms"   # perf.json "hitch_rule"; a reader compares counts of one rule
+REL_FLOOR_MS = 50.0      # hitches_rel: the rule before 2026-10-21 as it was, for comparisons with older results
 STALL_MS = 250.0         # stall: an interval >= this (UEVR's tick-gap warning threshold)
 LOW01_MIN = 10000        # 0.1% lows (p99.9) only with this many intervals
 LATE_MARGIN_MS = 4.0     # monado shows a frame 4 ms after its present (u_pacing_compositor_fake.c)
@@ -826,17 +828,30 @@ def interval_stats(intervals_ms):
 
 
 def hitch_limit(p50):
-    """The relative hitch limit (`hitches_rel`), the rule before 2026-10-21: max(HITCH_MIN_MS, 2x the run's median). A
-    faster build gets a lower limit than a slower one: Black Myth: Wukong's wk60 build (median 19-28 ms, limit 50 ms)
-    counted about 2.4x the hitches of the build before it (median 30 ms, limit 60 ms) for the same number of long
-    frames. Only a game that runs below 25 fps, where 50 ms is an ordinary frame time, needs it."""
-    return max(HITCH_MIN_MS, 2 * p50) if p50 else HITCH_MIN_MS
+    """The relative hitch limit (`hitches_rel`), the rule before 2026-10-21: max(REL_FLOOR_MS, 2x the run's median),
+    kept as it was for comparisons with older results. A faster build gets a lower limit than a slower one: Black
+    Myth: Wukong's wk60 build (median 19-28 ms, limit 50 ms) counted about 2.4x the hitches of the build before it
+    (median 30 ms, limit 60 ms) for the same number of long frames. Beyond that, only a game whose median frame is
+    over half of HITCH_MIN_MS (under about 34 fps), where a frame that long is an ordinary one, needs it."""
+    return max(REL_FLOOR_MS, 2 * p50) if p50 else REL_FLOOR_MS
+
+
+def hitch_rule_of(counts):
+    """The rule a result's hitch counts follow: its "hitch_rule"; results without one are from 2026-10-21/22 (>= 50 /
+    >= 100 ms, with hitches_100) or older (against max(50 ms, 2x their median), no hitches_100)."""
+    if counts.get("hitch_rule"):
+        return counts["hitch_rule"]
+    return "fixed 50/100 ms" if counts.get("hitches_100") is not None else "max(50 ms, 2x median)"
+
+
+def is_hitch(ms):
+    return ms >= HITCH_MIN_MS
 
 
 def hitch_counts(intervals_ms, p50):
     """(hitches >= HITCH_MIN_MS, hitches_100 >= HITCH_BIG_MS, hitches_rel >= hitch_limit(p50)), the limit."""
     rel = hitch_limit(p50)
-    return (sum(1 for v in intervals_ms if v >= HITCH_MIN_MS), sum(1 for v in intervals_ms if v >= HITCH_BIG_MS),
+    return (sum(1 for v in intervals_ms if is_hitch(v)), sum(1 for v in intervals_ms if v >= HITCH_BIG_MS),
             sum(1 for v in intervals_ms if v >= rel), rel)
 
 
@@ -864,9 +879,9 @@ def finish_vr(acc, capped, mode):
         return None
     sec = acc.measured_s
     s, frame = interval_stats([iv[0] for iv in acc.intervals])
-    hitch_spans = [(st, en) for ms, st, en in acc.intervals if ms >= HITCH_MIN_MS]
-    _, big, rel, rel_limit = hitch_counts([iv[0] for iv in acc.intervals], frame["p50"])
-    in_capture = sum(1 for st, en in hitch_spans if any(cs < en and ce > st for cs, ce in acc.spans))
+    hitches, big, rel, rel_limit = hitch_counts([iv[0] for iv in acc.intervals], frame["p50"])
+    in_capture = sum(1 for ms, st, en in acc.intervals
+                     if is_hitch(ms) and any(cs < en and ce > st for cs, ce in acc.spans))
     paced_total = sum(acc.paced.values())
     slots = sorted(acc.slots)
     repeats = acc.kinds.get("R", 0)
@@ -883,10 +898,12 @@ def finish_vr(acc, capped, mode):
         "frame_ms": frame,
         "predicted_slot_ms": {"p50": rnd(pct(slots, 50), 2), "p99": rnd(pct(slots, 99), 2),
                               "max": rnd(slots[-1], 2)} if slots else None,
-        "hitches": len(hitch_spans),
+        "hitches": hitches,
+        "hitch_rule": HITCH_RULE,
         "hitch_ms": HITCH_MIN_MS,
+        "hitch_big_ms": HITCH_BIG_MS,
         "stalls": sum(1 for iv in acc.intervals if iv[0] >= STALL_MS),
-        "hitch_per_min": rnd(len(hitch_spans) * 60 / sec, 2),
+        "hitch_per_min": rnd(hitches * 60 / sec, 2),
         "hitches_100": big,
         "hitch100_per_min": rnd(big * 60 / sec, 2),
         "hitches_rel": rel,
@@ -977,6 +994,7 @@ def finish_flat(acc):
         "low01_fps": rnd(1000 / frame["p999"], 2) if frame["p999"] else None,
         "frame_ms": frame,
         "hitches": hitches,
+        "hitch_rule": HITCH_RULE,
         "hitch_per_min": rnd(hitches * 60 / acc.measured_s, 2) if acc.measured_s else None,
         "hitches_100": big,
         "hitch100_per_min": rnd(big * 60 / acc.measured_s, 2) if acc.measured_s else None,
@@ -1292,9 +1310,10 @@ def compare(run_dir, summary, ctx):
             base = median(fps)
             spread = (max(fps) - min(fps)) / base if base else None
             p99 = [x for x in (((p["vr"].get("frame_ms") or {}).get("p99")) for _, _, _, p in use) if x]
-            # hitch rates only from runs that count them the same way: results from before 2026-10-21 have no
-            # hitches_100 and a hitch_per_min against 2x their own median (a faster build looked worse against them)
-            same = [p["vr"] for _, _, _, p in use if p["vr"].get("hitches_100") is not None]
+            # hitch rates only from runs that count them the same way (hitch_rule_of): results from before 2026-10-21
+            # have a hitch_per_min against 2x their own median (a faster build looked worse against them), those from
+            # 2026-10-21/22 count from 50 / 100 ms
+            same = [p["vr"] for _, _, _, p in use if hitch_rule_of(p["vr"]) == hitch_rule_of(vr)]
             hpm = [x for x in (v.get("hitch_per_min") for v in same) if x is not None]
             hpm100 = [x for x in (v.get("hitch100_per_min") for v in same) if x is not None]
             work = [x for x in ((p["vr"].get("work_ms")) for _, _, _, p in use) if x]
@@ -1316,7 +1335,7 @@ def compare(run_dir, summary, ctx):
                 if hpm and vr.get("hitch_per_min") is not None and vr["hitch_per_min"] >= 2 * median(hpm) and vr["hitch_per_min"] >= median(hpm) + 2:
                     why.append(f"hitches/min {vr['hitch_per_min']} vs {rnd(median(hpm), 2)}")
                 if hpm100 and vr.get("hitch100_per_min") is not None and vr["hitch100_per_min"] >= 2 * median(hpm100) and vr["hitch100_per_min"] >= median(hpm100) + 1:
-                    why.append(f">=100 ms hitches/min {vr['hitch100_per_min']} vs {rnd(median(hpm100), 2)}")
+                    why.append(f">={HITCH_BIG_MS:g} ms hitches/min {vr['hitch100_per_min']} vs {rnd(median(hpm100), 2)}")
                 if work and vr.get("work_ms") and vr["work_ms"] >= 1.1 * median(work):
                     why.append(f"work {vr['work_ms']} ms vs {rnd(median(work), 2)}")
                 pb["regression"] = why
@@ -1340,8 +1359,10 @@ def summary_line(s):
     if vr:
         p99 = (vr.get("frame_ms") or {}).get("p99")
         rel = vr.get("hitches_rel")
-        rel_text = f" ({rel} rel)" if rel is not None and rel != vr["hitches"] else ""   # only past 25 ms median
-        big_text = f", {vr['hitches_100']} >=100 ms" if vr.get("hitches_100") is not None else ""
+        # only for a slow game, where the relative limit is above the fixed one (a median over 29 ms)
+        rel_text = (f" ({rel} rel)" if rel is not None and rel != vr["hitches"] and (vr.get("hitch_rel_ms") or 0) > HITCH_MIN_MS
+                    else "")
+        big_text = f", {vr['hitches_100']} >={HITCH_BIG_MS:g} ms" if vr.get("hitches_100") is not None else ""
         text = (f"VR {vr['fps']:.1f} fps (1% low {vr['low1_fps'] or 0:.1f}, p99 {p99 or 0:.1f} ms, "
                 f"{vr['hitches']} hitches{rel_text}{big_text}, {vr['stalls']} stalls)")
         if vr.get("r_pct") and vr["r_pct"] > 5:
@@ -1411,7 +1432,8 @@ def headline(s):
     if not src:
         return None
     return {"kind": kind, "fps": src["fps"], "low1_fps": src.get("low1_fps"), "hitches": src.get("hitches"),
-            "hitch_per_min": src.get("hitch_per_min"), "fg": bool((s.get("framegen") or {}).get("on")),
+            "hitch_per_min": src.get("hitch_per_min"), "hitch_rule": src.get("hitch_rule"),
+            "fg": bool((s.get("framegen") or {}).get("on")),
             "measured_s": s.get("measured_s")}
 
 

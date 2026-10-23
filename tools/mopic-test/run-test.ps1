@@ -92,6 +92,7 @@ param(
     [string]$SaveFile = "",           # copy this save over the recipe's "save_slot" before each run (path, or relative to this script's folder); the file is overwritten, nothing is deleted
     [string]$SaveSlot = "",           # with -SaveFile: the file it replaces, with save_slot's placeholders ("{gamedir}\b1\Saved\SaveGames\{sid64}\ArchiveSaveFile.9.sav"); instead of the recipe's save_slot, also without a recipe (discovery)
     [string]$SaveAs = "",             # with -SaveFile: the target file name instead of the recipe's save_slot "file"
+    [switch]$NoSave,                  # install no save, not even the recipe's "save_default": the game's own progress as it is (run-ladder's rungs without "save")
     [string]$RecipeVars = "",         # "k=v;k2=v2": values for the recipe's "vars" (${k} in its steps; passed to gamepilot run as --var k=v)
     [switch]$NoPerf,                  # no frame-rate measurement: no nvidia-smi / PresentMon sampling, no VR_PerfLog override, no perf.json
     [ValidateSet("auto", "off")]
@@ -185,7 +186,7 @@ function Get-MTime([string]$path) {
 
 function Get-LogTime([string]$line) {
     if ($line -match '^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]') {
-        return [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss.fff", $null)
+        return [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss.fff", [Globalization.CultureInfo]::InvariantCulture)
     }
     return $null
 }
@@ -266,7 +267,8 @@ function Get-SteamLaunchIssues([string]$appId, [DateTime]$since) {
     $waiting = [ordered]@{}
     foreach ($line in ((Read-Shared $log) -split "`n")) {
         if ($line -notmatch "^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] GameAction \[AppID $appId, ActionID (\d+)\] : LaunchApp (.*)$") { continue }
-        $t = [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss", $null)
+        # (invariant: with the current culture "yyyy" is a year of its calendar, 1483 on a Thai PC)
+        $t = [DateTime]::ParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
         if ($t -lt $since.AddSeconds(-2)) { continue }
         $action = $Matches[2]; $what = $Matches[3].Trim()
         if ($what -match '^failed with (\S+)') {
@@ -1168,8 +1170,12 @@ if ($Recipe -ne "") {
 }
 
 # A recipe that only works from one save names it in "save_default" (a path relative to this script's folder); it is
-# the -SaveFile when none is given, so a run doesn't start from whatever an earlier run left in the slot
-if ($SaveFile -eq "" -and $Recipe -ne "" -and $recipeJson.save_default) {
+# the -SaveFile when none is given, so a run doesn't start from whatever an earlier run left in the slot. -NoSave
+# keeps the slot as it is (a ladder rung without "save")
+if ($NoSave -and ($SaveFile -ne "" -or $SaveAs -ne "" -or $SaveSlot -ne "")) { throw "-NoSave can't go with -SaveFile, -SaveSlot or -SaveAs" }
+if ($NoSave -and $Recipe -ne "" -and $recipeJson.save_default) {
+    Write-Host "Save: -NoSave, the recipe's save_default is not installed (the game's own progress as it is)"
+} elseif ($SaveFile -eq "" -and $Recipe -ne "" -and $recipeJson.save_default) {
     $SaveFile = [string]$recipeJson.save_default
     Write-Host "Save: the recipe's save_default $SaveFile"
 }
@@ -1653,7 +1659,9 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
         # a game that never got going: say when Steam itself stopped it
         if ($verdict -in @("LAUNCH_FAILED", "NO_INJECTION", "NO_VR", "MENU_FAIL")) {
-            $steamIssues = @(Get-SteamLaunchIssues $SteamAppId $t0)
+            # (outside the run's try: a throw here would skip the config restore)
+            $steamIssues = @()
+            try { $steamIssues = @(Get-SteamLaunchIssues $SteamAppId $t0) } catch { $notes += "Steam's console_log.txt not read: $($_.Exception.Message)" }
             $notes += $steamIssues
             if ($SharedLicenseNote -and ($steamIssues.Count -gt 0 -or $verdict -ne "MENU_FAIL")) { $notes += $SharedLicenseNote }
         }

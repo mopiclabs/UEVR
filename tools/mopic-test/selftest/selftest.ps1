@@ -80,7 +80,7 @@ $wanted = @("Get-SteamLibraries", "Find-SteamAppId", "Find-SteamGameDir", "Get-S
     "Save-MonadoSlice",
     "ConvertFrom-GameIniSpec", "ConvertFrom-GameIniBlock", "Resolve-GameIniPath", "Read-IniText", "Write-IniText", "Find-IniSection",
     "Find-IniKeyLines", "Split-IniLines", "Get-IniValue", "Set-IniValue", "Clear-ReadOnly", "Restore-GameIniFile", "Install-GameIni", "Restore-GameIni",
-    "Restore-PendingGameIni")
+    "Restore-PendingGameIni", "Get-LogTime", "Get-SteamLaunchIssues")
 foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
     if ($wanted -contains $fn.Name) { . ([scriptblock]::Create($fn.Extent.Text)) }
 }
@@ -131,6 +131,24 @@ Check "-RecipeVars names are case-sensitive" ($rv.PSBase.Count -eq 2 -and $rv["a
 # a dictionary's .Keys / .Count / .Values would give the entry of that name instead
 $pv = ConvertTo-PilotVarArgs "Keys=w a s d;Count=2;Values=3"
 Check "vars named Keys / Count / Values" (($pv -join " ") -eq '--var "Keys=w a s d" --var "Count=2" --var "Values=3"') ($pv -join " ")
+
+# UEVR's and Steam's log times read alike on every locale (with the current culture a Thai PC's calendar makes
+# 2026 the year 1483); a stand-in Steam folder for console_log.txt
+$steamFake = Join-Path $Work "steam"
+New-Item -ItemType Directory -Force -Path (Join-Path $steamFake "logs") | Out-Null
+[System.IO.File]::WriteAllLines((Join-Path $steamFake "logs\console_log.txt"), [string[]]@(
+    "[2026-10-22 11:00:00] GameAction [AppID 123, ActionID 6] : LaunchApp failed with AppError_9",
+    "[2026-10-22 12:00:00] GameAction [AppID 123, ActionID 7] : LaunchApp failed with AppError_33",
+    "[2026-10-22 12:00:01] GameAction [AppID 456, ActionID 8] : LaunchApp failed with AppError_33"))
+$SteamAppErrors = @{ "AppError_33" = "shared library locked" }
+$cultureBefore = [Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo("th-TH")
+    $lt = Get-LogTime "[2026-10-22 12:34:56.789] [UnrealVR] [info] x"
+    $si = @(& { function Get-SteamLibraries { return @($steamFake) }; Get-SteamLaunchIssues "123" ([DateTime]::new(2026, 10, 22, 11, 59, 0)) })
+} finally { [Threading.Thread]::CurrentThread.CurrentCulture = $cultureBefore }
+Check "Get-LogTime on a Thai-calendar locale" ($lt -eq [DateTime]::new(2026, 10, 22, 12, 34, 56, 789)) "$lt"
+Check "Get-SteamLaunchIssues on a Thai-calendar locale: this app's launch since the run started" ($si.Count -eq 1 -and $si[0] -eq "Steam: launch failed with AppError_33 (shared library locked)") ($si -join " / ")
 
 Write-Host "== 2b. run-test.ps1's frame-rate helpers"
 # QPC in ns as Python's time.perf_counter_ns() counts it (gamepilot's segments; UEVR's steady_clock alike)
@@ -404,7 +422,15 @@ $fakeNames = @("mopicselftest_noproc", "mopicselftest_game")
 function Get-SamplerCount { return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq "nvidia-smi" -or $_.ProcessName -like "PresentMon-*" }).Count }
 $samplersBefore = Get-SamplerCount
 $busy = @(Get-Process -Name (@("UEVRInjector", "CrashReportClient") + $fakeNames) -ErrorAction SilentlyContinue)
-$persistentDirs = @($fakeNames | ForEach-Object { Join-Path $env:APPDATA "UnrealVRMod\$_" } | Where-Object { -not (Test-Path -LiteralPath $_) })
+# the stand-ins' UEVR folders (only this self-test uses those names): config.txt / user_script.txt an earlier
+# self-test left there (killed, or its killed-harness case) would be restored by every run and fail section 5
+$persistentDirs = @($fakeNames | ForEach-Object { Join-Path $env:APPDATA "UnrealVRMod\$_" })
+function Clear-StandInConfig {
+    foreach ($p in $persistentDirs) { foreach ($n in @("config.txt", "user_script.txt")) { $f = Join-Path $p $n; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } } }
+}
+$leftover = @($persistentDirs | ForEach-Object { $p = $_; @("config.txt", "user_script.txt") | ForEach-Object { Join-Path $p $_ } } | Where-Object { Test-Path -LiteralPath $_ })
+if ($leftover.Count -gt 0) { Write-Host "      removing what an earlier self-test left: $($leftover -join ', ')" }
+Clear-StandInConfig
 if ($busy.Count -gt 0 -or $NoWindows) {
     Write-Host "SKIP  sections 4-5: $(if ($NoWindows) { '-NoWindows' } else { "$(@($busy | ForEach-Object Name) -join ', ') running (the harness would stop it)" })"
 } else {
@@ -575,6 +601,7 @@ if ($busy.Count -gt 0 -or $NoWindows) {
             @{ name = "-SaveFile that doesn't exist"; argv = @("-Recipe", $recipeOk, "-SaveFile", "C:\nope\x.sav"); msg = "*-SaveFile not found*" },
             @{ name = "-SaveAs without -SaveFile"; argv = @("-Recipe", $recipeOk, "-SaveAs", "a.sav"); msg = "*-SaveAs and -SaveSlot need -SaveFile*" },
             @{ name = "-SaveSlot without -SaveFile"; argv = @("-SaveSlot", "C:\x\a.sav"); msg = "*-SaveAs and -SaveSlot need -SaveFile*" },
+            @{ name = "-NoSave with -SaveFile"; argv = @("-Recipe", $recipeOk, "-SaveFile", $src, "-NoSave"); msg = "*-NoSave can't go with -SaveFile*" },
             @{ name = "-SaveAs with a path"; argv = @("-Recipe", $recipeOk, "-SaveFile", $src, "-SaveAs", "..\a.sav"); msg = "*plain file name*" },
             @{ name = "-SaveSlot without a folder"; argv = @("-SaveFile", $src, "-SaveSlot", "a.sav"); msg = "*needs a*dir*" },
             @{ name = "-SaveSlot with an unknown placeholder"; argv = @("-SaveFile", $src, "-SaveSlot", "C:\{nope}\a.sav"); msg = "*unknown placeholder {nope}*" },
@@ -608,6 +635,17 @@ if ($busy.Count -gt 0 -or $NoWindows) {
     $h = Invoke-Harness $baseNo @("-Recipe", $recipeOk, "-SaveFile", $src, "-SaveSlot", "$e2eSgDir\ArchiveSaveFile.8.sav") "selftest-e2e-slot2"
     $r = $h.results | Select-Object -First 1
     Check "e2e: -SaveSlot instead of the recipe's save_slot" ($r -and $r.save.target -eq $slot8) $h.text
+    # save_default: the -SaveFile when none is given; -NoSave (a ladder rung without "save") installs nothing
+    $recipeDefault = New-Recipe "e2e-recipe-default" $null
+    $rd = Read-Json $recipeDefault
+    $rd | Add-Member -NotePropertyName save_default -NotePropertyValue $rel
+    Write-Json $recipeDefault $rd
+    $h = Invoke-Harness $baseNo @("-Recipe", $recipeDefault) "selftest-e2e-default"
+    $r = $h.results | Select-Object -First 1
+    Check "e2e: the recipe's save_default installed without -SaveFile" ($r -and $r.save.source -eq $src -and $r.save.target -eq $slot9 -and $h.flat -like "*Save: the recipe's save_default*") (Show-Out $h)
+    $h = Invoke-Harness $baseNo @("-Recipe", $recipeDefault, "-NoSave") "selftest-e2e-nosave"
+    $r = $h.results | Select-Object -First 1
+    Check "e2e: -NoSave installs no save, not even save_default" ($r -and $null -eq $r.save -and $h.flat -like "*Save: -NoSave*" -and @($h.dirs | Where-Object { Test-Path -LiteralPath (Join-Path $_ "save-before") }).Count -eq 0) (Show-Out $h)
 
     Write-Host "   -- with the stand-in game"
     # vars with quotes, spaces, a trailing backslash, Chinese and an empty value reach the pilot as given
@@ -779,7 +817,8 @@ if ($busyNow.Count -gt 0 -or (Test-Path -LiteralPath $pendingReal)) {
     Get-ChildItem -LiteralPath (Join-Path $Tools "runs") -Directory | Where-Object { $_.Name -like "*-Custom-selftest-gameini-killed-r*" } | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Work "harness-runs\$($_.Name)") }
     Get-Process -Name "mopicselftest_game" -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill(); $_.WaitForExit(5000) | Out-Null }
     # the killed harness never put back the stand-in's UEVR config.txt (only made for this self-test)
-    foreach ($p in $persistentDirs) { foreach ($n in @("config.txt", "user_script.txt")) { $f = Join-Path $p $n; if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } } }
+    Clear-StandInConfig
+    Check "e2e killed harness: the stand-ins' config.txt / user_script.txt removed afterwards" (@($persistentDirs | Where-Object { (Test-Path (Join-Path $_ "config.txt")) -or (Test-Path (Join-Path $_ "user_script.txt")) }).Count -eq 0)
 }
 foreach ($p in $persistentDirs) { if ((Test-Path -LiteralPath $p) -and @(Get-ChildItem -LiteralPath $p -Force).Count -eq 0) { Remove-Item -LiteralPath $p } }
 
@@ -855,11 +894,12 @@ foreach ($case in $refusals) {
 $l = Invoke-Ladder (Join-Path $Work "ladder-refuse4.json") @("-DryRun")
 Check "ladder -DryRun only warns about a missing recipe" ($l.code -eq 0 -and $l.flat -like "*WARNING*recipe not found*") $l.text
 
-# a rung without "save" plays the game's own progress: no -SaveFile, and its recipe needs no save_slot
+# a rung without "save" plays the game's own progress: -NoSave (no -SaveFile, not even the recipe's save_default),
+# and its recipe needs no save_slot
 $noSaveLadder = Join-Path $Work "ladder-nosave.json"
 Write-Json $noSaveLadder ([ordered]@{ game = "Wukong"; recipe = $recipeLadderNoSlot; rungs = @([ordered]@{ name = "demo"; tier = 1 }) })
 $l = Invoke-Ladder $noSaveLadder @("-DryRun")
-Check "ladder: a rung without save dry-runs without -SaveFile" ($l.code -eq 0 -and $l.flat -like "*demo (tier 1) <- (no save: the game's own progress)*" -and $l.flat -notlike "*-SaveFile*") $l.text
+Check "ladder: a rung without save dry-runs with -NoSave, without -SaveFile" ($l.code -eq 0 -and $l.flat -like "*demo (tier 1) <- (no save: the game's own progress)*" -and $l.flat -like "*-Recipe $recipeLadderNoSlot -NoSave -Runs 1*" -and $l.flat -notlike "*-SaveFile*") $l.text
 $noSaveSha = Join-Path $Work "ladder-nosave-sha.json"
 Write-Json $noSaveSha ([ordered]@{ game = "Wukong"; recipe = $recipeLadderNoSlot; rungs = @([ordered]@{ name = "demo"; sha256 = ("0" * 64) }) })
 $l = Invoke-Ladder $noSaveSha @("-DryRun")
@@ -898,6 +938,9 @@ $rows2 = @(Get-Content -LiteralPath (Get-NewestLadder ".md").FullName -Encoding 
 Check "ladder -Runs 2: one row per run, exit 0 when all pass" ($rows2.Count -eq 2 -and $l.code -eq 0) (($rows2 -join " / ") + " exit $($l.code)")
 $recvCn = Get-RunResult "*-Wukong-lt2-ch4-four-r1"
 Check "ladder passed the Chinese save path intact, -Runs 2" ($recvCn.received.save_exists -and $recvCn.received.SaveFile -ceq $cnSave -and $recvCn.received.Runs -eq 2) ($recvCn.received | ConvertTo-Json -Compress)
+$l = Invoke-Ladder $noSaveLadder @("-Harness", $fakeHarness, "-RunsDir", $env:MOPIC_SELFTEST_RUNS, "-Label", "lt6")
+$recvNo = Get-RunResult "*-Wukong-lt6-demo-r1"
+Check "ladder passed -NoSave and no -SaveFile for a rung without save" ($l.code -eq 0 -and $recvNo -and $recvNo.received.NoSave -eq $true -and $recvNo.received.SaveFile -eq "") ($recvNo.received | ConvertTo-Json -Compress)
 
 # a rung whose harness writes no result (stops with an error): HARNESS_ERROR row with the message, stop
 $ladderNores = Join-Path $Work "ladder-nores.json"
@@ -925,6 +968,14 @@ $pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py (Join-Path $Here "self
 $pyOut | Where-Object { $_ -notlike "ok *" } | ForEach-Object { Write-Host "  $_" }
 $pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
 Check "gamepilot --var self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
+
+Write-Host "== 7a. recipes: checkpoint images sized as their regions, steps the pilot reads as written (selftest_recipes.py)"
+& { $ErrorActionPreference = "Continue"; & $Py -W error -m py_compile (Join-Path $Here "selftest_recipes.py") 2>&1 | ForEach-Object { Write-Host "      $_" } }
+Check "py_compile selftest_recipes.py (warnings as errors)" ($LASTEXITCODE -eq 0)
+$pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py -W error (Join-Path $Here "selftest_recipes.py") (Join-Path $Work "recipes") 2>&1 | ForEach-Object { "$_" } })
+$pyOut | Where-Object { $_ -notlike "ok *" } | ForEach-Object { Write-Host "  $_" }
+$pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
+Check "recipe lint ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
 
 Write-Host "== 7b. frame rate: gamepilot's measured segments, perfreport.py on synthetic runs"
 foreach ($f in @((Join-Path $Tools "perfreport.py"), (Join-Path $Here "selftest_perf.py"))) {

@@ -752,6 +752,19 @@ def substitute_vars(value, resolved, declared, unfilled, field=None):
     return VAR_RE.sub(repl, value)
 
 
+def step_problems(steps, first=1, last=None):
+    """Steps the pilot would misread, found before they run: a wait_for pokes the game one way only (press, click
+    or move; with two it would use one and ignore the other)."""
+    problems = []
+    for i, step in enumerate(steps, 1):
+        if i < first or (last is not None and i > last) or not isinstance(step, dict) or "wait_for" not in step:
+            continue
+        pokes = [k for k in ("press", "click", "move") if k in step]
+        if len(pokes) > 1:
+            problems.append(f"step {i}: wait_for takes one of press / click / move, not {' and '.join(pokes)}")
+    return problems
+
+
 def recipe_steps_with_vars(recipe, given):
     """-> (steps, {name: text}, [problems], [set of unfilled names per step]). Without "vars" the steps are the
     recipe's own list, untouched."""
@@ -1103,7 +1116,8 @@ class Pilot:
     def wait_for(self, names, timeout, press_key=None, every=3.0, poll=1.0, click=None, move=None):
         """Wait until one of the checkpoints shows; optionally press a key (or click a point, or hover one) every
         `every` s meanwhile (skipping movies, poking a scene until it reacts, hovering a button again that a dialog
-        still fading in ignored). A press only follows a check that failed."""
+        still fading in ignored): one of the three, step_problems refuses a step with more. A press only follows a
+        check that failed."""
         names = [names] if isinstance(names, str) else list(names)
         label = "|".join(names)
         end, last_press, best = time.time() + timeout, time.time(), -2.0
@@ -1252,8 +1266,9 @@ class Pilot:
             if unfilled:
                 names = ", ".join("${" + n + "}" for n in sorted(unfilled))
                 self.var_problems.append(f"the steps use {names}, which have no default and no --var")
-            if self.var_problems:
-                raise Failed("recipe", "; ".join(self.var_problems))
+            problems = self.var_problems + step_problems(steps, first, last)
+            if problems:
+                raise Failed("recipe", "; ".join(problems))
             if self.variables:
                 self.log(f"vars: {json.dumps(self.variables, ensure_ascii=False)}")
             end = time.time() + self.recipe.get("window_timeout", 180)
@@ -1441,6 +1456,7 @@ def main():
             missing = sorted(set().union(*unfilled))
             if missing:
                 problems.append(f"the steps use {', '.join('${' + n + '}' for n in missing)}, which have no default and no --var")
+            problems += step_problems(steps)
             if problems:
                 print(json.dumps({"error": "vars", "problems": problems, "missing": missing}, ensure_ascii=False))
                 sys.exit(1)

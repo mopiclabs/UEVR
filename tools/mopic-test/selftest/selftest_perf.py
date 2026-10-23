@@ -394,11 +394,12 @@ check("perf: VR fps = 2389 new frames / 50 s", vr["frames"] == 2389 and near(vr[
 check("perf: frame times p50 16.67, p99 33.33 ms, max 300, 1% low 30, no p99.9 (< 10000 intervals)",
       near(vr["frame_ms"]["p50"], 16.67, 0.01) and near(vr["frame_ms"]["p99"], 33.33, 0.01) and near(vr["low1_fps"], 30.0, 0.01)
       and near(vr["frame_ms"]["max"], 300, 0.01) and vr["frame_ms"]["p999"] is None and vr["low01_fps"] is None, vr["frame_ms"])
-check("perf: 2 hitches (100 / 300 ms), 1 stall, 2.4 per minute, no interval across the menu",
-      vr["hitches"] == 2 and vr["stalls"] == 1 and near(vr["hitch_per_min"], 2.4, 0.001) and vr["hitch_ms"] == 50.0, vr)
-# 3 x 33.333333 ms = 99.999999 ms: the "100 ms" hitch is just under the 100 ms limit, only the 300 ms stall is above
-check("perf: 1 hitch of 100 ms or more (the 300 ms; the 100 ms one is 99.999999 ms), 1.2 per minute; the relative rule "
-      "(median 16.67 ms, limit 50 ms) counts the same 2 as the absolute one",
+check("perf: 2 hitches (100 / 300 ms), 1 stall, 2.4 per minute, no interval across the menu, the rule recorded",
+      vr["hitches"] == 2 and vr["stalls"] == 1 and near(vr["hitch_per_min"], 2.4, 0.001) and vr["hitch_ms"] == 58.0
+      and vr["hitch_big_ms"] == 108.0 and vr["hitch_rule"] == "fixed 58/108 ms", vr)
+# 3 x 33.333333 ms = 99.999999 ms: the "100 ms" hitch is under the 108 ms limit, only the 300 ms stall is above
+check("perf: 1 hitch of 108 ms or more (the 300 ms, not the 100 ms one), 1.2 per minute; the relative rule "
+      "(median 16.67 ms, limit 50 ms as before 2026-10-21) counts the same 2",
       vr["hitches_100"] == 1 and near(vr["hitch100_per_min"], 1.2, 0.001) and vr["hitches_rel"] == 2 and vr["hitch_rel_ms"] == 50.0, vr)
 check("perf: one hitch overlaps a capture", vr["hitches_in_capture"] == 1, vr["hitches_in_capture"])
 check("perf: paced 60 / 40 % at 1 / 2 refreshes, max period 33.3 ms", near(vr["paced_pct"]["1"], 60.0, 0.2)
@@ -456,9 +457,9 @@ check("perf: settings fingerprint, changed keys without the volatile ones", st_[
       and len(st_["fingerprint"]) == 16, st_)
 check("perf: sources", s["sources"] == {"uevr": "ok", "presentmon": "ok", "monado": "ok", "gpu": "ok"}, s["sources"])
 h = s["headline"]
-check("perf: headline", h == {"kind": "vr", "fps": 47.78, "low1_fps": 30.0, "hitches": 2, "hitch_per_min": 2.4, "fg": True,
-                              "measured_s": 50.0}, h)
-check("perf: summary line", doc["line"].startswith("perf[gameplay 50.0s, settle 4.0s, excluded loading 6s menu 10s]: VR 47.8 fps (1% low 30.0, p99 33.3 ms, 2 hitches, 1 >=100 ms, 1 stalls)")
+check("perf: headline", h == {"kind": "vr", "fps": 47.78, "low1_fps": 30.0, "hitches": 2, "hitch_per_min": 2.4,
+                              "hitch_rule": "fixed 58/108 ms", "fg": True, "measured_s": 50.0}, h)
+check("perf: summary line", doc["line"].startswith("perf[gameplay 50.0s, settle 4.0s, excluded loading 6s menu 10s]: VR 47.8 fps (1% low 30.0, p99 33.3 ms, 2 hitches, 1 >=108 ms, 1 stalls)")
       and "paced 60:60% 30:40%" in doc["line"] and "work 8.7 ms" in doc["line"] and "FG on" in doc["line"]
       and "display: new frame on 80% of refreshes (48.0/s), 1 dropped" in doc["line"] and "hint paced" in doc["line"]
       and "game Present 120.0 fps (sim 60.0)" in doc["line"], doc["line"])
@@ -640,11 +641,11 @@ check("perf: 2 s gap = a stall inside the measurement, 4 s gap left out as no_da
       and near(s4["vr"]["frame_ms"]["max"], 2020, 0.5) and near(s4["excluded_s"]["no_data"], 3, 0.01),
       (s4["vr"]["stalls"], s4["excluded_s"], s4["vr"]["frame_ms"]))
 
-# the hitch rule: a 30 fps run (median 33.3 ms, the relative limit 66.7 ms) with 4 intervals of 55 ms, 3 of 70 ms and 2 of
-# 120 ms: every interval of 50 ms or more is a hitch whatever the build's own speed, the relative rule keeps the
-# 5 above 66.7 ms (hitches_rel), 2 are 100 ms or more
+# the hitch rule: a 30 fps run (median 33.3 ms, the relative limit 66.7 ms) with 4 intervals of 62 ms, 3 of 70 ms and 2 of
+# 120 ms: every interval of 58 ms or more is a hitch whatever the build's own speed, the relative rule keeps the
+# 5 above 66.7 ms (hitches_rel), 2 are 108 ms or more
 run9 = make_run("20261002-120310-Custom-hitchrule-r1")
-long_at = {50: 55, 100: 55, 150: 55, 200: 55, 250: 70, 300: 70, 350: 70, 400: 120, 450: 120}
+long_at = {50: 62, 100: 62, 150: 62, 200: 62, 250: 70, 300: 70, 350: 70, 400: 120, 450: 120}
 lines = [FRAMES_HEADER]
 q = S + 100 * MS
 lines.append(frame_row(q, "P", 0, P30, 1000, BASE, 0, 1))
@@ -659,17 +660,42 @@ doc9 = perfreport.report(run9, do_compare=False)
 v9 = doc9["summary"]["vr"]
 check("perf hitch rule: 600 new frames measured (the first row opens the window), median 33.33 ms",
       v9["frames"] == 600 and near(v9["frame_ms"]["p50"], 33.33, 0.01), (v9["frames"], v9["frame_ms"]))
-check("perf hitch rule: 9 hitches (>= 50 ms), limit 50 ms, 2 of 100 ms or more, 0 stalls",
-      v9["hitches"] == 9 and v9["hitch_ms"] == 50.0 and v9["hitches_100"] == 2 and v9["stalls"] == 0
+check("perf hitch rule: 9 hitches (>= 58 ms), limit 58 ms, 2 of 108 ms or more, 0 stalls",
+      v9["hitches"] == 9 and v9["hitch_ms"] == 58.0 and v9["hitches_100"] == 2 and v9["stalls"] == 0
       and near(v9["hitch_per_min"], 9 * 60 / doc9["summary"]["measured_s"], 0.01)
       and near(v9["hitch100_per_min"], 2 * 60 / doc9["summary"]["measured_s"], 0.01), v9)
 check("perf hitch rule: the relative rule (twice the median, 66.7 ms) keeps 5, and the line says so",
       v9["hitches_rel"] == 5 and v9["hitch_rel_ms"] == 66.7
-      and "9 hitches (5 rel), 2 >=100 ms, 0 stalls)" in doc9["line"], (v9["hitches_rel"], v9["hitch_rel_ms"], doc9["line"]))
-check("perf hitch rule: hitch_limit is the relative rule (max of 50 ms and 2x median), hitch_counts counts all three",
+      and "9 hitches (5 rel), 2 >=108 ms, 0 stalls)" in doc9["line"], (v9["hitches_rel"], v9["hitch_rel_ms"], doc9["line"]))
+check("perf hitch rule: hitch_limit is the relative rule as before 2026-10-21 (max of 50 ms and 2x median), hitch_counts "
+      "counts all three",
       perfreport.hitch_limit(16.7) == 50.0 and near(perfreport.hitch_limit(33.3), 66.6, 0.01) and perfreport.hitch_limit(0) == 50.0
-      and perfreport.hitch_counts([20, 49.9, 50, 60, 99.9, 100, 300], 40.0) == (5, 2, 3, 80.0),
-      perfreport.hitch_counts([20, 49.9, 50, 60, 99.9, 100, 300], 40.0))
+      and perfreport.hitch_counts([20, 57.9, 58, 60, 107.9, 108, 300], 40.0) == (5, 2, 3, 80.0)
+      and perfreport.hitch_counts([20, 52, 57.9, 58, 60], 20.0) == (2, 0, 4, 50.0),
+      (perfreport.hitch_counts([20, 57.9, 58, 60, 107.9, 108, 300], 40.0), perfreport.hitch_counts([20, 52, 57.9, 58, 60], 20.0)))
+
+# a 60 fps run with 3 intervals of 54 ms and 2 of 70 ms: 2 hitches (>= 58 ms); the relative rule (limit 50 ms, below
+# the fixed one) counts 5, which the line leaves out (it only adds it for a slow game)
+run10 = make_run("20261002-120320-Custom-hitchfast-r1")
+long_at = {100: 54, 200: 54, 300: 54, 400: 70, 500: 70}
+lines = [FRAMES_HEADER]
+q = S + 100 * MS
+lines.append(frame_row(q, "P", 0, P60, 1000, BASE, 0, 1))
+for k in range(1200):
+    q += long_at[k] * MS if k in long_at else P60
+    lines.append(frame_row(q, "P", 0, P60, 1000, BASE, 0, k + 2))
+write(os.path.join(run10, "perf-frames.csv"), lines)
+with open(os.path.join(run10, "pilot-status.json"), "w", encoding="utf-8") as f:
+    json.dump({"clock": {"qpc_ns": T0, "unix_ns": U0, "qpc_freq": 10_000_000},
+               "segments": [{"label": "gameplay", "step": 1, "start_qpc_ns": S, "end_qpc_ns": q + 1 * MS, "ok": True}]}, f)
+doc10 = perfreport.report(run10, do_compare=False)
+v10 = doc10["summary"]["vr"]
+check("perf hitch rule at 60 fps: 2 hitches, the relative rule 5 (limit 50 ms), the line says 2 hitches without (5 rel)",
+      v10["hitches"] == 2 and v10["hitches_rel"] == 5 and v10["hitch_rel_ms"] == 50.0
+      and "2 hitches, 0 >=108 ms, 0 stalls)" in doc10["line"], (v10["hitches"], v10["hitches_rel"], doc10["line"]))
+check("perf hitch rule: hitch_rule_of a result, also of one from before the field",
+      perfreport.hitch_rule_of(v9) == "fixed 58/108 ms" and perfreport.hitch_rule_of({"hitches": 3, "hitches_100": 1}) == "fixed 50/100 ms"
+      and perfreport.hitch_rule_of({"hitches": 3}) == "max(50 ms, 2x median)", v9.get("hitch_rule"))
 
 # 2x frame generation (XeFG / DLSS-G): UEVR's Present hook runs twice per engine frame, the second time (no Tick before
 # it) resubmitting the previous engine frame with its pose. Written as UEVR wrote it before it counted those as repeats
@@ -849,24 +875,31 @@ check("compare: a run with the eye sampler compares only with such runs",
 c4 = perfreport.compare(run, s, dict(ctx, variant={"eye_sampler": False, "game_ini": "gameusersettings.ini|s|k=1"}))
 check("compare: a run with -GameIni has no baseline among plain runs", c4["prev_build"] is None and c4["flat"] is None, c4)
 
-# hitch rates against the previous build: only from runs that count hitches the same way (hitches_100 present); results
-# from before the absolute rule have a hitch_per_min against 2x their own median and are no baseline for it
+# hitch rates against the previous build: only from runs that count hitches the same way (hitch_rule_of); results
+# from before the absolute rule have a hitch_per_min against 2x their own median, those of 2026-10-21/22 count from 50 /
+# 100 ms (hitches_100, no hitch_rule): neither is a baseline for it
 for i in range(3):
     fake_result(f"20261001-14000{i}-Custom-hitchnew-r{i + 1}", True, "PASS", "NNNN",
                 {"vr": {"fps": 50.0 + i, "frame_ms": {"p99": 33.33}, "hitch_per_min": 2.0, "hitches_100": 1, "hitch100_per_min": 0.5,
-                        "work_ms": 8.5}}, game="HitchNew")
+                        "hitch_rule": perfreport.HITCH_RULE, "work_ms": 8.5}}, game="HitchNew")
     fake_result(f"20261001-14100{i}-Custom-hitchold-r{i + 1}", True, "PASS", "OOOO",
                 {"vr": {"fps": 50.0 + i, "frame_ms": {"p99": 33.33}, "hitch_per_min": 0.5, "work_ms": 8.5}}, game="HitchOld")
+    fake_result(f"20261001-14200{i}-Custom-hitch50-r{i + 1}", True, "PASS", "FFFF",
+                {"vr": {"fps": 50.0 + i, "frame_ms": {"p99": 33.33}, "hitch_per_min": 0.5, "hitches_100": 0, "hitch100_per_min": 0.1,
+                        "work_ms": 8.5}}, game="Hitch50")
 worse = dict(s, vr=dict(s["vr"], fps=51.0, hitch_per_min=5.0, hitch100_per_min=1.5))
 pn = perfreport.compare(run, worse, dict(ctx, game="HitchNew"))["prev_build"]
-check("compare: hitches/min and >= 100 ms hitches/min of a build counted the same way: 5.0 vs 2.0 and 1.5 vs 0.5 are regressions",
-      pn["dll_sha256"] == "NNNN" and pn["regression"] == ["hitches/min 5.0 vs 2.0", ">=100 ms hitches/min 1.5 vs 0.5"], pn)
+check("compare: hitches/min and >= 108 ms hitches/min of a build counted the same way: 5.0 vs 2.0 and 1.5 vs 0.5 are regressions",
+      pn["dll_sha256"] == "NNNN" and pn["regression"] == ["hitches/min 5.0 vs 2.0", ">=108 ms hitches/min 1.5 vs 0.5"], pn)
 fine = dict(s, vr=dict(s["vr"], fps=51.0, hitch_per_min=3.9, hitch100_per_min=0.9))
 pn = perfreport.compare(run, fine, dict(ctx, game="HitchNew"))["prev_build"]
 check("compare: 3.9/min and 0.9/min against 2.0/min and 0.5/min are not (under double, or under the margin)", pn["regression"] == [], pn)
 po = perfreport.compare(run, worse, dict(ctx, game="HitchOld"))["prev_build"]
 check("compare: a previous build from before the absolute rule (no hitches_100) is no hitch baseline: 5.0 vs its 0.5 is no regression",
       po["dll_sha256"] == "OOOO" and po["regression"] == [], po)
+p5 = perfreport.compare(run, worse, dict(ctx, game="Hitch50"))["prev_build"]
+check("compare: a previous build counted from 50 / 100 ms (no hitch_rule) is no hitch baseline either",
+      p5["dll_sha256"] == "FFFF" and p5["regression"] == [], p5)
 
 print(f"python perf: {fails} failure(s)")
 sys.exit(1 if fails else 0)
