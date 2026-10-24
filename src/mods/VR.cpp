@@ -14460,6 +14460,7 @@ void VR::on_present() {
         m_openxr->autores.actuator = m_autores_actuator->value();
         m_openxr->autores.toggle_seconds = m_autores_toggle_seconds->value();
         m_openxr->autores.nsf_hold_ms = m_autores_nsf_hold_ms->value();
+        m_openxr->autores.source_hold_ms = m_autores_source_hold_ms->value();
         m_openxr->autores.keep_swapchains = m_autores_keep_swapchains->value();
         m_cvar_manager->set_autores_watch(m_autores_executor->value());
     }

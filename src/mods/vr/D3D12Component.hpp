@@ -287,6 +287,10 @@ private:
     // When the current right-eye capture was accepted (VR_AutoResNsfHoldMs).
     std::chrono::steady_clock::time_point m_scene_capture_accepted_at{};
     bool m_native_stereo_resize_holding{false};
+    // The game's render target size as the double-wide copy last saw it, and when it changed (VR_AutoResSourceHoldMs).
+    uint64_t m_hold_source_width{};
+    uint32_t m_hold_source_height{};
+    std::chrono::steady_clock::time_point m_hold_source_changed_at{};
     uint32_t m_scene_capture_width{};
     uint32_t m_scene_capture_height{};
     // VR_NativeStereoFixPairSnapshot: one consistent eye pair per engine frame (see d3d12/NativePairSnapshot.hpp).

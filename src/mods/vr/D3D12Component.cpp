@@ -5153,6 +5153,27 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         copy_now - live_resize_at < nsf_hold + std::chrono::milliseconds(1800) &&
                         (m_scene_capture_accepted_at < live_resize_at || copy_now - m_scene_capture_accepted_at < nsf_hold);
 
+                    // VR_AutoResSourceHoldMs, without the fix: the game's first frames in its render target of the new
+                    // size have a black right eye (Hozy: 1-3 frames from ~40 ms after the switch, live-resolution
+                    // research 10-24), so the left eye goes in both halves for a moment after the size changes.
+                    if (const auto source_desc = backbuffer != nullptr ? backbuffer->GetDesc() : D3D12_RESOURCE_DESC{};
+                        backbuffer != nullptr &&
+                        (source_desc.Width != m_hold_source_width || source_desc.Height != m_hold_source_height))
+                    {
+                        m_hold_source_width = source_desc.Width;
+                        m_hold_source_height = source_desc.Height;
+                        m_hold_source_changed_at = copy_now;
+                    }
+                    const auto source_hold = std::chrono::milliseconds(vr->m_openxr->autores.source_hold_ms);
+                    const bool source_resize_hold =
+                        source_hold.count() > 0 &&
+                        !vr->is_native_stereo_fix_enabled() &&
+                        !use_native_array_submit &&
+                        !shf_using_mono_expansion && !dune_using_hmd_mono_expansion &&
+                        live_resize_at.time_since_epoch().count() != 0 &&
+                        m_hold_source_changed_at >= live_resize_at &&
+                        copy_now - m_hold_source_changed_at < source_hold;
+
                     if (native_stereo_resize_hold != m_native_stereo_resize_holding) {
                         m_native_stereo_resize_holding = native_stereo_resize_hold;
                         spdlog::info("[NativeStereoFix][D3D12] Resize hold {} {} ms after the change, capture accepted {} ms after it",
@@ -5185,8 +5206,13 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         if (!submitted || !recorded) {
                             vr->set_mono_status("Waiting: Mono scene/device/format/extent or GPU copy validation failed");
                         }
-                    } else if (native_stereo_resize_hold) {
-                        uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
+                    } else if (native_stereo_resize_hold || source_resize_hold) {
+                        if (source_resize_hold) {
+                            SPDLOG_INFO_EVERY_N_SEC(1, "[autores] Render target took the new size; left eye in both halves for {} ms",
+                                source_hold.count());
+                        } else {
+                            uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
+                        }
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr,
                             [source = backbuffer, scene_source_state, native_stereo_packet, native_stereo_hook, vr](
                                 d3d12::CommandContext& commands, ID3D12Resource* dst) {

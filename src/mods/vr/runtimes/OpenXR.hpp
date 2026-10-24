@@ -470,6 +470,7 @@ public:
         float sp_scale{1.0f};                        // the ladder value that cvar was last set from
         int toggle_seconds{0};                       // VR_AutoResToggleSeconds
         int nsf_hold_ms{700};                        // VR_AutoResNsfHoldMs
+        int source_hold_ms{150};                     // VR_AutoResSourceHoldMs
         bool keep_swapchains{false};                 // VR_AutoResKeepSwapchains
         std::chrono::steady_clock::time_point toggle_next{};
         std::chrono::steady_clock::time_point live_resize_at{}; // the last resolution-scale change applied live

@@ -1644,6 +1644,9 @@ private:
     // After a live resolution change under the Native Stereo Fix, show the left eye in both halves until this long after
     // the fix accepts its new right-eye capture (0 = off): the new capture's first frames come out dark.
     const ModInt32::Ptr m_autores_nsf_hold_ms{ ModInt32::create(generate_name("AutoResNsfHoldMs"), 700, true) };
+    // Without the Native Stereo Fix: show the left eye in both halves this long after the game's render target takes
+    // the new size (0 = off); the right eye of its first frames at the new size comes out black.
+    const ModInt32::Ptr m_autores_source_hold_ms{ ModInt32::create(generate_name("AutoResSourceHoldMs"), 150, true) };
     // A live resolution change that the eye swapchain already fits keeps the swapchain: the eye pair goes to its top left
     // and the projection views cover just that, so the runtime creates and imports nothing mid-session.
     const ModToggle::Ptr m_autores_keep_swapchains{ ModToggle::create(generate_name("AutoResKeepSwapchains"), false, true) };
@@ -2194,6 +2197,7 @@ public:
             *m_autores_live_mode,
             *m_autores_toggle_seconds,
             *m_autores_nsf_hold_ms,
+            *m_autores_source_hold_ms,
             *m_autores_keep_swapchains,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
