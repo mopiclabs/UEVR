@@ -1641,6 +1641,9 @@ private:
     // Every N seconds from 60 s in (0 = off), step the actuator between 1.0 and 0.7 of the starting value, so the GPU
     // saving and the hitch of one change can be measured over many changes despite the scene changing.
     const ModInt32::Ptr m_autores_toggle_seconds{ ModInt32::create(generate_name("AutoResToggleSeconds"), 0, true) };
+    // After a live resolution change under the Native Stereo Fix, show the left eye in both halves until this long after
+    // the fix accepts its new right-eye capture (0 = off): the new capture's first frames come out dark.
+    const ModInt32::Ptr m_autores_nsf_hold_ms{ ModInt32::create(generate_name("AutoResNsfHoldMs"), 700, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -2187,6 +2190,7 @@ public:
             *m_autores_actuator,
             *m_autores_live_mode,
             *m_autores_toggle_seconds,
+            *m_autores_nsf_hold_ms,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,

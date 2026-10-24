@@ -459,6 +459,7 @@ public:
         int actuator{0};                             // VR_AutoResActuator: 1/2 steps set a percentage cvar instead
         float sp_scale{1.0f};                        // the ladder value that cvar was last set from
         int toggle_seconds{0};                       // VR_AutoResToggleSeconds
+        int nsf_hold_ms{700};                        // VR_AutoResNsfHoldMs
         std::chrono::steady_clock::time_point toggle_next{};
         std::chrono::steady_clock::time_point live_resize_at{}; // the last resolution-scale change applied live
         std::optional<float> pending_scale{};        // queued by an edge, applied outside the event lock

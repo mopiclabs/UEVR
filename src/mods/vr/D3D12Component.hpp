@@ -284,6 +284,9 @@ private:
     uint64_t m_scene_capture_generation{};
     // Last time a validated right-eye capture was submitted (Native Stereo Fix).
     std::chrono::steady_clock::time_point m_last_native_capture_submit{};
+    // When the current right-eye capture was accepted (VR_AutoResNsfHoldMs).
+    std::chrono::steady_clock::time_point m_scene_capture_accepted_at{};
+    bool m_native_stereo_resize_holding{false};
     uint32_t m_scene_capture_width{};
     uint32_t m_scene_capture_height{};
     // VR_NativeStereoFixPairSnapshot: one consistent eye pair per engine frame (see d3d12/NativePairSnapshot.hpp).
