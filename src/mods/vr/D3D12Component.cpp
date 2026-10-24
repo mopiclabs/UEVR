@@ -45,7 +45,7 @@ constexpr auto ENGINE_SRC_COLOR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
 
 namespace vrmod {
 namespace {
-void copy_eye_pair_overlap(d3d12::CommandContext& commands, ID3D12Resource* src, ID3D12Resource* dst,
+std::pair<UINT, UINT> copy_eye_pair_overlap(d3d12::CommandContext& commands, ID3D12Resource* src, ID3D12Resource* dst,
     D3D12_RESOURCE_STATES src_state, D3D12_RESOURCE_STATES dst_state, bool left_eye_in_both);
 
 constexpr auto FRAME_TIMING_LOG_INTERVAL = std::chrono::seconds(5);
@@ -5162,8 +5162,15 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                                 : static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(m_scene_capture_accepted_at - live_resize_at).count()));
                     }
 
+                    // The Native Stereo Fix puts the eyes side by side at the top left, each the size of an eye.
+                    const auto native_pair_content = [&]() {
+                        vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE,
+                            (int32_t)(2 * native_eye_width), (int32_t)native_eye_height);
+                    };
+
                     if (vr->is_using_mono()) {
                         bool recorded = false;
+                        vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, 0, 0);
                         vr->m_openxr->note_mono_copy(static_cast<uint32_t>(frame_count), false);
                         const bool submitted = m_openxr.copy(
                             (uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr,
@@ -5181,10 +5188,12 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     } else if (native_stereo_resize_hold) {
                         uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr,
-                            [source = backbuffer, scene_source_state, native_stereo_packet, native_stereo_hook](
+                            [source = backbuffer, scene_source_state, native_stereo_packet, native_stereo_hook, vr](
                                 d3d12::CommandContext& commands, ID3D12Resource* dst) {
-                                copy_eye_pair_overlap(commands, source.Get(), dst, scene_source_state,
-                                    D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                                const auto [content_width, content_height] = copy_eye_pair_overlap(commands, source.Get(),
+                                    dst, scene_source_state, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                                vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE,
+                                    (int32_t)content_width, (int32_t)content_height);
                                 // Consumed as a real submit would be, which keeps the fix Active.
                                 if (native_stereo_packet != nullptr && native_stereo_hook != nullptr) {
                                     native_stereo_hook->note_native_stereo_frame_packet_consumed(native_stereo_packet->serial);
@@ -5290,6 +5299,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     } else if (reuse_last_native_capture && !shf_using_mono_expansion && !dune_using_hmd_mono_expansion) {
                         SPDLOG_INFO_EVERY_N_SEC(5, "[NativeStereoFix][D3D12] No right-eye packet this frame, reusing the last right-eye capture");
                         uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Reused);
+                        native_pair_content();
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, pre_render_cached, std::nullopt, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
                     } else if (native_stereo_packet == nullptr ||
                                m_scene_capture_tex.texture.Get() == nullptr ||
@@ -5307,15 +5317,18 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                             !shf_using_mono_expansion && !dune_using_hmd_mono_expansion) {
                             SPDLOG_INFO_EVERY_N_SEC(1, "[NativeStereoFix][D3D12] No right-eye capture after a live resolution change; left eye in both halves");
                             m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr,
-                                [source = backbuffer, scene_source_state](d3d12::CommandContext& commands, ID3D12Resource* dst) {
-                                    copy_eye_pair_overlap(commands, source.Get(), dst, scene_source_state,
-                                        D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                                [source = backbuffer, scene_source_state, vr](d3d12::CommandContext& commands, ID3D12Resource* dst) {
+                                    const auto [content_width, content_height] = copy_eye_pair_overlap(commands, source.Get(),
+                                        dst, scene_source_state, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                                    vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE,
+                                        (int32_t)content_width, (int32_t)content_height);
                                 }, std::nullopt, scene_source_state, nullptr);
                         } else {
                             m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, backbuffer.Get(), scene_source_state, nullptr);
                         }
                     } else {
                         uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fresh);
+                        native_pair_content();
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, pre_render, std::nullopt, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
                         m_last_native_capture_submit = std::chrono::steady_clock::now();
                     }
@@ -6650,6 +6663,24 @@ void D3D12Component::on_reset(VR* vr, bool mono_retired) {
 
         if (m_openxr.last_resolution[0] != vr->get_hmd_width() || m_openxr.last_resolution[1] != vr->get_hmd_height()) {
             reasons |= SWAPCHAIN_RECREATE_HMD_RESOLUTION;
+
+            // VR_AutoResKeepSwapchains: an eye pair the double-wide swapchain already fits is copied to its top left
+            // (OpenXR::set_swapchain_content), so the runtime creates and imports no swapchain mid-session.
+            if (vr->m_openxr->autores.keep_swapchains && !vr->is_using_afr() && !swapchains_empty &&
+                !vr->is_native_stereo_fix_texture_array_submit_enabled())
+            {
+                std::scoped_lock _{vr->m_openxr->swapchain_mtx};
+                const auto it = vr->m_openxr->swapchains.find((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE);
+
+                if (it != vr->m_openxr->swapchains.end() &&
+                    it->second.width >= (int32_t)(2 * vr->get_hmd_width()) && it->second.height >= (int32_t)vr->get_hmd_height())
+                {
+                    SPDLOG_INFO("[autores] Keeping the {}x{} eye swapchain for {}x{} eyes (VR_AutoResKeepSwapchains)",
+                        it->second.width, it->second.height, vr->get_hmd_width(), vr->get_hmd_height());
+                    reasons &= ~SWAPCHAIN_RECREATE_HMD_RESOLUTION;
+                    m_openxr.last_resolution = {vr->get_hmd_width(), vr->get_hmd_height()};
+                }
+            }
         }
 
         if (swapchains_empty) {
@@ -7792,8 +7823,9 @@ void D3D12Component::OpenXR::copy_framework_ui_ue58(
 
 namespace {
 // The overlap of a double-wide eye pair and a swapchain image of another size, eye by eye (or the left eye into both
-// halves), so a copy during a live resolution change neither reads nor writes outside either image.
-void copy_eye_pair_overlap(d3d12::CommandContext& commands, ID3D12Resource* src, ID3D12Resource* dst,
+// halves), so a copy during a live resolution change neither reads nor writes outside either image. The pair goes to
+// the top left, eyes side by side; returns its extent for the projection views (OpenXR::set_swapchain_content).
+std::pair<UINT, UINT> copy_eye_pair_overlap(d3d12::CommandContext& commands, ID3D12Resource* src, ID3D12Resource* dst,
     D3D12_RESOURCE_STATES src_state, D3D12_RESOURCE_STATES dst_state, bool left_eye_in_both)
 {
     const auto s = src->GetDesc();
@@ -7805,7 +7837,8 @@ void copy_eye_pair_overlap(d3d12::CommandContext& commands, ID3D12Resource* src,
     D3D12_BOX left{0, 0, 0, w, h, 1};
     D3D12_BOX right{src_right, 0, 0, src_right + w, h, 1};
     commands.copy_region(src, dst, &left, 0, 0, 0, src_state, dst_state);
-    commands.copy_region(src, dst, &right, static_cast<UINT>(d.Width / 2), 0, 0, src_state, dst_state);
+    commands.copy_region(src, dst, &right, w, 0, 0, src_state, dst_state);
+    return {2 * w, h};
 }
 }
 
@@ -7989,8 +8022,9 @@ bool D3D12Component::OpenXR::copy(
                 swapchain_idx, src_desc.Width, src_desc.Height, dst_desc.Width, dst_desc.Height);
 
             if (swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE) {
-                copy_eye_pair_overlap(texture_ctx->commands, resource, ctx.textures[texture_index].texture, src_state,
-                    D3D12_RESOURCE_STATE_RENDER_TARGET, false);
+                const auto [content_width, content_height] = copy_eye_pair_overlap(texture_ctx->commands, resource,
+                    ctx.textures[texture_index].texture, src_state, D3D12_RESOURCE_STATE_RENDER_TARGET, false);
+                vr->m_openxr->set_swapchain_content(swapchain_idx, (int32_t)content_width, (int32_t)content_height);
             } else if (!is_depth_swapchain) {
                 D3D12_BOX overlap{0, 0, 0, static_cast<UINT>(std::min<UINT64>(src_desc.Width, dst_desc.Width)),
                     std::min<UINT>(src_desc.Height, dst_desc.Height), 1};
@@ -7999,6 +8033,10 @@ bool D3D12Component::OpenXR::copy(
             }
         } else if (src_box == nullptr) {
             const auto dst_state = is_depth_swapchain ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+            if (swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE) {
+                vr->m_openxr->set_swapchain_content(swapchain_idx, 0, 0);
+            }
 
             texture_ctx->commands.copy(
                 resource,

@@ -41,7 +41,17 @@ struct OpenXR final : public VRRuntime {
         XrSwapchain handle;
         int32_t width;
         int32_t height;
+        // The double-wide eye pair the last copy put at the top left, when smaller than the image (0 = all of it).
+        int32_t content_width{0};
+        int32_t content_height{0};
     };
+
+    void set_swapchain_content(uint32_t index, int32_t width, int32_t height) {
+        if (const auto it = swapchains.find(index); it != swapchains.end()) {
+            it->second.content_width = width < it->second.width || height < it->second.height ? width : 0;
+            it->second.content_height = width < it->second.width || height < it->second.height ? height : 0;
+        }
+    }
 
     struct SwapchainDimensionSnapshot {
         uint32_t count{};
@@ -460,6 +470,7 @@ public:
         float sp_scale{1.0f};                        // the ladder value that cvar was last set from
         int toggle_seconds{0};                       // VR_AutoResToggleSeconds
         int nsf_hold_ms{700};                        // VR_AutoResNsfHoldMs
+        bool keep_swapchains{false};                 // VR_AutoResKeepSwapchains
         std::chrono::steady_clock::time_point toggle_next{};
         std::chrono::steady_clock::time_point live_resize_at{}; // the last resolution-scale change applied live
         std::optional<float> pending_scale{};        // queued by an edge, applied outside the event lock

@@ -1644,6 +1644,9 @@ private:
     // After a live resolution change under the Native Stereo Fix, show the left eye in both halves until this long after
     // the fix accepts its new right-eye capture (0 = off): the new capture's first frames come out dark.
     const ModInt32::Ptr m_autores_nsf_hold_ms{ ModInt32::create(generate_name("AutoResNsfHoldMs"), 700, true) };
+    // A live resolution change that the eye swapchain already fits keeps the swapchain: the eye pair goes to its top left
+    // and the projection views cover just that, so the runtime creates and imports nothing mid-session.
+    const ModToggle::Ptr m_autores_keep_swapchains{ ModToggle::create(generate_name("AutoResKeepSwapchains"), false, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -2191,6 +2194,7 @@ public:
             *m_autores_live_mode,
             *m_autores_toggle_seconds,
             *m_autores_nsf_hold_ms,
+            *m_autores_keep_swapchains,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,
