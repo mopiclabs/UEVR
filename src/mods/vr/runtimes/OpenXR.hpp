@@ -460,6 +460,7 @@ public:
         float sp_scale{1.0f};                        // the ladder value that cvar was last set from
         int toggle_seconds{0};                       // VR_AutoResToggleSeconds
         std::chrono::steady_clock::time_point toggle_next{};
+        std::chrono::steady_clock::time_point live_resize_at{}; // the last resolution-scale change applied live
         std::optional<float> pending_scale{};        // queued by an edge, applied outside the event lock
         uint32_t last_event_code{};                  // domain * 1000 + sub domain * 100 + to level (PerfLog autores_event)
         std::chrono::steady_clock::time_point last_change{};
@@ -469,6 +470,13 @@ public:
         std::chrono::steady_clock::time_point last_hint{};
     } autores{};
     void on_perf_settings_event(const XrEventDataPerfSettingsEXT& ev);
+
+    // Within 2 s of a resolution-scale change applied live: the game's render target and the Native Stereo Fix capture
+    // catch up with the new swapchain size over this time.
+    bool in_live_resize_transition() const {
+        return autores.live_resize_at.time_since_epoch().count() != 0 &&
+            std::chrono::steady_clock::now() - autores.live_resize_at < std::chrono::seconds(2);
+    }
 
     bool push_dummy_projection{ false };
     // The system is Mopic's 3D display ("Monado: MOPIC 3D Display"), a desktop monitor rather than a headset.

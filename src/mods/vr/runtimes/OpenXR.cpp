@@ -499,6 +499,7 @@ bool OpenXR::apply_resolution_scale(const char* reason) {
     const auto applied_live = vr->on_openxr_resolution_scale_changed(old_width, old_height, new_width, new_height);
 
     if (applied_live) {
+        this->autores.live_resize_at = std::chrono::steady_clock::now();
         this->resolution_scale_live_apply_deferred = false;
         this->last_applied_resolution_scale = new_scale;
         this->last_applied_resolution_width = new_width;

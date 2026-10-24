@@ -45,6 +45,9 @@ constexpr auto ENGINE_SRC_COLOR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
 
 namespace vrmod {
 namespace {
+void copy_eye_pair_overlap(d3d12::CommandContext& commands, ID3D12Resource* src, ID3D12Resource* dst,
+    D3D12_RESOURCE_STATES src_state, D3D12_RESOURCE_STATES dst_state, bool left_eye_in_both);
+
 constexpr auto FRAME_TIMING_LOG_INTERVAL = std::chrono::seconds(5);
 constexpr bool SHF_AUTO_MONO_CINEMATIC = true;
 constexpr bool SHF_AUTO_2D_SCREEN_FROM_MONO_CINEMATIC = true;
@@ -5258,7 +5261,22 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         if (native_stereo_fix_live) {
                             uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
                         }
-                        m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, backbuffer.Get(), scene_source_state, nullptr);
+
+                        // Just after a live resolution change the Native Stereo Fix has no capture for the new eye
+                        // size yet, and while it is active the game does not draw its right half: this copy showed
+                        // a black right eye for up to 0.8 s (live-resolution research 10-24). Put the left eye in both
+                        // halves until the fix captures again - a moment of mono instead of one black eye.
+                        if (native_stereo_fix_live && vr->m_openxr->in_live_resize_transition() &&
+                            !shf_using_mono_expansion && !dune_using_hmd_mono_expansion) {
+                            SPDLOG_INFO_EVERY_N_SEC(1, "[NativeStereoFix][D3D12] No right-eye capture after a live resolution change; left eye in both halves");
+                            m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr,
+                                [source = backbuffer, scene_source_state](d3d12::CommandContext& commands, ID3D12Resource* dst) {
+                                    copy_eye_pair_overlap(commands, source.Get(), dst, scene_source_state,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                                }, std::nullopt, scene_source_state, nullptr);
+                        } else {
+                            m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, backbuffer.Get(), scene_source_state, nullptr);
+                        }
                     } else {
                         uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fresh);
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, pre_render, std::nullopt, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
@@ -7735,6 +7753,25 @@ void D3D12Component::OpenXR::copy_framework_ui_ue58(
     ctx.framework_ui_pending_frame = vr->get_frame_count();
 }
 
+namespace {
+// The overlap of a double-wide eye pair and a swapchain image of another size, eye by eye (or the left eye into both
+// halves), so a copy during a live resolution change neither reads nor writes outside either image.
+void copy_eye_pair_overlap(d3d12::CommandContext& commands, ID3D12Resource* src, ID3D12Resource* dst,
+    D3D12_RESOURCE_STATES src_state, D3D12_RESOURCE_STATES dst_state, bool left_eye_in_both)
+{
+    const auto s = src->GetDesc();
+    const auto d = dst->GetDesc();
+    const auto w = static_cast<UINT>(std::min<UINT64>(s.Width / 2, d.Width / 2));
+    const auto h = std::min<UINT>(s.Height, d.Height);
+    const auto src_right = left_eye_in_both ? 0u : static_cast<UINT>(s.Width / 2);
+
+    D3D12_BOX left{0, 0, 0, w, h, 1};
+    D3D12_BOX right{src_right, 0, 0, src_right + w, h, 1};
+    commands.copy_region(src, dst, &left, 0, 0, 0, src_state, dst_state);
+    commands.copy_region(src, dst, &right, static_cast<UINT>(d.Width / 2), 0, 0, src_state, dst_state);
+}
+}
+
 bool D3D12Component::OpenXR::copy(
     uint32_t swapchain_idx,
     ID3D12Resource* resource,
@@ -7902,7 +7939,28 @@ bool D3D12Component::OpenXR::copy(
 
     // We may simply just want to render to the render target directly, hence a null resource is allowed.
     if (resource != nullptr) {
-        if (src_box == nullptr) {
+        const auto src_desc = resource->GetDesc();
+        const auto dst_desc = ctx.textures[texture_index].texture->GetDesc();
+        const bool same_size = src_desc.Width == dst_desc.Width && src_desc.Height == dst_desc.Height;
+
+        if (src_box == nullptr && !same_size) {
+            // CopyResource needs identical sizes. For a few frames after a live resolution change the game's render
+            // target still has the old size while the swapchain already has the new one; a mismatched CopyResource
+            // is undefined (black or garbled frames, suspected in the compositor's GPU faults - live-resolution
+            // research 10-24). Copy the overlap instead; a depth subresource can only be copied whole, so skip it.
+            SPDLOG_INFO_EVERY_N_SEC(1, "[OpenXR] swapchain {} copy source {}x{} != image {}x{}; copying the overlap",
+                swapchain_idx, src_desc.Width, src_desc.Height, dst_desc.Width, dst_desc.Height);
+
+            if (swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE) {
+                copy_eye_pair_overlap(texture_ctx->commands, resource, ctx.textures[texture_index].texture, src_state,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET, false);
+            } else if (!is_depth_swapchain) {
+                D3D12_BOX overlap{0, 0, 0, static_cast<UINT>(std::min<UINT64>(src_desc.Width, dst_desc.Width)),
+                    std::min<UINT>(src_desc.Height, dst_desc.Height), 1};
+                texture_ctx->commands.copy_region(resource, ctx.textures[texture_index].texture, &overlap, src_state,
+                    D3D12_RESOURCE_STATE_RENDER_TARGET);
+            }
+        } else if (src_box == nullptr) {
             const auto dst_state = is_depth_swapchain ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET;
 
             texture_ctx->commands.copy(
