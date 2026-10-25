@@ -233,7 +233,23 @@ private:
     void process_cvar_refresh_budget();
     void process_frozen_cvar_budget(bool budgeted);
     void process_pending_console_script(sdk::UGameEngine* engine);
+    void process_ab_cvars();
     void process_diagnostics();
+
+    struct ABCVar {
+        std::wstring name;
+        std::wstring on;
+        std::wstring off;
+        sdk::IConsoleVariable* cvar{};
+        bool looked_up{false};
+    };
+
+    std::string m_ab_spec{};
+    std::vector<ABCVar> m_ab_cvars{};
+    int64_t m_ab_window_seconds{};
+    std::optional<bool> m_ab_last_on{};
+    uint32_t m_ab_switches{};
+    std::chrono::steady_clock::time_point m_ab_start{};
 
     static inline std::atomic_bool s_pending_ui_readbacks{false};
     std::atomic_bool m_diagnostic_snapshot_requested{false};

@@ -722,6 +722,18 @@ public:
         return m_native_stereo_fix_lumen_lighting_hold_both->value();
     }
 
+    // VR_ExperimentABCvars (EXPERIMENT, default empty): "N,name=on/off,..." alternates cvars in N-second windows of QPC
+    // time for in-run A/B measurements (see CVarManager::process_ab_cvars).
+    std::string get_experiment_ab_cvars() const {
+        return m_experiment_ab_cvars->value();
+    }
+
+    // VR_ExperimentSecondFamilyCvars (EXPERIMENT, default empty): "N,name=value,..." holds cvars for the right eye's render
+    // only; N > 0 alternates in N-second QPC windows (see ExperimentSecondFamilyCvarHold).
+    std::string get_experiment_second_family_cvars() const {
+        return m_experiment_second_family_cvars->value();
+    }
+
     bool is_native_stereo_fix_texture_array_submit_enabled() const {
         if (uevr::nascar::is_target()) { return false; }
         const auto runtime = get_runtime();
@@ -1949,6 +1961,8 @@ private:
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
     const ModInt32::Ptr m_native_stereo_fix_second_lumen_lighting_factor{ ModInt32::create(generate_name("NativeStereoFixSecondLumenLightingFactor"), 0) };
     const ModToggle::Ptr m_native_stereo_fix_lumen_lighting_hold_both{ ModToggle::create(generate_name("NativeStereoFixLumenLightingHoldBoth"), false) };
+    const ModString::Ptr m_experiment_ab_cvars{ ModString::create(generate_name("ExperimentABCvars"), "") };
+    const ModString::Ptr m_experiment_second_family_cvars{ ModString::create(generate_name("ExperimentSecondFamilyCvars"), "") };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
@@ -2441,6 +2455,8 @@ public:
             *m_native_stereo_fix_lumen_origin_refresh_frames,
             *m_native_stereo_fix_second_lumen_lighting_factor,
             *m_native_stereo_fix_lumen_lighting_hold_both,
+            *m_experiment_ab_cvars,
+            *m_experiment_second_family_cvars,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_native_stereo_fix_pair_snapshot,

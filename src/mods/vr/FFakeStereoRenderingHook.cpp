@@ -24019,6 +24019,137 @@ private:
     std::array<Held, 2> m_held{};
 };
 
+// EXPERIMENT (VR_ExperimentSecondFamilyCvars, "N,name=value,..."): holds the listed cvars at the given values for the
+// right eye's render and puts them back, like LumenViewOriginHold (the cvars must be render-thread safe for this to
+// apply to that render alone). N = 0 holds them on every frame; N > 0 only in every other N-second window of QPC time
+// (on when floor(qpc seconds / N) is even), for in-run A/B (see CVarManager::process_ab_cvars).
+class ExperimentSecondFamilyCvarHold {
+public:
+    explicit ExperimentSecondFamilyCvarHold(const std::string& spec) {
+        auto& parsed = parse(spec);
+        if (parsed.items.empty()) {
+            return;
+        }
+
+        if (parsed.window_seconds > 0) {
+            LARGE_INTEGER qpc{}, frequency{};
+            QueryPerformanceCounter(&qpc);
+            QueryPerformanceFrequency(&frequency);
+            if ((qpc.QuadPart / frequency.QuadPart / parsed.window_seconds) % 2 != 0) {
+                return;
+            }
+        }
+
+        for (auto& item : parsed.items) {
+            if (item.cvar == nullptr) {
+                continue;
+            }
+
+            try {
+                const auto wanted = std::stof(item.value);
+                Held held{item.cvar, std::to_wstring(item.cvar->GetFloat()), s_set_by_code};
+                item.cvar->Set(item.value.c_str());
+                if (item.cvar->GetFloat() != wanted) {
+                    held.set_by = s_set_by_console;
+                    item.cvar->Set(item.value.c_str(), held.set_by);
+                }
+
+                if (!item.logged) {
+                    item.logged = true;
+                    SPDLOG_INFO("[NativeStereoFix][Experiment] Holding {} at {} (was {}, now {}) for the right eye's render",
+                        utility::narrow(item.name), utility::narrow(item.value), utility::narrow(held.before), item.cvar->GetFloat());
+                }
+
+                m_held.push_back(std::move(held));
+            } catch (...) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix][Experiment] Setting a second-family cvar threw");
+            }
+        }
+    }
+
+    ~ExperimentSecondFamilyCvarHold() {
+        for (auto it = m_held.rbegin(); it != m_held.rend(); ++it) {
+            try {
+                it->cvar->Set(it->before.c_str(), it->set_by);
+            } catch (...) {
+            }
+        }
+    }
+
+    ExperimentSecondFamilyCvarHold(const ExperimentSecondFamilyCvarHold&) = delete;
+    ExperimentSecondFamilyCvarHold& operator=(const ExperimentSecondFamilyCvarHold&) = delete;
+
+private:
+    static constexpr uint32_t s_set_by_code = 0x8000000;
+    static constexpr uint32_t s_set_by_console = 0x9000000;
+
+    struct Item {
+        std::wstring name;
+        std::wstring value;
+        sdk::IConsoleVariable* cvar{};
+        bool logged{false};
+    };
+
+    struct Parsed {
+        std::string spec;
+        int64_t window_seconds{};
+        std::vector<Item> items;
+    };
+
+    struct Held {
+        sdk::IConsoleVariable* cvar{};
+        std::wstring before;
+        uint32_t set_by{};
+    };
+
+    static Parsed& parse(const std::string& spec) {
+        static Parsed parsed{};
+        if (spec == parsed.spec) {
+            return parsed;
+        }
+
+        parsed = Parsed{spec};
+        std::vector<std::string> tokens{};
+        for (size_t start = 0; start <= spec.size();) {
+            const auto end = std::min(spec.find_first_of(",;", start), spec.size());
+            if (end > start) {
+                tokens.emplace_back(spec.substr(start, end - start));
+            }
+            start = end + 1;
+        }
+
+        if (tokens.empty()) {
+            return parsed;
+        }
+
+        try {
+            parsed.window_seconds = std::stoll(tokens[0]);
+        } catch (...) {
+            SPDLOG_WARN("[NativeStereoFix][Experiment] Second-family cvars \"{}\": first item must be the window in seconds", spec);
+            return parsed;
+        }
+
+        const auto console_manager = sdk::FConsoleManager::get();
+        for (size_t i = 1; i < tokens.size(); ++i) {
+            const auto equals = tokens[i].find('=');
+            if (equals == std::string::npos || console_manager == nullptr) {
+                continue;
+            }
+
+            Item item{utility::widen(tokens[i].substr(0, equals)), utility::widen(tokens[i].substr(equals + 1))};
+            auto* object = console_manager->find(item.name.c_str());
+            item.cvar = object != nullptr && object->AsCommand() == nullptr ? static_cast<sdk::IConsoleVariable*>(object) : nullptr;
+            SPDLOG_INFO("[NativeStereoFix][Experiment] Second-family cvar {} = {}: {}", utility::narrow(item.name),
+                utility::narrow(item.value), item.cvar != nullptr ? "found" : "not found");
+            parsed.items.push_back(std::move(item));
+        }
+
+        return parsed;
+    }
+
+    std::vector<Held> m_held{};
+};
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
 
@@ -26067,6 +26198,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // The same Lumen view-origin hold for the second submission (see VR_NativeStereoFixLumenOriginRefreshFrames above).
     LumenViewOriginHold second_hold{hold_lumen_origin};
     LumenSceneLightingHold second_lighting_hold{second_lighting_factor};
+    ExperimentSecondFamilyCvarHold second_experiment_hold{vr->get_experiment_second_family_cvars()};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {

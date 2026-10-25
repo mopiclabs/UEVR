@@ -751,6 +751,114 @@ void CVarManager::process_frozen_cvar_budget(bool budgeted) {
     }
 }
 
+// EXPERIMENT (VR_ExperimentABCvars, "N,name=on/off,name=on/off..."; ';' works too where the config allows it, the test
+// harness's -Set does not; "*" = the game's own value): every cvar listed takes its "on" value in every other
+// N-second window of QueryPerformanceCounter time (on when floor(qpc seconds / N) is even) and its "off" value in the
+// others, at console priority. One run's frames then split into on and off sets by their own PresentMon CPUStartQPC,
+// which is far steadier than comparing runs: gameplay runs of one save drift by 2-4 ms of GPU time between runs.
+void CVarManager::process_ab_cvars() {
+    const auto& vr = VR::get();
+    const auto spec = vr != nullptr ? vr->get_experiment_ab_cvars() : std::string{};
+
+    if (spec != m_ab_spec) {
+        m_ab_spec = spec;
+        m_ab_cvars.clear();
+        m_ab_window_seconds = 0;
+        m_ab_last_on.reset();
+        m_ab_switches = 0;
+
+        std::vector<std::string> items{};
+        for (size_t start = 0; start <= spec.size();) {
+            const auto end = std::min(spec.find_first_of(",;", start), spec.size());
+            if (end > start) {
+                items.emplace_back(spec.substr(start, end - start));
+            }
+            start = end + 1;
+        }
+
+        if (!items.empty()) {
+            try {
+                m_ab_window_seconds = std::stoll(items[0]);
+            } catch (...) {
+                m_ab_window_seconds = 0;
+            }
+        }
+
+        for (size_t i = 1; i < items.size(); ++i) {
+            const auto equals = items[i].find('=');
+            const auto slash = items[i].find('/', equals == std::string::npos ? 0 : equals);
+            if (equals == std::string::npos || slash == std::string::npos) {
+                SPDLOG_WARN("[ABCvars] Ignoring \"{}\" (want name=on/off)", items[i]);
+                continue;
+            }
+
+            m_ab_cvars.push_back(ABCVar{utility::widen(items[i].substr(0, equals)),
+                utility::widen(items[i].substr(equals + 1, slash - equals - 1)), utility::widen(items[i].substr(slash + 1))});
+        }
+
+        // Start a minute later, after the game has applied its own settings (they set the "*" values).
+        m_ab_start = std::chrono::steady_clock::now() + std::chrono::seconds{60};
+
+        if (!spec.empty()) {
+            SPDLOG_INFO("[ABCvars] {} s windows, {} cvars from \"{}\", starting in 60 s", m_ab_window_seconds, m_ab_cvars.size(), spec);
+        }
+    }
+
+    if (m_ab_window_seconds <= 0 || m_ab_cvars.empty() || std::chrono::steady_clock::now() < m_ab_start) {
+        return;
+    }
+
+    LARGE_INTEGER qpc{}, frequency{};
+    QueryPerformanceCounter(&qpc);
+    QueryPerformanceFrequency(&frequency);
+    const bool on = (qpc.QuadPart / frequency.QuadPart / m_ab_window_seconds) % 2 == 0;
+
+    if (m_ab_last_on == on) {
+        return;
+    }
+
+    m_ab_last_on = on;
+    const auto console_manager = sdk::FConsoleManager::get();
+
+    for (auto& item : m_ab_cvars) {
+        if (!item.looked_up && console_manager != nullptr) {
+            item.looked_up = true;
+            auto* object = console_manager->find(item.name.c_str());
+            item.cvar = object != nullptr && object->AsCommand() == nullptr ? static_cast<sdk::IConsoleVariable*>(object) : nullptr;
+
+            // "*" stands for the value the game had before the first switch.
+            if (item.cvar != nullptr) {
+                try {
+                    const auto value = item.cvar->GetFloat();
+                    const auto original = value == std::floor(value) ? std::to_wstring((int64_t)value) : std::to_wstring(value);
+                    item.on = item.on == L"*" ? original : item.on;
+                    item.off = item.off == L"*" ? original : item.off;
+                } catch (...) {
+                    item.cvar = nullptr;
+                }
+            }
+
+            SPDLOG_INFO("[ABCvars] {} {} (on {}, off {})", utility::narrow(item.name), item.cvar != nullptr ? "found" : "not found",
+                utility::narrow(item.on), utility::narrow(item.off));
+        }
+
+        if (item.cvar == nullptr) {
+            continue;
+        }
+
+        try {
+            constexpr uint32_t set_by_console = 0x9000000; // ECVF_SetByConsole, as for frame generation
+            item.cvar->Set((on ? item.on : item.off).c_str(), set_by_console);
+        } catch (...) {
+            SPDLOG_WARN("[ABCvars] Setting {} threw", utility::narrow(item.name));
+        }
+    }
+
+    if (++m_ab_switches <= 4 || m_ab_switches % 100 == 0) {
+        SPDLOG_INFO("[ABCvars] switch {}: {}", m_ab_switches, on ? "on" : "off");
+    }
+}
+
 void CVarManager::process_pending_console_script(sdk::UGameEngine* engine) {
     if (engine == nullptr || m_pending_console_script_commands.empty()) {
         return;
@@ -1037,6 +1145,7 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     }
 
     process_pending_console_script(engine);
+    process_ab_cvars();
     process_autores_cvars(engine);
 
     if (!m_ue51_fsr3_runtime_cvars_done) {
