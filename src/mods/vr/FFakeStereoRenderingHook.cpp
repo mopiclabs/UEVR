@@ -23914,6 +23914,111 @@ private:
     bool m_held{false};
 };
 
+// EXPERIMENT (VR_NativeStereoFixSecondLumenLightingFactor): holds Lumen's surface cache lighting update factors at the
+// given value for one submission and puts them back. Texels relit per render = surface cache texels / factor, so a
+// large factor leaves the right eye's render relighting almost nothing of the cache the left eye's render just relit.
+// Both cvars are render-thread safe like r.LumenScene.UpdateViewOrigin. Black Myth: Wukong: setting both to 1024 for
+// both renders took game GPU busy from 24.1 to 19.0 ms per frame, the same as freezing the surface cache.
+class LumenSceneLightingHold {
+public:
+    explicit LumenSceneLightingHold(int32_t factor) {
+        if (factor <= 0) {
+            return;
+        }
+
+        const auto value = std::to_wstring(factor);
+        for (size_t i = 0; i < s_names.size(); ++i) {
+            auto& held = m_held[i];
+            held.cvar = find_cvar(i);
+            if (held.cvar == nullptr) {
+                continue;
+            }
+
+            try {
+                held.before = held.cvar->GetInt();
+                if (held.before == factor) {
+                    held.cvar = nullptr;
+                    continue;
+                }
+
+                // A scalability or game setting can outrank SetByCode; console priority as with frame generation.
+                held.cvar->Set(value.c_str());
+                if (held.cvar->GetInt() != factor) {
+                    held.set_by = s_set_by_console;
+                    held.cvar->Set(value.c_str(), held.set_by);
+                }
+
+                const auto after = held.cvar->GetInt();
+                if (after != factor) {
+                    SPDLOG_WARN_ONCE("[NativeStereoFix] {} stays {} after setting it to {}", utility::narrow(s_names[i]), after, factor);
+                    held.cvar = nullptr;
+                    continue;
+                }
+
+                static std::array<bool, 2> logged{};
+                if (!logged[i]) {
+                    logged[i] = true;
+                    SPDLOG_INFO("[NativeStereoFix] Holding {} at {} (was {}, set by 0x{:x}) for the right eye's render",
+                        utility::narrow(s_names[i]), factor, held.before, held.set_by);
+                }
+            } catch (...) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix] Setting {} threw", utility::narrow(s_names[i]));
+                held.cvar = nullptr;
+            }
+        }
+    }
+
+    ~LumenSceneLightingHold() {
+        for (auto& held : m_held) {
+            if (held.cvar == nullptr) {
+                continue;
+            }
+
+            try {
+                held.cvar->Set(std::to_wstring(held.before).c_str(), held.set_by);
+            } catch (...) {
+            }
+        }
+    }
+
+    LumenSceneLightingHold(const LumenSceneLightingHold&) = delete;
+    LumenSceneLightingHold& operator=(const LumenSceneLightingHold&) = delete;
+
+private:
+    static constexpr std::array<const wchar_t*, 2> s_names{
+        L"r.LumenScene.DirectLighting.UpdateFactor", L"r.LumenScene.Radiosity.UpdateFactor"};
+    static constexpr uint32_t s_set_by_code = 0x8000000;
+    static constexpr uint32_t s_set_by_console = 0x9000000;
+
+    static sdk::IConsoleVariable* find_cvar(size_t i) {
+        static std::array<sdk::IConsoleVariable*, 2> cvars{};
+        static bool looked_up{false};
+
+        if (!looked_up) {
+            looked_up = true;
+            if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
+                for (size_t j = 0; j < s_names.size(); ++j) {
+                    auto* object = console_manager->find(s_names[j]);
+                    if (object != nullptr && object->AsCommand() == nullptr) {
+                        cvars[j] = static_cast<sdk::IConsoleVariable*>(object);
+                    }
+                    SPDLOG_INFO("[NativeStereoFix] {} {}", utility::narrow(s_names[j]), cvars[j] != nullptr ? "found" : "not found");
+                }
+            }
+        }
+
+        return cvars[i];
+    }
+
+    struct Held {
+        sdk::IConsoleVariable* cvar{};
+        int32_t before{};
+        uint32_t set_by{s_set_by_code};
+    };
+
+    std::array<Held, 2> m_held{};
+};
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
 
@@ -25945,6 +26050,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     // The same Lumen view-origin hold for the second submission (see VR_NativeStereoFixLumenOriginRefreshFrames above).
     LumenViewOriginHold second_hold{hold_lumen_origin};
+    LumenSceneLightingHold second_lighting_hold{vr->get_native_stereo_fix_second_lumen_lighting_factor()};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {

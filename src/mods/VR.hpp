@@ -709,6 +709,13 @@ public:
         return m_native_stereo_fix_lumen_origin_refresh_frames->value();
     }
 
+    // VR_NativeStereoFixSecondLumenLightingFactor (EXPERIMENT, default 0 = off): r.LumenScene.DirectLighting.UpdateFactor
+    // and r.LumenScene.Radiosity.UpdateFactor are held at this value for the right eye's render. Lumen's surface cache is
+    // scene data both eye renders share, and each render relights its own share of it (see begin_render_viewfamily_real).
+    int32_t get_native_stereo_fix_second_lumen_lighting_factor() const {
+        return m_native_stereo_fix_second_lumen_lighting_factor->value();
+    }
+
     bool is_native_stereo_fix_texture_array_submit_enabled() const {
         if (uevr::nascar::is_target()) { return false; }
         const auto runtime = get_runtime();
@@ -1934,6 +1941,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), true) };
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
+    const ModInt32::Ptr m_native_stereo_fix_second_lumen_lighting_factor{ ModInt32::create(generate_name("NativeStereoFixSecondLumenLightingFactor"), 0) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
@@ -2424,6 +2432,7 @@ public:
             *m_native_stereo_fix_preserve_secondary_pass,
             *m_native_stereo_fix_share_exposure,
             *m_native_stereo_fix_lumen_origin_refresh_frames,
+            *m_native_stereo_fix_second_lumen_lighting_factor,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_native_stereo_fix_pair_snapshot,
