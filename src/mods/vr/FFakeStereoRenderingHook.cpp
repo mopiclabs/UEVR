@@ -23958,7 +23958,7 @@ public:
                 static std::array<bool, 2> logged{};
                 if (!logged[i]) {
                     logged[i] = true;
-                    SPDLOG_INFO("[NativeStereoFix] Holding {} at {} (was {}, set by 0x{:x}) for the right eye's render",
+                    SPDLOG_INFO("[NativeStereoFix] Holding {} at {} (was {}, set by 0x{:x}) for an eye render",
                         utility::narrow(s_names[i]), factor, held.before, held.set_by);
                 }
             } catch (...) {
@@ -25894,8 +25894,24 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     const auto lumen_origin_refresh = vr->get_native_stereo_fix_lumen_origin_refresh_frames();
     const bool hold_lumen_origin = lumen_origin_refresh > 0 && (++lumen_origin_frame_counter % (uint32_t)lumen_origin_refresh) != 0;
 
+    // EXPERIMENT A/B within one run: a negative VR_NativeStereoFixSecondLumenLightingFactor -N holds 1024 in every other
+    // N-second window of QueryPerformanceCounter time (on when floor(qpc seconds / N) is even), so PresentMon frames can
+    // be split by their own QPC timestamps without any log. VR_NativeStereoFixLumenLightingHoldBoth applies the same hold
+    // to the left eye's render too (the whole surface cache relighting cost).
+    auto second_lighting_factor = vr->get_native_stereo_fix_second_lumen_lighting_factor();
+    if (second_lighting_factor < 0) {
+        LARGE_INTEGER qpc{}, frequency{};
+        QueryPerformanceCounter(&qpc);
+        QueryPerformanceFrequency(&frequency);
+        const auto window = (qpc.QuadPart / frequency.QuadPart) / -second_lighting_factor;
+        second_lighting_factor = window % 2 == 0 ? 1024 : 0;
+    }
+
+    const auto first_lighting_factor = vr->is_native_stereo_fix_lumen_lighting_hold_both() ? second_lighting_factor : 0;
+
     {
         LumenViewOriginHold first_hold{hold_lumen_origin};
+        LumenSceneLightingHold first_lighting_hold{first_lighting_factor};
         call_original();
     }
 
@@ -26050,7 +26066,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     // The same Lumen view-origin hold for the second submission (see VR_NativeStereoFixLumenOriginRefreshFrames above).
     LumenViewOriginHold second_hold{hold_lumen_origin};
-    LumenSceneLightingHold second_lighting_hold{vr->get_native_stereo_fix_second_lumen_lighting_factor()};
+    LumenSceneLightingHold second_lighting_hold{second_lighting_factor};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {
