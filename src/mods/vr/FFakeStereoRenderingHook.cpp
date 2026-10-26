@@ -24784,6 +24784,82 @@ private:
     bool m_held{false};
 };
 
+// Holds r.LumenScene.SurfaceCache.Freeze at 1 for its lifetime (the second Native Stereo Fix submission) and puts the
+// value back (see VR_NativeStereoFixSecondLumenSurfaceCacheFreeze). Render-thread safe like
+// r.LumenScene.UpdateViewOrigin. A game setting can outrank SetByCode, so a refused write is retried at console
+// priority, as for frame generation.
+class LumenSurfaceCacheFreezeHold {
+public:
+    explicit LumenSurfaceCacheFreezeHold(bool hold) {
+        if (!hold || (m_cvar = find_cvar()) == nullptr) {
+            return;
+        }
+
+        try {
+            m_before = m_cvar->GetInt();
+            if (m_before != 0) {
+                return;
+            }
+
+            m_cvar->Set(L"1");
+            if (m_cvar->GetInt() != 1) {
+                m_set_by = s_set_by_console;
+                m_cvar->Set(L"1", m_set_by);
+            }
+
+            m_held = m_cvar->GetInt() == 1;
+            if (m_held) {
+                SPDLOG_INFO_ONCE("[NativeStereoFix] Holding r.LumenScene.SurfaceCache.Freeze at 1 for the right eye's render");
+            } else {
+                SPDLOG_WARN_ONCE("[NativeStereoFix] r.LumenScene.SurfaceCache.Freeze stays {} after setting it to 1", m_cvar->GetInt());
+            }
+        } catch (...) {
+            SPDLOG_WARN_ONCE("[NativeStereoFix] Setting r.LumenScene.SurfaceCache.Freeze threw");
+        }
+    }
+
+    ~LumenSurfaceCacheFreezeHold() {
+        if (!m_held) {
+            return;
+        }
+
+        try {
+            m_cvar->Set(std::to_wstring(m_before).c_str(), m_set_by);
+        } catch (...) {
+        }
+    }
+
+    LumenSurfaceCacheFreezeHold(const LumenSurfaceCacheFreezeHold&) = delete;
+    LumenSurfaceCacheFreezeHold& operator=(const LumenSurfaceCacheFreezeHold&) = delete;
+
+private:
+    static constexpr uint32_t s_set_by_code = 0x8000000;
+    static constexpr uint32_t s_set_by_console = 0x9000000;
+
+    static sdk::IConsoleVariable* find_cvar() {
+        static sdk::IConsoleVariable* cvar{};
+        static bool looked_up{false};
+
+        if (!looked_up) {
+            looked_up = true;
+            if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
+                auto* object = console_manager->find(L"r.LumenScene.SurfaceCache.Freeze");
+                if (object != nullptr && object->AsCommand() == nullptr) {
+                    cvar = static_cast<sdk::IConsoleVariable*>(object);
+                }
+            }
+            SPDLOG_INFO("[NativeStereoFix] r.LumenScene.SurfaceCache.Freeze {}", cvar != nullptr ? "found" : "not found (no surface cache hold)");
+        }
+
+        return cvar;
+    }
+
+    sdk::IConsoleVariable* m_cvar{};
+    int32_t m_before{0};
+    uint32_t m_set_by{s_set_by_code};
+    bool m_held{false};
+};
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
 
@@ -26817,6 +26893,10 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     // The same Lumen view-origin hold for the second submission (see VR_NativeStereoFixLumenOriginRefreshFrames above).
     LumenViewOriginHold second_hold{hold_lumen_origin};
+
+    // VR_NativeStereoFixSecondLumenSurfaceCacheFreeze: Lumen's surface cache is scene data both eye renders share, and
+    // each render updates it (card captures and relighting); the left eye's update is enough, as in a flat render.
+    LumenSurfaceCacheFreezeHold second_surface_cache_hold{vr->is_native_stereo_fix_second_lumen_surface_cache_freeze_enabled()};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {
