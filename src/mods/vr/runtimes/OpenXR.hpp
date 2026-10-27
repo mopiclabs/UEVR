@@ -467,6 +467,7 @@ public:
     struct AutoRes {
         std::chrono::steady_clock::time_point live_resize_at{}; // the last resolution-scale change applied live
         int nsf_hold_ms{700};                        // VR_AutoResNsfHoldMs, refreshed every Present
+        int source_hold_ms{150};                     // VR_AutoResSourceHoldMs, refreshed every Present
         bool keep_swapchains{false};                 // VR_AutoResKeepSwapchains, refreshed every Present
     } autores{};
 
