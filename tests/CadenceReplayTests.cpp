@@ -319,7 +319,7 @@ int test_native_frame_adapters() {
                 ++pos; ++submits;
             }
         }
-        expect(copies == (std::string(backend) == "D3D11" ? 2 : 3) &&
+        expect(copies == (std::string(backend) == "D3D11" ? 3 : 4) &&
             deferred_pair_copies == (std::string(backend) == "D3D11" ? 0 : 2) &&
             submits == (std::string(backend) == "D3D11" ? 4 : 5),
             "expected backend copy/submit coverage (update fixture for new paths)");

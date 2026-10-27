@@ -4521,14 +4521,19 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                             uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
                         }
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr,
-                            [source = backbuffer, scene_source_state, native_stereo_packet, native_stereo_hook, vr](
+                            [source = backbuffer, scene_source_state, native_stereo_packet, native_stereo_hook, native_frame_ticket, vr](
                                 d3d12::CommandContext& commands, ID3D12Resource* dst) {
                                 const auto [content_width, content_height] = copy_eye_pair_overlap(commands, source.Get(),
                                     dst, scene_source_state, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
                                 vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE,
                                     (int32_t)content_width, (int32_t)content_height);
-                                // Consumed as a real submit would be, which keeps the fix Active.
+                                // Consumed as a real submit would be, which keeps the fix Active; the right half came from the backbuffer.
                                 if (native_stereo_packet != nullptr && native_stereo_hook != nullptr) {
+                                    if (native_frame_ticket) {
+                                        native_stereo_hook->record_native_frame_stage(*native_stereo_packet, native_frame_ticket,
+                                            frame_diag::Backend::d3d12, frame_diag::Runtime::openxr, frame_diag::Stage::copy_recorded,
+                                            0, 2, 0, source.Get(), dst);
+                                    }
                                     native_stereo_hook->note_native_stereo_frame_packet_consumed(native_stereo_packet->serial);
                                 }
                             }, std::nullopt, scene_source_state, nullptr);

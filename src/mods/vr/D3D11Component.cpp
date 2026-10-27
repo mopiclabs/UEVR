@@ -1369,8 +1369,13 @@ vr::EVRCompositorError D3D11Component::on_frame(VR* vr) {
                             copy_eye_pair_overlap(context.Get(), backbuffer.Get(), render_target, true);
                         vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE,
                             (int32_t)content_width, (int32_t)content_height);
-                        // Consumed as a real submit would be, which keeps the fix Active.
+                        // Consumed as a real submit would be, which keeps the fix Active; the right half came from the backbuffer.
                         if (native_stereo_packet != nullptr && ffsr != nullptr) {
+                            if (native_frame_ticket) {
+                                ffsr->record_native_frame_stage(*native_stereo_packet, native_frame_ticket,
+                                    frame_diag::Backend::d3d11, frame_diag::Runtime::openxr, frame_diag::Stage::copy_recorded,
+                                    0, 2, 0, backbuffer.Get(), render_target);
+                            }
                             ffsr->note_native_stereo_frame_packet_consumed(native_stereo_packet->serial);
                         }
                     });
