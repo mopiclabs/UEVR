@@ -3971,8 +3971,11 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
             projection_layer_views[i].subImage.imageArrayIndex = has_native_stereo_array ? (uint32_t)i : 0;
 
             int32_t offset_x = 0, offset_y = 0, extent_x = 0, extent_y = 0;
+            // A double-wide swapchain kept across a live resolution change holds a smaller eye pair at its top left.
+            const auto content_width = swapchain->content_width > 0 ? swapchain->content_width : swapchain->width;
+            const auto content_height = swapchain->content_height > 0 ? swapchain->content_height : swapchain->height;
             // if we're working with a double-wide texture, use half the view bounds adjustment (as they apply to a single eye)
-            int texture_area_width = (is_afr || has_native_stereo_array) ? swapchain->width : swapchain->width / 2;
+            int texture_area_width = (is_afr || has_native_stereo_array) ? swapchain->width : content_width / 2;
             if (is_afr || has_native_stereo_array || i == 0) {
                 offset_x = view_bounds[i][0] * texture_area_width;
                 extent_x = view_bounds[i][1] * texture_area_width - offset_x;
@@ -3981,9 +3984,9 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
                 offset_x = texture_area_width + view_bounds[i][0] * texture_area_width;
                 extent_x = view_bounds[i][1] * texture_area_width - (offset_x - texture_area_width);
             }
-            offset_y = view_bounds[i][2] * swapchain->height;
-            extent_y = view_bounds[i][3] * swapchain->height - offset_y;
-            
+            offset_y = view_bounds[i][2] * content_height;
+            extent_y = view_bounds[i][3] * content_height - offset_y;
+
             // SPDLOG_INFO("image calc for eye {} {}, {}, {}, {}", i, offset_x, extent_x, offset_y, extent_y);
             projection_layer_views[i].subImage.imageRect.offset = {offset_x, offset_y};
             projection_layer_views[i].subImage.imageRect.extent = {extent_x, extent_y};

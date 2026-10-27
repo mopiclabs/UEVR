@@ -8716,6 +8716,7 @@ void VR::on_present() {
 
     if (runtime->is_openxr()) {
         m_openxr->autores.nsf_hold_ms = m_autores_nsf_hold_ms->value();
+        m_openxr->autores.keep_swapchains = m_autores_keep_swapchains->value();
     }
 
     runtime->consume_events(nullptr);
