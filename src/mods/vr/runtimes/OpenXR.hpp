@@ -40,7 +40,21 @@ struct OpenXR final : public VRRuntime {
         XrSwapchain handle;
         int32_t width;
         int32_t height;
+        // The double-wide eye pair the last copy put at the top left, when smaller than the image (0 = all of it).
+        int32_t content_width{0};
+        int32_t content_height{0};
     };
+
+    void set_swapchain_content(uint32_t index, int32_t width, int32_t height) {
+        if (const auto it = swapchains.find(index); it != swapchains.end()) {
+            // Never past the image: a projection rect outside it fails xrEndFrame (XR_ERROR_SWAPCHAIN_RECT_INVALID).
+            width = (std::min)(width, it->second.width);
+            height = (std::min)(height, it->second.height);
+            const bool smaller = width < it->second.width || height < it->second.height;
+            it->second.content_width = smaller ? width : 0;
+            it->second.content_height = smaller ? height : 0;
+        }
+    }
 
     struct SwapchainDimensionSnapshot {
         uint32_t count{};
@@ -173,6 +187,9 @@ public:
     XrResult recover_wedged_frame(const char* reason);
     bool close_synced_frame_without_layers(const char* reason);
     void prepare_resolution_scale_reconfigure(const char* reason);
+    // Applies resolution_scale's value: live where VR::on_openxr_resolution_scale_changed allows it, otherwise it is
+    // kept for the next injection (resolution_scale_live_apply_deferred). Returns whether it was applied live.
+    bool apply_resolution_scale(const char* reason);
     bool recover_focused_stale_frame_loop(const char* caller);
     void log_frame_lifecycle_state(const char* prefix) const;
     void trace_wait_frame_success(std::optional<uint32_t> frame_count, SyncFrameCallsite callsite);
@@ -449,6 +466,22 @@ public:
     float last_applied_resolution_scale{1.0f};
     uint32_t last_applied_resolution_width{};
     uint32_t last_applied_resolution_height{};
+
+    // Live resolution changes (the resolution slider; later an automatic resolution): when the last one was applied.
+    struct AutoRes {
+        std::chrono::steady_clock::time_point live_resize_at{}; // the last resolution-scale change applied live
+        int nsf_hold_ms{700};                        // VR_AutoResNsfHoldMs, refreshed every Present
+        int source_hold_ms{150};                     // VR_AutoResSourceHoldMs, refreshed every Present
+        bool keep_swapchains{false};                 // VR_AutoResKeepSwapchains, refreshed every Present
+    } autores{};
+
+    // Within 2 s of a resolution-scale change applied live: the game's render target and the Native Stereo Fix capture
+    // catch up with the new swapchain size over this time.
+    bool in_live_resize_transition() const {
+        return autores.live_resize_at.time_since_epoch().count() != 0 &&
+            std::chrono::steady_clock::now() - autores.live_resize_at < std::chrono::seconds(2);
+    }
+
     bool push_dummy_projection{ false };
     // The system is Mopic's 3D display ("Monado: MOPIC 3D Display"), a desktop monitor rather than a headset.
     std::atomic_bool is_mopic_display{false};

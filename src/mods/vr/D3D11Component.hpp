@@ -169,6 +169,14 @@ private:
     uint64_t m_scene_capture_snapshot_transaction{};
     uint32_t m_scene_capture_width{};
     uint32_t m_scene_capture_height{};
+    // Live resolution change holds, as in D3D12Component (VR_AutoResNsfHoldMs, VR_AutoResSourceHoldMs).
+    std::chrono::steady_clock::time_point m_scene_capture_accepted_at{};
+    bool m_native_stereo_resize_holding{false};
+    uint32_t m_hold_source_width{};
+    uint32_t m_hold_source_height{};
+    std::chrono::steady_clock::time_point m_hold_source_changed_at{};
+    bool m_nsf_was_active{false};
+    std::chrono::steady_clock::time_point m_nsf_active_since{};
     std::array<TextureContext, 2> m_2d_screen_tex{};
     ComPtr<ID3D11Texture2D> m_left_eye_tex{};
     ComPtr<ID3D11Texture2D> m_right_eye_tex{};
