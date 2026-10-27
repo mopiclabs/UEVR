@@ -100,7 +100,9 @@ void OverlayComponent::update_input_mouse_emulation() {
         return;
     }
 
-    if (m_framework_intersect_state.intersecting && VR::get()->is_using_controllers()) {
+    // Only UI that takes input: a label shown with the menu closed (VR_ResolutionLabel) must not take the pointer and
+    // turn the aim method off while the controller crosses it.
+    if (m_framework_intersect_state.intersecting && VR::get()->is_using_controllers() && g_framework->is_drawing_interactive_ui()) {
         auto vr = VR::get();
         auto& io = ImGui::GetIO();
         const auto is_initial_frame = !vr->is_using_afr() || vr->get_frame_count() % 2 == vr->m_left_eye_interval;

@@ -105,6 +105,24 @@ static_assert(order_frame(10, 10 + OLDER_FRAME_WINDOW) == FrameOrder::Older);
 static_assert(order_frame(9, 10 + OLDER_FRAME_WINDOW) == FrameOrder::Restart && order_frame(0, 10) == FrameOrder::Unknown);
 static_assert(order_frame(2, 0xFFFFFFFEu) == FrameOrder::Newer && order_frame(0xFFFFFFFEu, 2) == FrameOrder::Older);
 
+// A submit counts as new only past the newest engine frame submitted so far: frame generation's second Present of an
+// engine frame resubmits the previous one, which alternates with the new one and must not count as a new frame.
+// Frame 0 means the engine frame is unknown; count it as new rather than hide it as a repeat.
+constexpr bool is_new_frame(FrameOrder order) noexcept {
+    return order == FrameOrder::Unknown || order == FrameOrder::Newer || order == FrameOrder::Restart;
+}
+
+// Moves `newest` up to `frame` when that is newer (or the counter restarted); returns how `frame` compared.
+inline FrameOrder advance_newest_frame(std::atomic<uint32_t>& newest, uint32_t frame) noexcept {
+    auto current = newest.load(std::memory_order_relaxed);
+    auto order = order_frame(frame, current);
+    while ((order == FrameOrder::Newer || order == FrameOrder::Restart) &&
+           !newest.compare_exchange_weak(current, frame, std::memory_order_relaxed)) {
+        order = order_frame(frame, current);
+    }
+    return order;
+}
+
 // The "flags" columns, refreshed by VR::update_perf_state() on every Present: mode bits 0-14, the sync stage in
 // bits 16-17 and the rendering method in bits 20-23. tools/mopic-test/perfreport.py decodes them with the same
 // numbers (FLAG_BITS, SYNC_STAGES, METHODS), so change both together.
@@ -203,6 +221,14 @@ struct FrameRecord {
 
 inline std::atomic_bool g_enabled{false};
 inline Counters g_counters{};
+
+// New engine frames submitted (the P rule), counted with VR_PerfLog off as well: VR_ResolutionLabel's frame rate.
+inline std::atomic<uint64_t> g_new_frames{};
+inline std::atomic<uint32_t> g_newest_frame{};
+
+inline uint64_t new_frames() noexcept {
+    return g_new_frames.load(std::memory_order_relaxed);
+}
 
 // Time this thread spent blocked in the runtime or on the GPU. The Present and Tick timers subtract it, so
 // "UEVR's own cost" is CPU work rather than waiting.
@@ -306,6 +332,10 @@ inline void note_xr_begin(int64_t duration_ns, bool discarded) noexcept {
 // Every xrEndFrame. `projection` = a real projection layer was submitted (not only the Virtual Desktop dummy).
 inline void note_xr_end(bool ok, bool projection, uint32_t frame, int64_t end_time_ns, int64_t duration_ns,
     int64_t display_time, int64_t period_ns) noexcept {
+    if (ok && projection && is_new_frame(advance_newest_frame(g_newest_frame, frame))) {
+        add(g_new_frames);
+    }
+
     if (!enabled()) {
         return;
     }
@@ -330,17 +360,8 @@ inline void note_xr_end(bool ok, bool projection, uint32_t frame, int64_t end_ti
         record.kind = Submit::Empty;
         add(c.xr_empty);
     } else {
-        // New only past the newest engine frame submitted so far: frame generation's second Present of an engine
-        // frame resubmits the previous one, which alternates with the new one and must not count as a new frame.
-        // Frame 0 means the engine frame is unknown; count it as new rather than hide it as a repeat.
-        auto newest = c.newest_projection_frame.load(std::memory_order_relaxed);
-        auto order = order_frame(frame, newest);
-        while ((order == FrameOrder::Newer || order == FrameOrder::Restart) &&
-               !c.newest_projection_frame.compare_exchange_weak(newest, frame, std::memory_order_relaxed)) {
-            order = order_frame(frame, newest);
-        }
-
-        const bool is_new = order == FrameOrder::Unknown || order == FrameOrder::Newer || order == FrameOrder::Restart;
+        const auto order = advance_newest_frame(c.newest_projection_frame, frame);
+        const bool is_new = is_new_frame(order);
         record.kind = is_new ? Submit::New : Submit::Repeat;
         add(is_new ? c.xr_new : c.xr_repeat);
         if (order == FrameOrder::Older) {

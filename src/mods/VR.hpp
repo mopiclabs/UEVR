@@ -165,6 +165,7 @@ public:
     void on_pre_imgui_frame() override;
 
     void handle_keybinds();
+    void draw_resolution_label();
     void on_frame() override;
 
     void on_present() override;
@@ -508,6 +509,11 @@ public:
 
     auto& get_vr_mutex() {
         return m_openvr_mtx;
+    }
+
+    // VR_ResolutionLabel keeps the framework UI layer up with the menu closed (Framework::is_drawing_anything).
+    bool is_resolution_label_shown() const {
+        return m_resolution_label->value();
     }
 
     bool is_using_afr() const {
@@ -1280,6 +1286,15 @@ private:
     std::atomic<std::chrono::steady_clock::time_point> m_last_engine_tick{};
     std::chrono::steady_clock::time_point m_last_mod_frame{};
     std::chrono::steady_clock::time_point m_last_tick_gap_log{};
+    // VR_ResolutionLabel's frame-rate window and its once-a-second r.ScreenPercentage read (game thread, on_frame only).
+    struct ResolutionLabelState {
+        std::chrono::steady_clock::time_point fps_window_start{};
+        uint64_t fps_window_new_frames{0}; // perf::new_frames() at fps_window_start
+        float fps{0.0f};
+        std::chrono::steady_clock::time_point next_cvar_read{};
+        void* screen_percentage_cvar{nullptr}; // sdk::IConsoleVariable*, found once
+        std::optional<float> screen_percentage{};
+    } m_resolution_label_state{};
     std::atomic_bool m_has_observed_xinput{false};
     std::mutex m_gamepad_recovery_mtx{};
     uevr::input_recovery::GamepadRecovery m_gamepad_recovery{}; // protected by m_gamepad_recovery_mtx
@@ -1521,6 +1536,10 @@ private:
     // perf.csv / perf-frames.csv next to log.txt (see PerfLog.hpp). Off by default: perf-frames.csv grows by a row per
     // frame for as long as the game runs; the test harness turns it on for its runs.
     const ModToggle::Ptr m_perf_log{ ModToggle::create(generate_name("PerfLog"), false, true) };
+    // A label at the top of the view with the eye image size, the size the game renders at (r.ScreenPercentage) and the
+    // VR frame rate, shown in the framework UI layer with the menu closed, so a measurement or a demo can show what it
+    // runs at. Off by default; it can cover a test recipe's screen checkpoints near the top centre.
+    const ModToggle::Ptr m_resolution_label{ ModToggle::create(generate_name("ResolutionLabel"), false, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -1880,6 +1899,7 @@ public:
             *m_enable_depth,
             *m_enable_hitch_diagnostics,
             *m_perf_log,
+            *m_resolution_label,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,

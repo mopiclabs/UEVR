@@ -8383,6 +8383,94 @@ void VR::handle_keybinds() {
     }
 }
 
+// VR_ResolutionLabel: a window at the top of the framework UI layer with the eye image size, the size the game renders
+// at and the VR frame rate. Framework::is_drawing_anything keeps that layer up while this is on, so it shows in the
+// headset with the menu closed.
+void VR::draw_resolution_label() {
+    auto& state = m_resolution_label_state;
+    const auto now = std::chrono::steady_clock::now();
+
+    // VR frames per second over the last half second: new engine frames submitted (perf-frames.csv's P rows, counted
+    // with VR_PerfLog off too), so AFR, skipped ticks and frame generation's repeated submits all read right. OpenXR only.
+    if (state.fps_window_start.time_since_epoch().count() == 0) {
+        state.fps_window_start = now;
+        state.fps_window_new_frames = uevr::perf::new_frames();
+    }
+
+    if (const auto elapsed = std::chrono::duration<float>(now - state.fps_window_start).count(); elapsed >= 0.5f) {
+        const auto new_frames = uevr::perf::new_frames();
+        state.fps = (float)(new_frames - state.fps_window_new_frames) / elapsed;
+        state.fps_window_new_frames = new_frames;
+        state.fps_window_start = now;
+    }
+
+    // The game's r.ScreenPercentage (an upscaler such as DLSS sets it too), once a second. The cvar is looked up once
+    // (ConsoleManager::find walks every cvar); AsCommand locates the cvar class's vtable indices TryGetFloat reads with.
+    if (now >= state.next_cvar_read) {
+        state.next_cvar_read = now + std::chrono::seconds{1};
+        state.screen_percentage.reset();
+
+        try {
+            if (state.screen_percentage_cvar == nullptr) {
+                const auto console_manager = sdk::FConsoleManager::get();
+                auto* object = console_manager != nullptr ? console_manager->find(L"r.ScreenPercentage") : nullptr;
+
+                if (object != nullptr && object->AsCommand() == nullptr) {
+                    state.screen_percentage_cvar = object;
+                }
+            }
+
+            if (state.screen_percentage_cvar != nullptr) {
+                const auto value = ((sdk::IConsoleVariable*)state.screen_percentage_cvar)->TryGetFloat();
+
+                if (value && std::isfinite(*value) && *value > 0.0f) {
+                    state.screen_percentage = *value;
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    const auto runtime = get_runtime();
+    const auto width = runtime->get_width();
+    const auto height = runtime->get_height();
+
+    char lines[4][96]{};
+    if (runtime->is_openxr()) {
+        // The scale get_width/get_height use: the last one applied while a change waits for a reconfigure.
+        const auto& openxr = *m_openxr;
+        const auto applied = (openxr.resolution_scale_reconfigure_pending || openxr.resolution_scale_live_apply_deferred) &&
+            openxr.last_applied_resolution_width != 0;
+        std::snprintf(lines[0], sizeof(lines[0]), "VR scale %.2f",
+            applied ? openxr.last_applied_resolution_scale : openxr.resolution_scale->value());
+    }
+    std::snprintf(lines[1], sizeof(lines[1]), "Eye %u x %u", width, height);
+    if (state.screen_percentage) {
+        const auto percent = *state.screen_percentage;
+        std::snprintf(lines[2], sizeof(lines[2]), "Game %u x %u (%.0f%%)", (uint32_t)(width * percent / 100.0f),
+            (uint32_t)(height * percent / 100.0f), percent);
+    }
+    if (state.fps > 0.0f) {
+        std::snprintf(lines[3], sizeof(lines[3]), "FPS %.1f  (%.1f ms)", state.fps, 1000.0f / state.fps);
+    }
+
+    // The closed-menu UI layer maps the whole render target onto the slate quad, so the text keeps its size in the
+    // headset when the scale follows the target's height (4.8 at 2160, tried on a 3840x2160 game window).
+    const auto rt_size = g_framework->get_rt_size();
+    ImGui::SetNextWindowPos(ImVec2{rt_size.x * 0.5f, rt_size.y * 0.06f}, ImGuiCond_Always, ImVec2{0.5f, 0.0f});
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::Begin("##VRResolutionLabel", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove);
+    ImGui::SetWindowFontScale(std::max(1.0f, 4.8f * rt_size.y / 2160.0f));
+    for (const auto& line : lines) {
+        if (line[0] != '\0') {
+            ImGui::TextUnformatted(line);
+        }
+    }
+    ImGui::End();
+}
+
 void VR::on_frame() {
     ZoneScopedN(__FUNCTION__);
 
@@ -8392,6 +8480,12 @@ void VR::on_frame() {
 
     if (!get_runtime()->ready()) {
         return;
+    }
+
+    if (m_resolution_label->value()) {
+        draw_resolution_label();
+    } else if (m_resolution_label_state.fps_window_start.time_since_epoch().count() != 0) {
+        m_resolution_label_state = {}; // a fresh frame-rate window when it is turned on again
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -9946,6 +10040,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         }
         m_perf_log->draw("Write Frame-Rate Log (perf.csv)");
         ImGui::TextWrapped("Writes the VR frame rate (new engine frames submitted per second) and its timing to perf.csv and perf-frames.csv next to log.txt, once per second. Turning it on mid-session takes effect at once; mapping the runtime's display times onto the PC clock needs it on at launch.");
+        m_resolution_label->draw("Show Resolution and Frame Rate Label");
+        ImGui::TextWrapped("Keeps a label at the top of the view, menu closed: the VR resolution scale, the eye image size, the size the game renders at (r.ScreenPercentage) and the VR frame rate. It can cover a test recipe's screen checkpoints near the top centre.");
         m_end_session_on_game_exit->draw("End OpenXR Session When the Game Exits");
         ImGui::TextWrapped("Ends the OpenXR session once the game has destroyed its window and has not presented for 2.5 s, so the runtime stops showing the last frame while the game finishes shutting down. If the game presents again, OpenXR is reinitialized.");
 

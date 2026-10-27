@@ -184,6 +184,8 @@ public:
         return m_sidebar_state.entries[selected_index].m_label == label;
     }
 
+    // The menu or the always-on cursor: UI the controller pointer may click (is_drawing_anything also covers labels).
+    bool is_drawing_interactive_ui() const;
     bool is_drawing_anything() const;
 
     uint64_t get_d3d12_ui_generation() const {

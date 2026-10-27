@@ -1383,8 +1383,13 @@ void Framework::reload_config() try {
     spdlog::error("Failed to reload config: {}", e.what());
 }
 
-bool Framework::is_drawing_anything() const {
+bool Framework::is_drawing_interactive_ui() const {
     return m_draw_ui || FrameworkConfig::get()->is_always_show_cursor();
+}
+
+bool Framework::is_drawing_anything() const {
+    const auto& vr = VR::get();
+    return is_drawing_interactive_ui() || (vr != nullptr && vr->is_resolution_label_shown());
 }
 
 void Framework::set_draw_ui(bool state, bool should_save) {
