@@ -1347,7 +1347,7 @@ vr::EVRCompositorError D3D11Component::on_frame(VR* vr) {
                 const auto source_hold = std::chrono::milliseconds(vr->m_openxr->autores.source_hold_ms);
                 const bool source_resize_hold =
                     source_hold.count() > 0 && !vr->is_native_stereo_fix_enabled() &&
-                    resized_live && m_hold_source_changed_at >= live_resize_at &&
+                    vr->m_openxr->in_live_resize_transition() && m_hold_source_changed_at >= live_resize_at &&
                     copy_now - m_hold_source_changed_at < source_hold;
 
                 if (native_stereo_resize_hold != m_native_stereo_resize_holding) {

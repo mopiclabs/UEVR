@@ -4435,6 +4435,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                 // Copy over the entire double wide, or submit native stereo as texture-array slices.
                 if (suppress_scene_copy) {
                     SPDLOG_INFO_EVERY_N_SEC(2, "[OpenXR][debug] Skipping double-wide scene copy for perf isolation");
+                    vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, 0, 0);
                     if (!debug_submit_empty_frame) {
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr, scene_source_state, nullptr);
                     }
@@ -4493,7 +4494,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         !vr->is_native_stereo_fix_enabled() &&
                         !use_native_array_submit &&
                         !shf_using_mono_expansion && !dune_using_hmd_mono_expansion &&
-                        live_resize_at.time_since_epoch().count() != 0 &&
+                        vr->m_openxr->in_live_resize_transition() &&
                         m_hold_source_changed_at >= live_resize_at &&
                         copy_now - m_hold_source_changed_at < source_hold;
 
@@ -4629,6 +4630,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                             D3D12_RESOURCE_STATE_RENDER_TARGET,
                             nullptr);
                     } else if (stalker_exact) {
+                        vr->m_openxr->set_swapchain_content((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, 0, 0);
                         copy_stalker_pair();
                     } else if (reuse_last_native_capture && !shf_using_mono_expansion && !dune_using_hmd_mono_expansion) {
                         SPDLOG_INFO_EVERY_N_SEC(5, "[NativeStereoFix][D3D12] No right-eye packet this frame, reusing the last right-eye capture");

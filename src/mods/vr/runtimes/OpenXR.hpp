@@ -47,8 +47,12 @@ struct OpenXR final : public VRRuntime {
 
     void set_swapchain_content(uint32_t index, int32_t width, int32_t height) {
         if (const auto it = swapchains.find(index); it != swapchains.end()) {
-            it->second.content_width = width < it->second.width || height < it->second.height ? width : 0;
-            it->second.content_height = width < it->second.width || height < it->second.height ? height : 0;
+            // Never past the image: a projection rect outside it fails xrEndFrame (XR_ERROR_SWAPCHAIN_RECT_INVALID).
+            width = (std::min)(width, it->second.width);
+            height = (std::min)(height, it->second.height);
+            const bool smaller = width < it->second.width || height < it->second.height;
+            it->second.content_width = smaller ? width : 0;
+            it->second.content_height = smaller ? height : 0;
         }
     }
 
