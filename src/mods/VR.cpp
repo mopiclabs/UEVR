@@ -8714,6 +8714,10 @@ void VR::on_present() {
         return;
     }
 
+    if (runtime->is_openxr()) {
+        m_openxr->autores.nsf_hold_ms = m_autores_nsf_hold_ms->value();
+    }
+
     runtime->consume_events(nullptr);
 
     m_fake_stereo_hook->on_frame();

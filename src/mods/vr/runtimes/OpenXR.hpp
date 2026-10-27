@@ -456,6 +456,7 @@ public:
     // Live resolution changes (the resolution slider; later an automatic resolution): when the last one was applied.
     struct AutoRes {
         std::chrono::steady_clock::time_point live_resize_at{}; // the last resolution-scale change applied live
+        int nsf_hold_ms{700};                        // VR_AutoResNsfHoldMs, refreshed every Present
     } autores{};
 
     // Within 2 s of a resolution-scale change applied live: the game's render target and the Native Stereo Fix capture

@@ -2883,6 +2883,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
 
                 if (m_scene_capture_tex.setup(device, scene_capture_rt.Get(), view_format, view_format, L"Native Stereo Scene Capture Texture")) {
                     m_scene_capture_generation = capture->generation;
+                    m_scene_capture_accepted_at = std::chrono::steady_clock::now();
                     m_scene_capture_width = static_cast<uint32_t>(scene_capture_desc.Width);
                     m_scene_capture_height = scene_capture_desc.Height;
                     spdlog::info(
@@ -4458,8 +4459,45 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                     const bool native_stereo_fix_live =
                         vr->is_native_stereo_fix_enabled() &&
                         native_stereo_hook != nullptr && native_stereo_hook->is_native_stereo_fix_active();
+                    // VR_AutoResNsfHoldMs: after a live resolution change the fix's new right-eye capture comes out
+                    // dark for up to ~0.6 s after it is accepted (exposure and history start over), and in the frames
+                    // before that the right half is a stale capture or unrendered (live-resolution research 10-24).
+                    // Show the left eye in both halves from the change until the hold has passed since the accept.
+                    // The texture-array submit (VR_NativeStereoFixTextureArraySubmit) keeps its own path.
+                    const auto nsf_hold = std::chrono::milliseconds(vr->m_openxr->autores.nsf_hold_ms);
+                    const auto live_resize_at = vr->m_openxr->autores.live_resize_at;
+                    const auto copy_now = std::chrono::steady_clock::now();
+                    const bool native_stereo_resize_hold =
+                        nsf_hold.count() > 0 &&
+                        vr->is_native_stereo_fix_enabled() &&
+                        !use_native_array_submit &&
+                        !shf_using_mono_expansion && !dune_using_hmd_mono_expansion &&
+                        live_resize_at.time_since_epoch().count() != 0 &&
+                        copy_now - live_resize_at < nsf_hold + std::chrono::milliseconds(1800) &&
+                        (m_scene_capture_accepted_at < live_resize_at || copy_now - m_scene_capture_accepted_at < nsf_hold);
 
-                    if (use_native_array_submit) {
+                    if (native_stereo_resize_hold != m_native_stereo_resize_holding) {
+                        m_native_stereo_resize_holding = native_stereo_resize_hold;
+                        spdlog::info("[NativeStereoFix][D3D12] Resize hold {} {} ms after the change, capture accepted {} ms after it",
+                            native_stereo_resize_hold ? "start" : "end",
+                            std::chrono::duration_cast<std::chrono::milliseconds>(copy_now - live_resize_at).count(),
+                            m_scene_capture_accepted_at < live_resize_at ? -1LL
+                                : static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(m_scene_capture_accepted_at - live_resize_at).count()));
+                    }
+
+                    if (native_stereo_resize_hold) {
+                        uevr::perf::note_native_stereo(uevr::perf::NativeStereo::Fallback);
+                        m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::DOUBLE_WIDE, nullptr,
+                            [source = backbuffer, scene_source_state, native_stereo_packet, native_stereo_hook](
+                                d3d12::CommandContext& commands, ID3D12Resource* dst) {
+                                copy_eye_pair_overlap(commands, source.Get(), dst, scene_source_state,
+                                    D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+                                // Consumed as a real submit would be, which keeps the fix Active.
+                                if (native_stereo_packet != nullptr && native_stereo_hook != nullptr) {
+                                    native_stereo_hook->note_native_stereo_frame_packet_consumed(native_stereo_packet->serial);
+                                }
+                            }, std::nullopt, scene_source_state, nullptr);
+                    } else if (use_native_array_submit) {
                         native_stereo_array_submit_active = true;
 
                         const auto source_desc = backbuffer->GetDesc();

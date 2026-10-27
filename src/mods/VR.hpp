@@ -1540,6 +1540,9 @@ private:
     // VR frame rate, shown in the framework UI layer with the menu closed, so a measurement or a demo can show what it
     // runs at. Off by default; it can cover a test recipe's screen checkpoints near the top centre.
     const ModToggle::Ptr m_resolution_label{ ModToggle::create(generate_name("ResolutionLabel"), false, true) };
+    // After a live resolution change under the Native Stereo Fix, show the left eye in both halves until this long after
+    // the fix accepts its new right-eye capture (0 = off): the new capture's first frames come out dark.
+    const ModInt32::Ptr m_autores_nsf_hold_ms{ ModInt32::create(generate_name("AutoResNsfHoldMs"), 700, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -1900,6 +1903,7 @@ public:
             *m_enable_hitch_diagnostics,
             *m_perf_log,
             *m_resolution_label,
+            *m_autores_nsf_hold_ms,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,
