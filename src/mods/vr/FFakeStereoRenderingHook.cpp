@@ -24860,6 +24860,67 @@ private:
     bool m_held{false};
 };
 
+// Holds r.AOGlobalDistanceFieldForceFullUpdate at 1 for its lifetime (one Native Stereo Fix submission) and puts it back
+// (see VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames in begin_render_viewfamily_real). Render-thread safe
+// like r.LumenScene.UpdateViewOrigin, so the hold applies to that render alone. Games without the cvar are left alone.
+class GlobalDistanceFieldFullUpdateHold {
+public:
+    explicit GlobalDistanceFieldFullUpdateHold(bool hold) {
+        if (!hold || (m_cvar = find_cvar()) == nullptr) {
+            return;
+        }
+
+        try {
+            m_before = m_cvar->GetInt();
+            if (m_before == 0 && m_cvar->Set(L"1")) {
+                m_held = true;
+                SPDLOG_INFO_ONCE("[NativeStereoFix] Refreshing the right eye's Global Distance Field with r.AOGlobalDistanceFieldForceFullUpdate");
+            } else if (m_before == 0) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix] r.AOGlobalDistanceFieldForceFullUpdate could not be set; the right eye's Global Distance Field is not refreshed");
+            }
+        } catch (...) {
+            SPDLOG_WARN_ONCE("[NativeStereoFix] Setting r.AOGlobalDistanceFieldForceFullUpdate threw");
+        }
+    }
+
+    ~GlobalDistanceFieldFullUpdateHold() {
+        if (!m_held) {
+            return;
+        }
+
+        try {
+            m_cvar->Set(std::to_wstring(m_before).c_str());
+        } catch (...) {
+        }
+    }
+
+    GlobalDistanceFieldFullUpdateHold(const GlobalDistanceFieldFullUpdateHold&) = delete;
+    GlobalDistanceFieldFullUpdateHold& operator=(const GlobalDistanceFieldFullUpdateHold&) = delete;
+
+private:
+    static sdk::IConsoleVariable* find_cvar() {
+        static sdk::IConsoleVariable* cvar{};
+        static bool looked_up{false};
+
+        if (!looked_up) {
+            looked_up = true;
+            if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
+                auto* object = console_manager->find(L"r.AOGlobalDistanceFieldForceFullUpdate");
+                if (object != nullptr && object->AsCommand() == nullptr) {
+                    cvar = static_cast<sdk::IConsoleVariable*>(object);
+                }
+            }
+            SPDLOG_INFO("[NativeStereoFix] r.AOGlobalDistanceFieldForceFullUpdate {}", cvar != nullptr ? "found" : "not found (no Global Distance Field refresh)");
+        }
+
+        return cvar;
+    }
+
+    sdk::IConsoleVariable* m_cvar{};
+    int32_t m_before{0};
+    bool m_held{false};
+};
+
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
 
@@ -26897,6 +26958,20 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // VR_NativeStereoFixSecondLumenSurfaceCacheFreeze: Lumen's surface cache is scene data both eye renders share, and
     // each render updates it (card captures and relighting); the left eye's update is enough, as in a flat render.
     LumenSurfaceCacheFreezeHold second_surface_cache_hold{vr->is_native_stereo_fix_second_lumen_surface_cache_freeze_enabled()};
+
+    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames (N, default 30; 0 = off): each eye's render keeps its own
+    // Global Distance Field clipmaps, but the scene's list of primitives that moved this frame is used up by the first
+    // render of the frame, so the second render's clipmaps never learn of them: stale copies of moving characters stay
+    // in the right eye's distance field along their path and occlude its Lumen traces. Black Myth: Wukong (UE5.0)
+    // chapter-1 forest, 4 minutes of play, shared exposure, right/left luma: 0.87-0.95 (p10 of the frame's pixels
+    // 0.80), growing with time, and the left eye is the dark one when it is rendered second. A full distance field
+    // update on every right-eye render: 1.00 (p10 0.97) at +7.9 ms per frame on a 3080 laptop; one in every other
+    // 20 s window already keeps both halves at 1.00, so every Nth frame bounds the stale copies to N frames at 1/N of
+    // that cost. r.AOGlobalDistanceFieldForceFullUpdate is render-thread safe, so holding it at 1 around the second
+    // submission applies to that render alone.
+    static uint32_t gdf_refresh_frame_counter{0};
+    const auto gdf_refresh = vr->get_native_stereo_fix_second_gdf_refresh_frames();
+    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_refresh > 0 && (++gdf_refresh_frame_counter % (uint32_t)gdf_refresh) == 0};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {
