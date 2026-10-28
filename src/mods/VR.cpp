@@ -80,7 +80,8 @@ bool VR::on_openxr_resolution_scale_changed(
     uint32_t old_width,
     uint32_t old_height,
     uint32_t new_width,
-    uint32_t new_height) {
+    uint32_t new_height,
+    bool automatic) {
     bool ue57_invalidated = false;
 
     if (m_fake_stereo_hook != nullptr) {
@@ -132,8 +133,23 @@ bool VR::on_openxr_resolution_scale_changed(
         return result;
     }();
 
-    if (!ue57_invalidated && !legacy_live_policy.live_allowed) {
-        if (is_stalker2_executable_cached()) {
+    // A VR_AutoRes level step on an engine path the policy keeps the slider from (VR_AutoResLevelOnAnyEngine): UE 5.0-5.2
+    // and versions UEVR can't read, as the measured titles were (TEKKEN 8 demo and Sonic Racing: CrossWorlds read as
+    // file_version_1.0). Not an older UE4, and Stalker 2 never.
+    const auto older_ue4 = legacy_live_policy.version.starts_with("4.") || legacy_live_policy.version.starts_with("file_version_4.");
+    const auto automatic_live = automatic && !ue57_invalidated && !legacy_live_policy.live_allowed &&
+        m_autores_level_on_any_engine->value() && !older_ue4 && !is_stalker2_executable_cached();
+
+    if (automatic_live) {
+        SPDLOG_INFO("[autores] Live rebuild although version={} reason={} (VR_AutoResLevelOnAnyEngine) [{}x{}]->[{}x{}]",
+            legacy_live_policy.version, legacy_live_policy.reason, old_width, old_height, new_width, new_height);
+    }
+
+    if (!ue57_invalidated && !legacy_live_policy.live_allowed && !automatic_live) {
+        if (automatic) {
+            SPDLOG_WARN("[autores] No live rebuild on this engine path; version={} reason={}: no level steps [{}x{}]->[{}x{}]",
+                legacy_live_policy.version, legacy_live_policy.reason, old_width, old_height, new_width, new_height);
+        } else if (is_stalker2_executable_cached()) {
             SPDLOG_WARN(
                 "[Stalker2][OpenXR] Live resolution-scale reconfigure is intentionally disabled for UE5.1/Stalker2; saved value will apply after reinject/restart [{}x{}]->[{}x{}]",
                 old_width,
@@ -3114,6 +3130,11 @@ std::optional<std::string> VR::initialize_openxr() {
                 // Only converts timestamps, so the perf log (VR_PerfLog) can map XrTime onto QPC time. Changes nothing else.
                 if (m_perf_log->value()) {
                     wanted_extensions.insert(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+                }
+
+                // VR_AutoRes: the runtime's GPU / CPU edges, and the hints back.
+                if (m_autores->value()) {
+                    wanted_extensions.insert(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
                 }
 
                 for (const auto& extension_property : extension_properties) {
@@ -8443,6 +8464,10 @@ void VR::draw_resolution_label() {
             openxr.last_applied_resolution_width != 0;
         std::snprintf(lines[0], sizeof(lines[0]), "VR scale %.2f",
             applied ? openxr.last_applied_resolution_scale : openxr.resolution_scale->value());
+
+        if (const auto automatic = m_autores_controller.describe(); !automatic.empty()) {
+            std::snprintf(lines[0], sizeof(lines[0]), "%s", automatic.c_str());
+        }
     }
     std::snprintf(lines[1], sizeof(lines[1]), "Eye %u x %u", width, height);
     if (state.screen_percentage) {
@@ -8674,6 +8699,54 @@ bool VR::should_skip_duplicate_present(VRRuntime* runtime) {
     return true;
 }
 
+// VR_AutoRes, after consume_events: what AutoResController needs from VR, then its steps.
+void VR::update_autores() {
+    const auto now = std::chrono::steady_clock::now();
+
+    // Loading: in the last 3 s the engine stopped producing frames (250 ms, as should_skip_duplicate_present counts it),
+    // or the game stopped presenting (a synchronous load, which refreshes the frame advance before this runs) for 250 ms
+    // and four times its usual interval, so a game that is merely that slow still counts as running.
+    if (m_autores_last_present.time_since_epoch().count() != 0) {
+        const auto gap = std::chrono::duration<float>(now - m_autores_last_present).count();
+
+        if (gap > std::max(0.25f, 4.0f * m_autores_present_interval)) {
+            m_last_engine_stall = now;
+        }
+
+        m_autores_present_interval = 0.9f * m_autores_present_interval + 0.1f * gap;
+    }
+
+    if (now - m_last_engine_frame_advance > std::chrono::milliseconds{250}) {
+        m_last_engine_stall = now;
+    }
+
+    m_autores_last_present = now;
+
+    // Frame generation: half again as many Presents as engine frames over a second.
+    ++m_autores_presents;
+
+    if (m_frame_count != m_autores_last_frame_count) {
+        m_autores_last_frame_count = m_frame_count;
+        ++m_autores_engine_frames;
+    }
+
+    if (now - m_autores_count_start >= std::chrono::seconds{1}) {
+        m_autores_frame_generation = m_autores_engine_frames >= 10 && m_autores_presents * 2 >= m_autores_engine_frames * 3;
+        m_autores_presents = 0;
+        m_autores_engine_frames = 0;
+        m_autores_count_start = now;
+    }
+
+    m_autores_controller.on_present(*m_openxr, *m_cvar_manager, AutoResController::Inputs{
+        .enabled = m_autores->value(),
+        .toggle_seconds = m_autores_toggle_seconds->value(),
+        .level_interval_seconds = m_autores_level_interval_seconds->value(),
+        .loading = m_last_engine_stall.time_since_epoch().count() != 0 && now - m_last_engine_stall < std::chrono::seconds{3},
+        .frame_generation = m_autores_frame_generation,
+        .level_possible = !m_2d_screen_mode->value() && !m_extreme_compat_mode->value(),
+    });
+}
+
 void VR::on_present() {
     ZoneScopedN(__FUNCTION__);
 
@@ -8717,10 +8790,15 @@ void VR::on_present() {
     if (runtime->is_openxr()) {
         m_openxr->autores.nsf_hold_ms = m_autores_nsf_hold_ms->value();
         m_openxr->autores.source_hold_ms = m_autores_source_hold_ms->value();
-        m_openxr->autores.keep_swapchains = m_autores_keep_swapchains->value();
+        // Automatic level steps keep the swapchain (design v1 Appendix B).
+        m_openxr->autores.keep_swapchains = m_autores_keep_swapchains->value() || m_autores_controller.is_active();
     }
 
     runtime->consume_events(nullptr);
+
+    if (runtime->is_openxr()) {
+        update_autores();
+    }
 
     m_fake_stereo_hook->on_frame();
 
@@ -10047,6 +10125,8 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         m_perf_log->draw("Write Frame-Rate Log (perf.csv)");
         ImGui::TextWrapped("Writes the VR frame rate (new engine frames submitted per second) and its timing to perf.csv and perf-frames.csv next to log.txt, once per second. Turning it on mid-session takes effect at once; mapping the runtime's display times onto the PC clock needs it on at launch.");
         m_resolution_label->draw("Show Resolution and Frame Rate Label");
+        m_autores->draw("Automatic Resolution");
+        ImGui::TextWrapped("Lets an OpenXR runtime that supports XR_EXT_performance_settings move the resolution when the GPU is over or under its budget: r.ScreenPercentage (left out under DLSS), the DLSS quality where the game has a DLSS plugin, then the eye size, from 2/3 of the recommended size up to twice its width. Nothing is saved, and the Resolution Scale slider takes over when moved. The extension is requested at startup, so turning it on takes effect at the next launch.");
         ImGui::TextWrapped("Keeps a label at the top of the view, menu closed: the VR resolution scale, the eye image size, the size the game renders at (r.ScreenPercentage) and the VR frame rate. It can cover a test recipe's screen checkpoints near the top centre.");
         m_end_session_on_game_exit->draw("End OpenXR Session When the Game Exits");
         ImGui::TextWrapped("Ends the OpenXR session once the game has destroyed its window and has not presented for 2.5 s, so the runtime stops showing the last frame while the game finishes shutting down. If the game presents again, OpenXR is reinitialized.");

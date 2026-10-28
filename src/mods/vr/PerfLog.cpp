@@ -53,7 +53,8 @@ constexpr std::string_view SUMMARY_HEADER =
 
 constexpr std::string_view FRAMES_HEADER =
     "qpc_ns,kind,frame,display_time,period_ns,end_us,wait_us,callsite,nsf,nsf_pair,flags,"
-    "presents,dup_presents,present_us,ticks,ticks_skipped,tick_us,uevr_gt_us,uevr_rt_us,rt_blocked_us\n";
+    "presents,dup_presents,present_us,ticks,ticks_skipped,tick_us,uevr_gt_us,uevr_rt_us,rt_blocked_us,"
+    "autores_event,sp_applied,upscaler_applied,level_applied,vram_pct\n";
 
 // Shared with the frame paths, under g_frames_lock.
 SRWLOCK g_frames_lock = SRWLOCK_INIT;
@@ -354,7 +355,12 @@ void write_frame_rows(WriterState& w, size_t count) noexcept {
             .u(delta(t.tick_ns, p.tick_ns) / 1000).comma()
             .u(delta(t.uevr_gt_ns, p.uevr_gt_ns) / 1000).comma()
             .u(delta(t.uevr_rt_ns, p.uevr_rt_ns) / 1000).comma()
-            .u(delta(t.rt_blocked_ns, p.rt_blocked_ns) / 1000)
+            .u(delta(t.rt_blocked_ns, p.rt_blocked_ns) / 1000).comma()
+            .u(r.autores_event).comma()
+            .u(r.autores_sp).comma()
+            .u(r.autores_upscaler).comma()
+            .i(r.autores_level).comma()
+            .i(r.autores_vram)
             .end_line();
         pos = row.pos();
         ++pending_rows;

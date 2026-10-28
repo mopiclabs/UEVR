@@ -9,6 +9,7 @@
 #include <chrono>
 #include <limits>
 #include <mutex>
+#include <vector>
 
 #include <d3d11.h>
 #include <d3d12.h>
@@ -190,6 +191,19 @@ public:
     // Applies resolution_scale's value: live where VR::on_openxr_resolution_scale_changed allows it, otherwise it is
     // kept for the next injection (resolution_scale_live_apply_deferred). Returns whether it was applied live.
     bool apply_resolution_scale(const char* reason);
+    // Automatic resolution (VR_AutoRes): an eye size from the level ladder, applied like the slider's live path but never
+    // saved, and live also on the UE 5.0-5.2 titles measured for it. Returns whether it was applied; otherwise the
+    // previous size stays.
+    bool apply_autores_level(uint32_t width, uint32_t height, const char* reason);
+    bool has_autores_level() const { return this->autores.level_size.load() != 0; }
+    // The slider's eye size, as get_width / get_height report it without an automatic level.
+    uint32_t get_width_without_level() const;
+    uint32_t get_height_without_level() const;
+    void clear_autores_level();
+    // The XR_EXT_performance_settings edges consume_events received since the last call.
+    std::vector<XrEventDataPerfSettingsEXT> take_perf_settings_events();
+    // xrPerfSettingsSetPerformanceLevelEXT, looked up on first use. False without the extension or a ready session.
+    bool send_perf_settings_level(XrPerfSettingsDomainEXT domain, XrPerfSettingsLevelEXT level);
     bool recover_focused_stale_frame_loop(const char* caller);
     void log_frame_lifecycle_state(const char* prefix) const;
     void trace_wait_frame_success(std::optional<uint32_t> frame_count, SyncFrameCallsite callsite);
@@ -473,6 +487,13 @@ public:
         int nsf_hold_ms{700};                        // VR_AutoResNsfHoldMs, refreshed every Present
         int source_hold_ms{150};                     // VR_AutoResSourceHoldMs, refreshed every Present
         bool keep_swapchains{false};                 // VR_AutoResKeepSwapchains, refreshed every Present
+        // Automatic resolution: the eye size of the ladder level in use, width << 32 | height (0: the slider's size).
+        // One atomic, so the game and render threads never read half of a change. Not saved.
+        std::atomic<uint64_t> level_size{0};
+        uint32_t slider_applies{0};                  // the slider was applied live: the level gave way to it
+        std::vector<XrEventDataPerfSettingsEXT> perf_events{}; // under event_mtx
+        PFN_xrPerfSettingsSetPerformanceLevelEXT set_performance_level{nullptr};
+        bool set_performance_level_looked_up{false};
     } autores{};
 
     // Within 2 s of a resolution-scale change applied live: the game's render target and the Native Stereo Fix capture

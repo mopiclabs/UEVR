@@ -492,6 +492,74 @@ bool OpenXR::apply_resolution_scale(const char* reason) {
     return applied_live;
 }
 
+bool OpenXR::apply_autores_level(uint32_t width, uint32_t height, const char* reason) {
+    auto vr = VR::get();
+    if (vr == nullptr || width == 0 || height == 0) {
+        return false;
+    }
+
+    const auto old_width = this->get_width();
+    const auto old_height = this->get_height();
+
+    if (old_width == width && old_height == height) {
+        return true;
+    }
+
+    // The slider's scale in use, recorded the way on_draw_ui does before its first change; a level sets the applied
+    // size below, which would skip that.
+    if (this->last_applied_resolution_width == 0 || this->last_applied_resolution_height == 0) {
+        this->last_applied_resolution_scale = this->resolution_scale->value();
+    }
+
+    const auto previous = this->autores.level_size.exchange(((uint64_t)width << 32) | height);
+
+    spdlog::info("[autores] Eye size [{}x{}]->[{}x{}] ({}); recreating renderer textures", old_width, old_height, width, height,
+        reason);
+
+    const auto applied_live = vr->on_openxr_resolution_scale_changed(old_width, old_height, width, height, true);
+
+    if (applied_live) {
+        this->autores.live_resize_at = std::chrono::steady_clock::now();
+        this->last_applied_resolution_width = width;
+        this->last_applied_resolution_height = height;
+    } else {
+        this->autores.level_size = previous;
+    }
+
+    return applied_live;
+}
+
+void OpenXR::clear_autores_level() {
+    this->autores.level_size = 0;
+}
+
+std::vector<XrEventDataPerfSettingsEXT> OpenXR::take_perf_settings_events() {
+    std::scoped_lock _{event_mtx};
+    return std::exchange(this->autores.perf_events, {});
+}
+
+bool OpenXR::send_perf_settings_level(XrPerfSettingsDomainEXT domain, XrPerfSettingsLevelEXT level) {
+    if (this->session == XR_NULL_HANDLE || !this->session_ready) {
+        return false;
+    }
+
+    if (!this->autores.set_performance_level_looked_up) {
+        this->autores.set_performance_level_looked_up = true;
+
+        if (this->enabled_extensions.contains(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME)) {
+            const auto result = xrGetInstanceProcAddr(this->instance, "xrPerfSettingsSetPerformanceLevelEXT",
+                (PFN_xrVoidFunction*)&this->autores.set_performance_level);
+            spdlog::info("[autores] xrGetInstanceProcAddr(xrPerfSettingsSetPerformanceLevelEXT) = {}", this->get_result_string(result));
+        }
+    }
+
+    if (this->autores.set_performance_level == nullptr) {
+        return false;
+    }
+
+    return XR_SUCCEEDED(this->autores.set_performance_level(this->session, domain, level));
+}
+
 void OpenXR::on_draw_ui() {
     ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     if (ImGui::TreeNode("OpenXR Options")) {
@@ -507,7 +575,16 @@ void OpenXR::on_draw_ui() {
 
         if (this->resolution_scale_reconfigure_pending && !ImGui::IsItemActive()) {
             this->resolution_scale_reconfigure_pending = false;
-            this->apply_resolution_scale("ui");
+
+            // An automatic level gives way to the slider, unless the slider's size has to wait for the next injection:
+            // then the level's size is still the one rendered.
+            const auto level = this->autores.level_size.exchange(0);
+
+            if (this->apply_resolution_scale("ui")) {
+                ++this->autores.slider_applies;
+            } else {
+                this->autores.level_size = level;
+            }
         }
 
         if (this->resolution_scale_live_apply_deferred) {
@@ -1708,6 +1785,14 @@ uint32_t OpenXR::get_width_for_scale(float scale) const {
 }
 
 uint32_t OpenXR::get_width() const {
+    if (const auto level = this->autores.level_size.load(); level != 0 && !this->view_configs.empty()) {
+        return (uint32_t)(level >> 32);
+    }
+
+    return this->get_width_without_level();
+}
+
+uint32_t OpenXR::get_width_without_level() const {
     if (this->view_configs.empty()) {
         return 0;
     }
@@ -1731,6 +1816,14 @@ uint32_t OpenXR::get_height_for_scale(float scale) const {
 }
 
 uint32_t OpenXR::get_height() const {
+    if (const auto level = this->autores.level_size.load(); level != 0 && !this->view_configs.empty()) {
+        return (uint32_t)level;
+    }
+
+    return this->get_height_without_level();
+}
+
+uint32_t OpenXR::get_height_without_level() const {
     if (this->view_configs.empty()) {
         return 0;
     }
@@ -1859,6 +1952,11 @@ VRRuntime::Error OpenXR::consume_events(std::function<void(void*)> callback) {
             }
         } else if (bh->type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             this->wants_reset_origin = true;
+        } else if (bh->type == XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT) {
+            // The runtime sends one per state change; a backlog this long means nobody is taking them.
+            if (this->autores.perf_events.size() < 64) {
+                this->autores.perf_events.push_back(*(const XrEventDataPerfSettingsEXT*)&edb);
+            }
         }
 
         edb = {XR_TYPE_EVENT_DATA_BUFFER};
