@@ -167,9 +167,10 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
 
     // The extension reports changes only: while the last edge's state lasts, its request is asked again once the last
     // step had time to show (5 s down, 10 s up; a level step also waits for the level interval). A runtime that keeps
-    // sending edges resets the wait with each one.
-    if (m_pending == ar::Request::none && m_last_request != ar::Request::none && ar::still_wanted(m_state, m_last_request) &&
-        now - m_last_action >= settle_time(m_last_request)) {
+    // sending edges resets the wait with each one. An SP step's frame-rate check (check_sp_step) ends first: it takes
+    // 5-6 s, and a step taken before would cancel it while the GPU stays IMPAIRED, the case it is there for.
+    if (m_pending == ar::Request::none && !m_sp_check && m_last_request != ar::Request::none &&
+        ar::still_wanted(m_state, m_last_request) && now - m_last_action >= settle_time(m_last_request)) {
         const auto again = m_last_request == ar::Request::down ? ar::next_down(m_state, m_available) : ar::next_up(m_state, m_available);
 
         if (again) {
