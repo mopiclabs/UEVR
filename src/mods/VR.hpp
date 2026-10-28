@@ -727,6 +727,22 @@ public:
         return m_native_stereo_fix_second_lumen_surface_cache_freeze->value();
     }
 
+    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames (default 30, 0 = off): r.AOGlobalDistanceFieldForceFullUpdate
+    // is held at 1 for every Nth right-eye render, so its own Global Distance Field clipmaps catch up with the primitives
+    // that moved, which only the left eye's render is told about (see begin_render_viewfamily_real).
+    int32_t get_native_stereo_fix_second_gdf_refresh_frames() const {
+        return m_native_stereo_fix_second_gdf_refresh_frames->value();
+    }
+
+    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames (default 8, 0 = off): FScene's AddPrimitive /
+    // RemovePrimitive / UpdatePrimitiveTransform are hooked to count static meshes that appear, disappear or move, and the
+    // right eye's distance field is rebuilt in the frame of such a change, at most every M frames; the N above then only
+    // caps the wait (N = 0 turns the rebuild off altogether), and where no such entry is found or called, the cap is
+    // 10 N (see gdf_change_signal in FFakeStereoRenderingHook.cpp).
+    int32_t get_native_stereo_fix_second_gdf_refresh_on_change_frames() const {
+        return m_native_stereo_fix_second_gdf_refresh_on_change_frames->value();
+    }
+
     bool is_native_stereo_fix_texture_array_submit_enabled() const {
         if (uevr::nascar::is_target()) { return false; }
         const auto runtime = get_runtime();
@@ -1738,6 +1754,8 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), true) };
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
     const ModToggle::Ptr m_native_stereo_fix_second_lumen_surface_cache_freeze{ ModToggle::create(generate_name("NativeStereoFixSecondLumenSurfaceCacheFreeze"), true) };
+    const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 30) };
+    const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_on_change_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames"), 8) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_stalker2_native_pair_experiment{ ModToggle::create(generate_name("Stalker2NativePairExperiment"), false) };
@@ -2077,6 +2095,8 @@ public:
             *m_native_stereo_fix_share_exposure,
             *m_native_stereo_fix_lumen_origin_refresh_frames,
             *m_native_stereo_fix_second_lumen_surface_cache_freeze,
+            *m_native_stereo_fix_second_gdf_refresh_frames,
+            *m_native_stereo_fix_second_gdf_refresh_on_change_frames,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_stalker2_native_pair_experiment,
