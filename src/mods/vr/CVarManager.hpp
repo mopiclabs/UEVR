@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <utility/Config.hpp>
 #include <sdk/CVar.hpp>
@@ -35,6 +36,54 @@ public:
     void process_stalker2_sharpen_priority();
 
     void execute_console_script(sdk::UGameEngine* engine, const std::string& filename);
+
+    // Automatic resolution's game-thread actuators (VR_AutoRes; AutoResActuators.cpp). The present thread sets the
+    // targets, the next engine ticks carry them out and report back.
+    // active: the controller runs, so the game's upscaler is looked for (once per session).
+    void set_autores_active(bool active) { m_autores_active.store(active); }
+    void set_autores_sp(int percent) { m_autores_sp_target.store(percent); }
+    void set_autores_upscaler(int steps) { m_autores_upscaler_target.store(steps); }
+
+    struct AutoResReport {
+        int sp_percent{100};    // of the game's own screen percentage
+        int upscaler_steps{0};  // quality modes below the game's own
+        int upscaler_max_steps{-1}; // how many the game's own mode leaves (-1: not known yet)
+        bool sp_unavailable{false};
+        bool upscaler_unavailable{false};
+    };
+
+    AutoResReport get_autores_report() const {
+        return AutoResReport{m_autores_sp_applied.load(), m_autores_upscaler_applied.load(), m_autores_upscaler_max_steps.load(),
+            m_autores_sp_unavailable.load(), m_autores_upscaler_unavailable.load()};
+    }
+
+    // A cvar an actuator moves away from the game's own value and puts back.
+    struct AutoResCVar {
+        const wchar_t* name{};
+        bool is_int{false};
+        sdk::IConsoleVariable* cvar{nullptr};
+        uint32_t lookups{0};
+        std::chrono::steady_clock::time_point next_lookup{};
+        std::optional<float> base{};    // the game's own value
+        std::optional<float> written{}; // ours, while it is moved
+        uint32_t priority{0};           // the Set priority it took
+        uint32_t taken_back{0};         // the game put its own value back, within 30 s of the last time
+        std::chrono::steady_clock::time_point last_taken_back{};
+    };
+
+    // The UE5 DLSS plugin's Blueprint library (UDLSSLibrary): its modes ranked by their optimal screen percentage.
+    struct AutoResDlssMode {
+        void* library{nullptr};  // sdk::UClass*
+        void* get_mode{nullptr}; // sdk::UFunction*
+        void* set_mode{nullptr};
+        void* get_info{nullptr};
+        void* get_supported{nullptr};
+        bool incomplete{false};
+        uint32_t lookups{0};
+        std::optional<uint8_t> base{};
+        std::optional<uint8_t> written{};
+        std::vector<uint8_t> lower{}; // modes rendering fewer pixels than base, highest first
+    };
 
     struct ChangeSnapshot {
         uint64_t counter{};
@@ -277,6 +326,32 @@ private:
     std::array<uint32_t, 3> m_frame_generation_cvar_forced_count{};
     std::array<bool, 3> m_frame_generation_cvar_refused{}; // Set() left the value unchanged: not retried
     std::chrono::steady_clock::time_point m_next_frame_generation_cvar_check{};
+
+    // VR_AutoRes: see AutoResActuators.cpp.
+    void process_autores(sdk::UGameEngine* engine);
+    void probe_autores_upscaler(sdk::UGameEngine* engine);
+    void process_autores_sp();
+    void process_autores_dlss_quality();
+    void process_autores_dlss_mode(sdk::UGameEngine* engine);
+    std::atomic<bool> m_autores_active{false};
+    std::atomic<int> m_autores_sp_target{100};
+    std::atomic<int> m_autores_upscaler_kind{-1}; // uevr::autores::Upscaler, found by probe_autores_upscaler
+    std::atomic<int> m_autores_upscaler_target{0};
+    std::chrono::steady_clock::time_point m_autores_probe_next{};
+    uint32_t m_autores_probe_attempts{0};
+    std::atomic<int> m_autores_sp_applied{100};
+    std::atomic<int> m_autores_upscaler_applied{0};
+    std::atomic<int> m_autores_upscaler_max_steps{-1};
+    std::atomic<bool> m_autores_sp_unavailable{false};
+    std::atomic<bool> m_autores_upscaler_unavailable{false};
+    int m_autores_sp_processed{100};
+    int m_autores_upscaler_processed{0};
+    std::chrono::steady_clock::time_point m_autores_next_check{};
+    AutoResCVar m_autores_sp{L"r.ScreenPercentage"};
+    AutoResCVar m_autores_resize_method{L"r.SceneRenderTargetResizeMethod", true};
+    AutoResCVar m_autores_dlss_quality{L"r.NGX.DLSS.Quality", true};
+    AutoResCVar m_autores_dlss_enable{L"r.NGX.DLSS.Enable", true};
+    AutoResDlssMode m_autores_dlss_mode{};
 
     // VR_MopicForceWindowedFullscreen: see enforce_mopic_windowed_fullscreen().
     void enforce_mopic_windowed_fullscreen(sdk::UGameEngine* engine);
