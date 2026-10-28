@@ -869,6 +869,7 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
 
     enforce_mopic_windowed_fullscreen(engine);
     enforce_frame_generation_cvars();
+    process_autores(engine);
 }
 
 // VR_NativeStereoFixDisableFrameGeneration: while the Native Stereo Fix is on, hold the engine's frame generation off.

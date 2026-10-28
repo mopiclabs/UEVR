@@ -26,6 +26,7 @@
 #include "vr/D3D11Component.hpp"
 #include "vr/D3D12Component.hpp"
 #include "vr/OverlayComponent.hpp"
+#include "vr/AutoRes.hpp"
 
 #include "vr/FFakeStereoRenderingHook.hpp"
 #include "vr/RenderTargetPoolHook.hpp"
@@ -208,11 +209,14 @@ public:
         }
     }
 
+    // automatic: a VR_AutoRes level step, which with VR_AutoResLevelOnAnyEngine also rebuilds live on the engine paths
+    // the slider's version policy keeps from it (Stalker 2 never).
     bool on_openxr_resolution_scale_changed(
         uint32_t old_width,
         uint32_t old_height,
         uint32_t new_width,
-        uint32_t new_height);
+        uint32_t new_height,
+        bool automatic = false);
 
 
     Vector4f get_position(uint32_t index, bool grip = true)  const;
@@ -1556,6 +1560,24 @@ private:
     // A live resolution change that the eye swapchain already fits keeps the swapchain: the eye pair goes to its top left
     // and the projection views cover just that, so the runtime creates and imports nothing mid-session.
     const ModToggle::Ptr m_autores_keep_swapchains{ ModToggle::create(generate_name("AutoResKeepSwapchains"), false, true) };
+    // Automatic resolution (AutoRes.hpp): request XR_EXT_performance_settings and answer the runtime's GPU / CPU edges
+    // with one step each: r.ScreenPercentage (not under DLSS), the DLSS quality where the game has a DLSS plugin, then the
+    // eye size from a ladder around the recommended size (kept swapchain). Off by default; without a runtime that
+    // implements the extension nothing moves.
+    const ModToggle::Ptr m_autores{ ModToggle::create(generate_name("AutoRes"), false, true) };
+    // Automatic level steps rebuild live also on the engine paths the version policy keeps the slider from: UE 5.0-5.2 and
+    // versions UEVR can't read (TEKKEN 8 demo, Black Myth: Wukong and the Sonic Racing: CrossWorlds demo took 149 forced
+    // live rebuilds without a fault on 2026-10-25). Not UE4 before 4.27, and never Stalker 2, whose live rebuild is
+    // disabled on purpose.
+    const ModToggle::Ptr m_autores_level_on_any_engine{ ModToggle::create(generate_name("AutoResLevelOnAnyEngine"), true, true) };
+    // At most one level change per this many seconds (design v1: 60; the runtime paces its edges the same way).
+    const ModInt32::Ptr m_autores_level_interval_seconds{ ModInt32::create(generate_name("AutoResLevelIntervalSeconds"), 60, true) };
+    // For measurements: from 60 s in, a synthetic GPU edge every this many seconds (0 = off) through the same steps as
+    // the runtime's: IMPAIRED until nothing is left to step down, then NORMAL until nothing is left to step up.
+    const ModInt32::Ptr m_autores_toggle_seconds{ ModInt32::create(generate_name("AutoResToggleSeconds"), 0, true) };
+    // The synthetic edges start this long after automatic resolution starts (a test recipe still in the menus then would
+    // lose its clicks to the steps).
+    const ModInt32::Ptr m_autores_toggle_delay_seconds{ ModInt32::create(generate_name("AutoResToggleDelaySeconds"), 60, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -1920,6 +1942,11 @@ public:
             *m_autores_nsf_hold_ms,
             *m_autores_source_hold_ms,
             *m_autores_keep_swapchains,
+            *m_autores,
+            *m_autores_level_on_any_engine,
+            *m_autores_level_interval_seconds,
+            *m_autores_toggle_seconds,
+            *m_autores_toggle_delay_seconds,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,
@@ -2170,6 +2197,19 @@ private:
     uint64_t m_skipped_duplicate_presents{0};
     int m_last_advanced_frame_count{-1};
     std::chrono::steady_clock::time_point m_last_engine_frame_advance{};
+
+    // VR_AutoRes (update_autores): the controller, the last engine stall (loading) and frame generation (more Presents
+    // than engine frames over a second).
+    void update_autores();
+    AutoResController m_autores_controller{};
+    std::chrono::steady_clock::time_point m_last_engine_stall{};
+    std::chrono::steady_clock::time_point m_autores_last_present{};
+    float m_autores_present_interval{0.0f}; // seconds, a running average
+    std::chrono::steady_clock::time_point m_autores_count_start{};
+    uint32_t m_autores_presents{0};
+    uint32_t m_autores_engine_frames{0};
+    int m_autores_last_frame_count{-1};
+    bool m_autores_frame_generation{false};
     int m_left_eye_frame_count{0};
     int m_right_eye_frame_count{0};
 
