@@ -63,6 +63,8 @@
 #include <sdk/UKismetRenderingLibrary.hpp>
 #include <sdk/UTexture.hpp>
 #include <sdk/UObjectBase.hpp>
+#include <sdk/UPrimitiveComponent.hpp>
+#include <sdk/FBoolProperty.hpp>
 #include <sdk/APlayerCameraManager.hpp>
 #include <sdk/FStructProperty.hpp>
 #include <sdk/FSceneViewFamily.hpp>
@@ -24871,7 +24873,14 @@ public:
         }
 
         try {
-            m_before = m_cvar->GetInt();
+            // GetInt reads 0 when the read itself fails, which would restore a 1 the game set to 0: skip the hold then.
+            const auto before = m_cvar->TryGetInt();
+            if (!before) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix] r.AOGlobalDistanceFieldForceFullUpdate could not be read; the right eye's Global Distance Field is not refreshed");
+                return;
+            }
+
+            m_before = *before;
             if (m_before == 0 && m_cvar->Set(L"1")) {
                 m_held = true;
                 SPDLOG_INFO_ONCE("[NativeStereoFix] Refreshing the right eye's Global Distance Field with r.AOGlobalDistanceFieldForceFullUpdate");
@@ -24920,6 +24929,306 @@ private:
     int32_t m_before{0};
     bool m_held{false};
 };
+
+// VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames: a change signal for the right eye's distance field
+// rebuild (see VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames). FScene::AddPrimitive, RemovePrimitive and
+// UpdatePrimitiveTransform, the game-thread entries every primitive that appears, disappears or moves goes through, are
+// hooked only to count the ones that live in the distance field (static mesh components, instanced ones included, with
+// bAffectDistanceFieldLighting); the rebuild then comes in that frame's right-eye render, at most every M frames.
+// The slots are found by shape: AddPrimitive and UpdatePrimitiveTransform both compare the primitive's submit time against
+// 0.0001f, and only the latter calls AddPrimitive or RemovePrimitive through the vtable; RemovePrimitive is the slot after
+// AddPrimitive. Each hooked function must then see UPrimitiveComponent objects for its first calls, or its count is off.
+// The hooks are mid hooks at the function entry, which keep every register, so a slot the shape search took for one of
+// these but which takes more arguments still runs with the arguments it was given.
+namespace gdf_change_signal {
+enum Slot : size_t { Add = 0, Remove = 1, Transform = 2, Count = 3 };
+static constexpr std::array<const char*, Count> s_names{"AddPrimitive", "RemovePrimitive", "UpdatePrimitiveTransform"};
+static constexpr uint32_t s_validation_calls = 64;
+
+struct State {
+    std::array<safetyhook::MidHook, Count> hooks{};
+    std::array<std::atomic<uint32_t>, Count> validated{};
+    std::array<std::atomic<bool>, Count> disabled{};
+    std::atomic<uint32_t> changes{0};
+    std::atomic<uint64_t> changes_total{0};
+    std::atomic<uint64_t> calls_total{0};
+    bool attempted{false};
+    bool installed{false};
+    sdk::UClass* static_mesh_class{};
+    sdk::FBoolProperty* affects_distance_field{};
+};
+
+static State& state() {
+    static State s{};
+    return s;
+}
+
+static bool safe_is_a(sdk::UObject* object, sdk::UClass* klass) {
+    if (object == nullptr || klass == nullptr || IsBadReadPtr(object, 0x30)) {
+        return false;
+    }
+
+    try {
+        const auto object_class = object->get_class();
+        if (object_class == nullptr || IsBadReadPtr(object_class, 0x100)) {
+            return false;
+        }
+
+        return object_class->is_a(klass);
+    } catch (...) {
+        return false;
+    }
+}
+
+// A primitive the distance field holds: a static mesh component (instanced ones derive from it) that affects distance
+// field lighting. Without the class or the property every primitive counts.
+static bool is_distance_field_relevant(sdk::UObject* component) {
+    auto& s = state();
+
+    if (s.static_mesh_class != nullptr && !safe_is_a(component, s.static_mesh_class)) {
+        return false;
+    }
+
+    if (s.affects_distance_field != nullptr) {
+        try {
+            return s.affects_distance_field->get_value_from_object(component);
+        } catch (...) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void on_call(Slot slot, sdk::UObject* component) {
+    auto& s = state();
+    s.calls_total.fetch_add(1, std::memory_order_relaxed);
+
+    if (s.disabled[slot].load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (s.validated[slot].load(std::memory_order_acquire) < s_validation_calls) {
+        if (!safe_is_a(component, sdk::UPrimitiveComponent::static_class())) {
+            s.disabled[slot].store(true, std::memory_order_release);
+            SPDLOG_WARN("[NativeStereoFix] The FScene slot taken for {} was called with something that is not a primitive component; not counting it", s_names[slot]);
+            return;
+        }
+
+        if (s.validated[slot].fetch_add(1, std::memory_order_acq_rel) + 1 == s_validation_calls) {
+            SPDLOG_INFO("[NativeStereoFix] FScene::{} hook validated on {} primitive components", s_names[slot], s_validation_calls);
+        }
+    }
+
+    if (is_distance_field_relevant(component)) {
+        s.changes.fetch_add(1, std::memory_order_relaxed);
+        s.changes_total.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+// At the entry of FScene::X(this, UPrimitiveComponent*): the component is the second argument, in rdx.
+static void hooked_add_primitive(safetyhook::Context& ctx) {
+    on_call(Add, reinterpret_cast<sdk::UObject*>(ctx.rdx));
+}
+
+static void hooked_remove_primitive(safetyhook::Context& ctx) {
+    on_call(Remove, reinterpret_cast<sdk::UObject*>(ctx.rdx));
+}
+
+static void hooked_update_primitive_transform(safetyhook::Context& ctx) {
+    on_call(Transform, reinterpret_cast<sdk::UObject*>(ctx.rdx));
+}
+
+// Reads the 4 bytes a rip-relative memory operand points at, if the instruction has one.
+static std::optional<uint32_t> rip_relative_dword(uintptr_t addr, const INSTRUX& ix) {
+    for (uint32_t i = 0; i < ix.OperandsCount; ++i) {
+        const auto& op = ix.Operands[i];
+        if (op.Type != ND_OP_MEM || !op.Info.Memory.IsRipRel) {
+            continue;
+        }
+
+        const auto target = addr + ix.Length + (intptr_t)(int32_t)op.Info.Memory.Disp;
+        if (IsBadReadPtr((void*)target, sizeof(uint32_t))) {
+            return std::nullopt;
+        }
+
+        return *(uint32_t*)target;
+    }
+
+    return std::nullopt;
+}
+
+struct Shape {
+    bool compares_epsilon{false};
+    bool calls_add_or_remove{false};
+    uint32_t instructions{0};
+};
+
+static std::optional<Shape> shape_of(uintptr_t fn) {
+    constexpr uint32_t epsilon = 0x38D1B717; // 0.0001f
+    constexpr uint32_t negative_epsilon = 0xB8D1B717; // -0.0001f
+    Shape shape{};
+
+    try {
+        utility::exhaustive_decode((uint8_t*)fn, 400, [&](utility::ExhaustionContext& ctx) -> utility::ExhaustionResult {
+            ++shape.instructions;
+            const auto& ix = ctx.instrux;
+
+            if (const auto dword = rip_relative_dword(ctx.addr, ix); dword && (*dword == epsilon || *dword == negative_epsilon)) {
+                shape.compares_epsilon = true;
+            }
+
+            // call qword ptr [reg+8] / [reg+0x10]: AddPrimitive / RemovePrimitive through this's vtable
+            if (ix.Instruction == ND_INS_CALLNI && ix.OperandsCount >= 1 && ix.Operands[0].Type == ND_OP_MEM &&
+                ix.Operands[0].Info.Memory.HasBase && !ix.Operands[0].Info.Memory.HasIndex && ix.Operands[0].Info.Memory.HasDisp &&
+                (ix.Operands[0].Info.Memory.Disp == sizeof(void*) || ix.Operands[0].Info.Memory.Disp == 2 * sizeof(void*)))
+            {
+                shape.calls_add_or_remove = true;
+            }
+
+            if (std::string_view{ix.Mnemonic}.starts_with("CALL")) {
+                return utility::ExhaustionResult::STEP_OVER;
+            }
+
+            return utility::ExhaustionResult::CONTINUE;
+        });
+    } catch (...) {
+        return std::nullopt;
+    }
+
+    return shape;
+}
+
+// Game thread, once the scene is known. Finds and hooks the three FScene entries; later frames count through them.
+static void ensure_installed(sdk::FSceneInterface* scene) {
+    auto& s = state();
+    if (s.attempted || scene == nullptr || IsBadReadPtr(scene, sizeof(void*))) {
+        return;
+    }
+
+    s.attempted = true;
+
+    try {
+        // The validation needs the class; without it every call would look wrong and switch a slot off for good.
+        const auto primitive_class = sdk::UPrimitiveComponent::static_class();
+        if (primitive_class == nullptr) {
+            SPDLOG_WARN("[NativeStereoFix] UPrimitiveComponent's class is unknown; no distance field change signal");
+            return;
+        }
+
+        auto** vtable = *(void***)scene;
+        const auto module = utility::get_module_within((void*)vtable).value_or(nullptr);
+        if (module == nullptr) {
+            SPDLOG_WARN("[NativeStereoFix] FScene vtable is outside any module; no distance field change signal");
+            return;
+        }
+
+        std::optional<uint32_t> add_index{};
+        std::optional<uint32_t> transform_index{};
+
+        for (uint32_t i = 1; i < 48 && !transform_index; ++i) {
+            const auto fn = (uintptr_t)vtable[i];
+            if (fn == 0) {
+                break;
+            }
+
+            // A slot in another module (a thunk, a modular build) is not one of these; the ones after it may be.
+            if (IsBadReadPtr((void*)fn, sizeof(void*)) || utility::get_module_within(fn).value_or(nullptr) != module) {
+                continue;
+            }
+
+            const auto shape = shape_of(fn);
+            if (!shape || !shape->compares_epsilon || shape->instructions < 20) {
+                continue;
+            }
+
+            if (shape->calls_add_or_remove) {
+                transform_index = i;
+            } else if (!add_index) {
+                add_index = i;
+            }
+
+            SPDLOG_INFO("[NativeStereoFix] FScene vtable slot {} looks like {} ({:x}, {} instructions)",
+                i, shape->calls_add_or_remove ? "UpdatePrimitiveTransform" : "AddPrimitive", fn, shape->instructions);
+        }
+
+        if (!transform_index && !add_index) {
+            SPDLOG_WARN("[NativeStereoFix] Neither FScene::AddPrimitive nor UpdatePrimitiveTransform found in the vtable; no distance field change signal");
+            return;
+        }
+
+        std::array<std::optional<uint32_t>, Count> indices{};
+        indices[Transform] = transform_index;
+        if (add_index && (!transform_index || *add_index + 1 < *transform_index)) {
+            indices[Add] = add_index;
+            indices[Remove] = *add_index + 1;
+        }
+
+        // What the counting needs, before any hook can call on_call.
+        s.static_mesh_class = sdk::find_uobject<sdk::UClass>(L"Class /Script/Engine.StaticMeshComponent");
+        s.affects_distance_field = static_cast<sdk::FBoolProperty*>(primitive_class->find_property(L"bAffectDistanceFieldLighting"));
+
+        const std::array<safetyhook::MidHookFn, Count> targets{&hooked_add_primitive, &hooked_remove_primitive, &hooked_update_primitive_transform};
+        uint32_t hooked{0};
+
+        for (size_t slot = 0; slot < Count; ++slot) {
+            if (!indices[slot]) {
+                s.disabled[slot].store(true, std::memory_order_release);
+                continue;
+            }
+
+            s.hooks[slot] = safetyhook::create_mid(vtable[*indices[slot]], targets[slot]);
+            if (!s.hooks[slot]) {
+                s.disabled[slot].store(true, std::memory_order_release);
+                SPDLOG_WARN("[NativeStereoFix] Could not hook FScene::{} (vtable slot {})", s_names[slot], *indices[slot]);
+                continue;
+            }
+
+            ++hooked;
+            SPDLOG_INFO("[NativeStereoFix] Hooked FScene::{} (vtable slot {}) as a distance field change signal", s_names[slot], *indices[slot]);
+        }
+
+        if (hooked == 0) {
+            return;
+        }
+
+        SPDLOG_INFO("[NativeStereoFix] Distance field change signal counts {} that {}",
+            s.static_mesh_class != nullptr ? "static mesh components" : "every primitive",
+            s.affects_distance_field != nullptr ? "affect distance field lighting" : "appear, disappear or move (bAffectDistanceFieldLighting not found)");
+        s.installed = true;
+    } catch (...) {
+        SPDLOG_WARN("[NativeStereoFix] Hooking the FScene primitive entries threw; no distance field change signal");
+    }
+}
+
+static bool is_installed() {
+    return state().installed;
+}
+
+// A hooked entry has been called with primitive components, so the counts mean something. A slot the shape search
+// picked wrongly is never called (Expedition 33, UE5.4, and Sonic Racing CrossWorlds: slot 13, no calls in 6 minutes).
+static bool is_validated() {
+    auto& s = state();
+    for (size_t slot = 0; slot < Count; ++slot) {
+        if (!s.disabled[slot].load(std::memory_order_acquire) && s.validated[slot].load(std::memory_order_acquire) >= s_validation_calls) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Game thread: the relevant changes seen since the last call.
+static uint32_t take_changes() {
+    return state().changes.exchange(0, std::memory_order_acq_rel);
+}
+
+static void log_totals(uint64_t refreshes_on_change, uint64_t refreshes_backstop) {
+    auto& s = state();
+    SPDLOG_INFO("[NativeStereoFix] Distance field change signal: {} calls, {} relevant changes, right eye rebuilt {} times on change and {} times by the frame cap",
+        s.calls_total.load(std::memory_order_relaxed), s.changes_total.load(std::memory_order_relaxed), refreshes_on_change, refreshes_backstop);
+}
+}
 
 void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family_candidate) {
     g_hook->m_native_stereo_last_family_ticks.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
@@ -26797,6 +27106,11 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     const auto lumen_origin_refresh = vr->get_native_stereo_fix_lumen_origin_refresh_frames();
     const bool hold_lumen_origin = lumen_origin_refresh > 0 && (++lumen_origin_frame_counter % (uint32_t)lumen_origin_refresh) != 0;
 
+    // The distance field change signal's hooks, once the scene is known (see VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames).
+    if (vr->get_native_stereo_fix_second_gdf_refresh_on_change_frames() > 0) {
+        gdf_change_signal::ensure_installed(reinterpret_cast<sdk::FSceneInterface*>(view_family_scene));
+    }
+
     {
         LumenViewOriginHold first_hold{hold_lumen_origin};
         call_original();
@@ -26969,9 +27283,48 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // 20 s window already keeps both halves at 1.00, so every Nth frame bounds the stale copies to N frames at 1/N of
     // that cost. r.AOGlobalDistanceFieldForceFullUpdate is render-thread safe, so holding it at 1 around the second
     // submission applies to that render alone.
-    static uint32_t gdf_refresh_frame_counter{0};
+    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames (M, default 8; 0 = off): with the change signal
+    // (gdf_change_signal, hooked at the first submission), the rebuild comes in the right-eye render of the frame in
+    // which a static mesh appeared, disappeared or moved, at most every M frames, and the N above only caps the wait. Scenes where nothing of the
+    // distance field changes then cost nothing between caps; a fight with props and weapons moving every frame rebuilds
+    // every M frames (about 8 ms / M per frame on a 3080 laptop). Without a working signal nothing says when a rebuild
+    // is needed, and a full rebuild is dear where the field is large (Expedition 33: ~45 ms, +1.5 ms a frame at every
+    // 30th), so the cap is then 10 N: the stale copies build up over minutes, a rebuild every 10 s still holds them off.
+    static uint32_t gdf_frames_since_refresh{0};
+    static uint32_t gdf_pending_changes{0};
+    static uint64_t gdf_refreshes_on_change{0};
+    static uint64_t gdf_refreshes_backstop{0};
+    static uint32_t gdf_log_counter{0};
     const auto gdf_refresh = vr->get_native_stereo_fix_second_gdf_refresh_frames();
-    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_refresh > 0 && (++gdf_refresh_frame_counter % (uint32_t)gdf_refresh) == 0};
+    const auto gdf_change_refresh = vr->get_native_stereo_fix_second_gdf_refresh_on_change_frames();
+    // N = 0 turns the rebuild off altogether; M = 0 leaves the plain every-Nth-frame rebuild; with the signal wanted
+    // but no hooked entry ever called, the cap is 10 N.
+    const bool gdf_signal = gdf_refresh > 0 && gdf_change_refresh > 0 && gdf_change_signal::is_validated();
+    const uint32_t gdf_cap = gdf_refresh <= 0 ? 0u : (gdf_change_refresh <= 0 || gdf_signal) ? (uint32_t)gdf_refresh : (uint32_t)gdf_refresh * 10u;
+    ++gdf_frames_since_refresh;
+    if (gdf_change_refresh > 0 && gdf_change_signal::is_installed()) {
+        gdf_pending_changes += gdf_change_signal::take_changes();
+    }
+
+    bool gdf_rebuild{false};
+    if (gdf_signal && gdf_pending_changes > 0 && gdf_frames_since_refresh >= (uint32_t)gdf_change_refresh) {
+        gdf_rebuild = true;
+        ++gdf_refreshes_on_change;
+    } else if (gdf_cap > 0 && gdf_frames_since_refresh >= gdf_cap) {
+        gdf_rebuild = true;
+        ++gdf_refreshes_backstop;
+    }
+
+    if (gdf_rebuild) {
+        gdf_frames_since_refresh = 0;
+        gdf_pending_changes = 0;
+    }
+
+    if (gdf_change_signal::is_installed() && ++gdf_log_counter % 3600 == 0) {
+        gdf_change_signal::log_totals(gdf_refreshes_on_change, gdf_refreshes_backstop);
+    }
+
+    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {
