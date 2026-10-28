@@ -1568,6 +1568,9 @@ private:
     // For measurements: from 60 s in, a synthetic GPU edge every this many seconds (0 = off) through the same steps as
     // the runtime's: IMPAIRED until nothing is left to step down, then NORMAL until nothing is left to step up.
     const ModInt32::Ptr m_autores_toggle_seconds{ ModInt32::create(generate_name("AutoResToggleSeconds"), 0, true) };
+    // The synthetic edges start this long after automatic resolution starts (a test recipe still in the menus then would
+    // lose its clicks to the steps).
+    const ModInt32::Ptr m_autores_toggle_delay_seconds{ ModInt32::create(generate_name("AutoResToggleDelaySeconds"), 60, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -1935,6 +1938,7 @@ public:
             *m_autores_level_on_any_engine,
             *m_autores_level_interval_seconds,
             *m_autores_toggle_seconds,
+            *m_autores_toggle_delay_seconds,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,

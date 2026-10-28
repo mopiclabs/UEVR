@@ -145,11 +145,11 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
         take_edge(event.domain, event.subDomain, event.fromLevel, event.toLevel, "runtime");
     }
 
-    // VR_AutoResToggleSeconds, from 60 s after the start: GPU IMPAIRED until nothing is left to step down, then NORMAL
-    // until nothing is left to step up, and again, so every actuator and level takes its turn.
+    // VR_AutoResToggleSeconds, from VR_AutoResToggleDelaySeconds after the start: GPU IMPAIRED until nothing is left to
+    // step down, then NORMAL until nothing is left to step up, and again, so every actuator and level takes its turn.
     if (inputs.toggle_seconds > 0 && now >= m_next_toggle) {
         if (m_next_toggle.time_since_epoch().count() == 0) {
-            m_next_toggle = now + std::chrono::seconds{60};
+            m_next_toggle = now + std::chrono::seconds{(std::max)(0, inputs.toggle_delay_seconds)};
         } else {
             m_next_toggle = now + std::chrono::seconds{inputs.toggle_seconds};
 
@@ -383,8 +383,11 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
 
     // Over the budget: UE fills its texture pools close to it (TEKKEN 8 demo ran at 96-98 % of it on 8 GB at 50 fps,
     // 2026-10-28), so only usage past it means the OS is already demoting memory.
+    // For 5 s after a level change the old targets may not be released yet (UE deletes them a few frames later), so those
+    // seconds don't count.
     m_vram_percent = query_vram_percent();
-    m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f ? m_vram_over_seconds + 1 : 0;
+    const auto settling = m_last_level_change.time_since_epoch().count() != 0 && now - m_last_level_change < std::chrono::seconds{5};
+    m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f && !settling ? m_vram_over_seconds + 1 : 0;
     publish();
 
     const auto settled = !inputs.loading && now - m_activated_at > std::chrono::seconds{15} &&

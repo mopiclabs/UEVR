@@ -26,6 +26,7 @@ public:
     struct Inputs {
         bool enabled{false};            // VR_AutoRes
         int toggle_seconds{0};          // VR_AutoResToggleSeconds: synthetic GPU edges, for measurements
+        int toggle_delay_seconds{60};   // VR_AutoResToggleDelaySeconds: from this long after the start
         int level_interval_seconds{60}; // VR_AutoResLevelIntervalSeconds
         bool loading{false};            // the engine or the Presents stopped in the last seconds
         bool frame_generation{false};   // the game presents more often than its engine ticks

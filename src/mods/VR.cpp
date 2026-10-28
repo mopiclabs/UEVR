@@ -8740,6 +8740,7 @@ void VR::update_autores() {
     m_autores_controller.on_present(*m_openxr, *m_cvar_manager, AutoResController::Inputs{
         .enabled = m_autores->value(),
         .toggle_seconds = m_autores_toggle_seconds->value(),
+        .toggle_delay_seconds = m_autores_toggle_delay_seconds->value(),
         .level_interval_seconds = m_autores_level_interval_seconds->value(),
         .loading = m_last_engine_stall.time_since_epoch().count() != 0 && now - m_last_engine_stall < std::chrono::seconds{3},
         .frame_generation = m_autores_frame_generation,
