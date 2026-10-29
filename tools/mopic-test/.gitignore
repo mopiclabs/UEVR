@@ -4,3 +4,6 @@ __pycache__/
 *.tmp
 *.dmp
 hang*.txt
+# Mopic SDK display-model cache and logs, written into the current folder
+/data/
+/model.json
