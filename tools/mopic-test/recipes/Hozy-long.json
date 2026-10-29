@@ -1,0 +1,147 @@
+{
+  "game": "Hozy",
+  "process": "CozyGame-Win64-Shipping",
+  "source": "window",
+  "max_width": 1280,
+  "notes": "Mouse driven. Read from the desktop window: with UEVR the game's UI (menus, HUD) does not show on the Mopic display (2026-10-01), only the 3D scene. Route: main menu > Resume > island overview (slowly rotating; click the yellow house) > Attic > Continue (never Restart: it resets the room) > idle in the room > Esc > Quit > Yes. No clicks in the room itself (they would move the player's items). Hozy-long (2026-10-24, live-resolution research): the same route with 200 s in the room instead of 45, so 10 s resolution toggles have room.",
+  "checkpoints": {
+    "main_menu": {
+      "image": "main_menu.png",
+      "region": [
+        36,
+        60,
+        410,
+        145
+      ],
+      "threshold": 0.8
+    },
+    "house_continue": {
+      "image": "house_continue.png",
+      "region": [
+        812,
+        492,
+        174,
+        58
+      ],
+      "threshold": 0.8
+    },
+    "in_room": {
+      "image": "in_room.png",
+      "region": [
+        1192,
+        18,
+        68,
+        68
+      ],
+      "threshold": 0.8
+    },
+    "pause_menu": {
+      "image": "pause_menu.png",
+      "region": [
+        74,
+        362,
+        140,
+        60
+      ],
+      "threshold": 0.8
+    },
+    "quit_confirm": {
+      "image": "quit_confirm.png",
+      "region": [
+        530,
+        310,
+        220,
+        46
+      ],
+      "threshold": 0.8
+    }
+  },
+  "steps": [
+    {
+      "phase": "boot"
+    },
+    {
+      "wait_for": "main_menu",
+      "timeout": 180
+    },
+    {
+      "wait": 2
+    },
+    {
+      "phase": "enter"
+    },
+    {
+      "click": [
+        120,
+        285
+      ]
+    },
+    {
+      "note": "island overview: click the house until its screen shows"
+    },
+    {
+      "wait": 6
+    },
+    {
+      "wait_for": "house_continue",
+      "timeout": 60,
+      "click": [
+        595,
+        345
+      ],
+      "every": 5
+    },
+    {
+      "click": [
+        897,
+        519
+      ]
+    },
+    {
+      "wait_for": "in_room",
+      "timeout": 60
+    },
+    {
+      "phase": "play"
+    },
+    {
+      "wait": 200,
+      "measure": true
+    },
+    {
+      "key": "esc"
+    },
+    {
+      "wait_for": "pause_menu",
+      "timeout": 30,
+      "press": "esc",
+      "every": 5
+    },
+    {
+      "phase": "leave"
+    },
+    {
+      "click": [
+        130,
+        522
+      ]
+    },
+    {
+      "wait_for": "quit_confirm",
+      "timeout": 15
+    },
+    {
+      "phase": "exit"
+    },
+    {
+      "click": [
+        675,
+        382
+      ]
+    },
+    {
+      "expect_exit": 60
+    }
+  ],
+  "images": "Hozy"
+}
