@@ -117,6 +117,12 @@ public:
         return m_present_wnd;
     }
 
+    // Pipeline states the game has created through CreateGraphicsPipelineState / CreatePipelineState since the hooks
+    // first went in, from any thread, and how long those calls took together. A shader compile (UE's PSO precompile)
+    // keeps threads inside them for milliseconds per pipeline state; one the driver has cached returns in microseconds.
+    static uint64_t get_pipeline_states_created();
+    static std::chrono::nanoseconds get_pipeline_state_creation_time();
+
     bool is_proton_swapchain() const {
         return m_using_proton_swapchain;
     }

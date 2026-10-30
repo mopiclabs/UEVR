@@ -25,6 +25,25 @@ static D3D12Hook* g_d3d12_hook = nullptr;
 // Set while an ExecuteCommandLists call on this thread is UEVR's own (InternalExecuteScope) or comes from inside an
 // execute observer: such calls go straight to the original and are not reported.
 thread_local bool g_internal_execute = false;
+// The game's pipeline state creations and their time together (get_pipeline_states_created). Not members: a game thread
+// can still be inside the driver when a rehook replaces the D3D12Hook, and the counts carry over.
+static std::atomic<uint64_t> g_pipeline_states_created{0};
+static std::atomic<uint64_t> g_pipeline_state_creation_ns{0};
+
+static void note_pipeline_state_creation(std::chrono::steady_clock::time_point start) {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+
+    g_pipeline_states_created.fetch_add(1, std::memory_order_relaxed);
+    g_pipeline_state_creation_ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
+}
+
+uint64_t D3D12Hook::get_pipeline_states_created() {
+    return g_pipeline_states_created.load(std::memory_order_relaxed);
+}
+
+std::chrono::nanoseconds D3D12Hook::get_pipeline_state_creation_time() {
+    return std::chrono::nanoseconds{g_pipeline_state_creation_ns.load(std::memory_order_relaxed)};
+}
 
 // Intel XeSS Frame Generation (libxess_fg.dll) swapchain proxy. A UE game tags its HUD-less colour, depth, motion
 // vectors, UI and backbuffer for the proxy with xefgSwapChainD3D12TagFrameResource, each with a region sized by its
@@ -1138,7 +1157,9 @@ HRESULT WINAPI D3D12Hook::create_graphics_pipeline_state(
         return E_FAIL;
     }
 
+    const auto create_start = std::chrono::steady_clock::now();
     const auto result = original(device, desc, riid, pipeline_state);
+    note_pipeline_state_creation(create_start);
 
     auto& shader_registry = render::ShaderOverrideRegistry::get();
     if (shader_registry.should_track_d3d12_pipelines() &&
@@ -1172,7 +1193,9 @@ HRESULT WINAPI D3D12Hook::create_pipeline_state(
         return E_FAIL;
     }
 
+    const auto create_start = std::chrono::steady_clock::now();
     const auto result = original(device, desc, riid, pipeline_state);
+    note_pipeline_state_creation(create_start);
 
     auto& shader_registry = render::ShaderOverrideRegistry::get();
     if (shader_registry.should_track_d3d12_pipelines() &&

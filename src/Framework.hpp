@@ -107,7 +107,8 @@ public:
 
     Address get_module() const { return m_game_module; }
 
-    bool is_ready() const { return m_initialized && m_game_data_initialized; }
+    // Not while VR waits for the game's shader compile: the mods are initialized and their config loaded only after it.
+    bool is_ready() const { return m_initialized && m_game_data_initialized && !m_vr_start_deferred; }
     bool is_game_data_intialized() const { return m_game_data_initialized; }
 
     void run_imgui_frame(bool from_present);
@@ -298,6 +299,7 @@ private:
     bool initialize_dinput_hook();
 
     bool first_frame_initialize();
+    bool should_defer_vr_start_for_shader_compile();
 
     void call_on_frame();
 
@@ -313,6 +315,20 @@ private:
     std::atomic<bool> m_terminating{false};
     std::atomic<bool> m_game_data_initialized{false};
     std::atomic<bool> m_mods_fully_initialized{false};
+
+    // The first-frame initialization waits for the game's shader compile (should_defer_vr_start_for_shader_compile):
+    // the pipeline state count and creation time at the start of the current window, when the game last compiled, and
+    // since when the start waits. Read by is_ready() on game threads.
+    std::atomic<bool> m_vr_start_deferred{false};
+    struct {
+        std::chrono::steady_clock::time_point window_start{};
+        uint64_t window_start_count{};
+        std::chrono::nanoseconds window_start_creation_time{};
+        std::chrono::steady_clock::time_point last_busy{};
+        std::chrono::steady_clock::time_point deferred_since{};
+        std::chrono::steady_clock::time_point next_log{};
+        bool deferring{false};
+    } m_shader_compile_wait{};
     
     // UI
     bool m_has_frame{false};
