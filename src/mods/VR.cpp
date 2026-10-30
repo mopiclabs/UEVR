@@ -9400,7 +9400,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "skips it (Black Myth: Wukong: about 6% more fps, eyes unchanged).");
             m_native_stereo_fix_second_gdf_refresh_frames->draw("Right Eye Distance Field Refresh (frames)");
             ImGui::TextWrapped(
-                "Default 30, 0 turns it off. Only the first eye's render is told which primitives moved this frame, so the "
+                "Default 15, 0 turns it off. Only the first eye's render is told which primitives moved this frame, so the "
                 "right eye's own Global Distance Field keeps stale copies of moving characters, which darken its Lumen "
                 "lighting over time (Black Myth: Wukong forest: right eye 5-13% darker). Every N frames the right eye's "
                 "distance field is rebuilt in full instead; a rebuild costs about 8 ms on a 3080 laptop.");
@@ -9408,7 +9408,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             ImGui::TextWrapped(
                 "Default 8, 0 turns it off. Watches the engine's primitive add/remove/move entries for static meshes and "
                 "rebuilds the right eye's distance field in the frame one changed, at most every M frames; the setting "
-                "above then only caps the wait (10 times it where the entries are not found; 0 there turns the rebuild "
+                "above then only caps the wait (20 times it where the entries are not found; 0 there turns the rebuild "
                 "off). Still scenes cost nothing, fights rebuild every M frames.");
             m_native_stereo_fix_disable_frame_generation->draw("Turn Off Frame Generation");
             ImGui::TextWrapped(

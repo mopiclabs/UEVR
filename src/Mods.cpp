@@ -140,7 +140,7 @@ bool migrate_ui_invert_alpha(utility::Config& cfg) {
 // Mopic config migrations, applied once to an existing config.txt. The version is stored in
 // Mopic_ConfigVersion (a VR option, so config saves keep it).
 constexpr const char* MOPIC_CONFIG_VERSION_KEY = "Mopic_ConfigVersion";
-constexpr int32_t MOPIC_CONFIG_VERSION = 2;
+constexpr int32_t MOPIC_CONFIG_VERSION = 3;
 
 bool migrate_mopic_defaults(utility::Config& cfg) {
     int32_t version = 0;
@@ -168,6 +168,18 @@ bool migrate_mopic_defaults(utility::Config& cfg) {
     //    override, so this doesn't turn its measurement off again.
     if (version < 2) {
         cfg.set<bool>("VR_PerfLog", false);
+    }
+
+    // 3: VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames now defaults to 15. A config that stored the old
+    //    default (30) takes the new one; any other value was chosen and stays.
+    if (version < 3) {
+        constexpr const char* key = "VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames";
+        try {
+            if (auto value = cfg.get<int32_t>(key); value && *value == 30) {
+                cfg.set<int32_t>(key, 15);
+            }
+        } catch (...) {
+        }
     }
 
     cfg.set<int32_t>(MOPIC_CONFIG_VERSION_KEY, MOPIC_CONFIG_VERSION);
