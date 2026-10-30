@@ -738,8 +738,9 @@ public:
     // RemovePrimitive / UpdatePrimitiveTransform are hooked to count static meshes that appear, disappear or move, and the
     // right eye's distance field is rebuilt in the frame of such a change, at most every M frames; the N above then only
     // caps the wait (N = 0 turns the rebuild off altogether), and where no such entry is found or called, the cap is
-    // 20 N. A component sent in every frame for 60 frames counts no more while it keeps that up (see gdf_change_signal
-    // in FFakeStereoRenderingHook.cpp).
+    // 20 N. An update that leaves the component's world transform as it was does not count, and a component that moves
+    // in every frame for 60 frames counts no more while it keeps that up (see gdf_change_signal in
+    // FFakeStereoRenderingHook.cpp).
     int32_t get_native_stereo_fix_second_gdf_refresh_on_change_frames() const {
         return m_native_stereo_fix_second_gdf_refresh_on_change_frames->value();
     }

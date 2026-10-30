@@ -9409,8 +9409,9 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "Default 8, 0 turns it off. Watches the engine's primitive add/remove/move entries for static meshes and "
                 "rebuilds the right eye's distance field in the frame one changed, at most every M frames; the setting "
                 "above then only caps the wait (20 times it where the entries are not found; 0 there turns the rebuild "
-                "off). Still scenes cost nothing, fights rebuild every M frames. A static mesh the engine updates in every "
-                "frame (one attached to an animated skeletal mesh, even one standing still) stops counting after 60 frames.");
+                "off). Still scenes cost nothing, fights rebuild every M frames. An update that leaves the mesh where it "
+                "was (one attached to an animated skeletal mesh standing still) does not count, and a mesh that moves in "
+                "every frame stops counting after 60 frames.");
             m_native_stereo_fix_disable_frame_generation->draw("Turn Off Frame Generation");
             ImGui::TextWrapped(
                 "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "
