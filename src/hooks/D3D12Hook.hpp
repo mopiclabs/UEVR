@@ -117,6 +117,12 @@ public:
         return m_present_wnd;
     }
 
+    // Pipeline states the game has created through CreateGraphicsPipelineState / CreatePipelineState since the hooks
+    // went in, from any thread. A shader compile (UE's PSO precompile) shows up as a steady stream of them.
+    uint64_t get_pipeline_states_created() const {
+        return m_pipeline_states_created.load(std::memory_order_relaxed);
+    }
+
     bool is_proton_swapchain() const {
         return m_using_proton_swapchain;
     }
@@ -201,6 +207,7 @@ protected:
     std::unordered_map<uintptr_t, PointerHook*> m_create_depth_stencil_view_hook_lookup{};
     std::unordered_map<uintptr_t, PointerHook*> m_set_pipeline_state_hook_lookup{};
     std::atomic<uint64_t> m_set_pipeline_state_hook_generation{1};
+    std::atomic<uint64_t> m_pipeline_states_created{0};
     std::unique_ptr<VtableHook> m_swapchain_hook{};
     //std::unique_ptr<FunctionHook> m_create_swap_chain_hook{};
 

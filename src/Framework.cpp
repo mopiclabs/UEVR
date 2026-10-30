@@ -43,6 +43,13 @@ constexpr auto D3D12_INIT_RETRY_INITIAL_BACKOFF = 50ms;
 constexpr auto D3D12_INIT_RETRY_MAX_BACKOFF = 250ms;
 // With the game window gone, this long without a Present means the game is exiting (end_vr_session_if_game_exited).
 constexpr auto EXIT_SESSION_PRESENT_QUIET_TIME = 2500ms;
+// should_defer_vr_start_for_shader_compile: a compile is this many pipeline states a second or more, measured over
+// windows of SHADER_COMPILE_RATE_WINDOW (Wukong from cold: about 200/s on an i9-14900HX, 95/s on a Ryzen 9 5900HX);
+// it is over once no window reached that rate for SHADER_COMPILE_QUIET_TIME.
+constexpr auto SHADER_COMPILE_RATE_WINDOW = 1s;
+constexpr double SHADER_COMPILE_MIN_RATE = 25.0;
+constexpr auto SHADER_COMPILE_QUIET_TIME = 3s;
+constexpr auto SHADER_COMPILE_MAX_DEFER = 30min;
 
 bool is_imgui_mouse_message(UINT message) {
     switch (message) {
@@ -911,6 +918,12 @@ void Framework::on_frame_d3d12() {
 
     bool is_init_ok = first_frame_initialize();
 
+    // VR starts after the game's shader compile: until then its frames are left alone (UEVR's UI would show, the
+    // config that hides it isn't loaded yet).
+    if (m_vr_start_deferred) {
+        return;
+    }
+
     //if (!m_has_frame) {
         //if (!is_init_ok) {
             //update_fonts();
@@ -1027,7 +1040,7 @@ void Framework::on_frame_d3d12() {
 }
 
 void Framework::on_post_present_d3d12() {
-    if (!m_error.empty() || !m_initialized || !m_game_data_initialized) {
+    if (!m_error.empty() || !m_initialized || !m_game_data_initialized || m_vr_start_deferred) {
         if (m_last_present_time <= std::chrono::steady_clock::now()){
             m_last_present_time = std::chrono::steady_clock::now();
         }
@@ -2104,6 +2117,12 @@ bool Framework::first_frame_initialize() {
         return is_init_ok;
     }
 
+    m_vr_start_deferred = should_defer_vr_start_for_shader_compile();
+
+    if (m_vr_start_deferred) {
+        return false;
+    }
+
     std::scoped_lock _{get_hook_monitor_mutex()};
 
     spdlog::info("Running first frame D3D initialization of mods...");
@@ -2129,6 +2148,76 @@ bool Framework::first_frame_initialize() {
     }
 
     return true;
+}
+
+// After a driver update a UE game compiles its pipeline states again at startup (Wukong: about 56,000 of them, minutes
+// on every core). Starting VR during that compile slows it down: the OpenXR session has the runtime composite and
+// track the viewer's eyes, CPU time and heat the compile needs on a laptop (Wukong from cold, i9-14900HX: 315 s
+// without UEVR, 368 s with it, 316 s with this wait). VR would show nothing but the progress bar meanwhile, so the
+// mods' first-frame initialization (OpenXR, the stereo hooks) waits while the game creates pipeline states fast, and
+// runs once it has stopped.
+bool Framework::should_defer_vr_start_for_shader_compile() {
+    if (m_renderer_type != RendererType::D3D12 || m_d3d12_hook == nullptr) {
+        return false;
+    }
+
+    auto& wait = m_shader_compile_wait;
+    const auto now = std::chrono::steady_clock::now();
+    const auto created = m_d3d12_hook->get_pipeline_states_created();
+
+    // The first window only measures: whether the game compiles is known once it is over.
+    if (wait.window_start.time_since_epoch().count() == 0) {
+        wait.window_start = now;
+        wait.window_start_count = created;
+        wait.deferred_since = now;
+        return true;
+    }
+
+    const auto window = now - wait.window_start;
+
+    if (window >= SHADER_COMPILE_RATE_WINDOW) {
+        const auto rate = (created - wait.window_start_count) / std::chrono::duration<double>(window).count();
+
+        if (rate >= SHADER_COMPILE_MIN_RATE) {
+            wait.last_busy = now;
+
+            if (!wait.deferring) {
+                wait.deferring = true;
+                wait.next_log = now + 30s;
+                spdlog::info("[Framework] The game is compiling shaders ({:.0f} pipeline states/s, {} so far); VR starts when it is done",
+                    rate, created);
+            }
+        }
+
+        wait.window_start = now;
+        wait.window_start_count = created;
+    } else if (wait.last_busy.time_since_epoch().count() == 0) {
+        return true; // still in the first window
+    }
+
+    const auto compiling = wait.last_busy.time_since_epoch().count() != 0 && now - wait.last_busy < SHADER_COMPILE_QUIET_TIME;
+    const auto waited_s = std::chrono::duration_cast<std::chrono::seconds>(now - wait.deferred_since).count();
+
+    if (compiling && now - wait.deferred_since < SHADER_COMPILE_MAX_DEFER) {
+        if (now >= wait.next_log) {
+            wait.next_log = now + 30s;
+            spdlog::info("[Framework] Still compiling shaders: {} pipeline states, {} s", created, waited_s);
+        }
+
+        return true;
+    }
+
+    if (wait.deferring) {
+        wait.deferring = false;
+
+        if (compiling) {
+            spdlog::warn("[Framework] Starting VR while the game still compiles shaders: waited {} s, the limit", waited_s);
+        } else {
+            spdlog::info("[Framework] The shader compile is over ({} pipeline states, {} s); starting VR", created, waited_s);
+        }
+    }
+
+    return false;
 }
 
 void Framework::call_on_frame() {

@@ -298,6 +298,7 @@ private:
     bool initialize_dinput_hook();
 
     bool first_frame_initialize();
+    bool should_defer_vr_start_for_shader_compile();
 
     void call_on_frame();
 
@@ -313,6 +314,19 @@ private:
     std::atomic<bool> m_terminating{false};
     std::atomic<bool> m_game_data_initialized{false};
     std::atomic<bool> m_mods_fully_initialized{false};
+
+    // The first-frame initialization waits for the game's shader compile (should_defer_vr_start_for_shader_compile):
+    // the pipeline state count at the start of the current rate window, when the game last created them fast, and
+    // since when the start waits.
+    bool m_vr_start_deferred{false};
+    struct {
+        std::chrono::steady_clock::time_point window_start{};
+        uint64_t window_start_count{};
+        std::chrono::steady_clock::time_point last_busy{};
+        std::chrono::steady_clock::time_point deferred_since{};
+        std::chrono::steady_clock::time_point next_log{};
+        bool deferring{false};
+    } m_shader_compile_wait{};
     
     // UI
     bool m_has_frame{false};

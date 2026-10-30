@@ -1139,6 +1139,7 @@ HRESULT WINAPI D3D12Hook::create_graphics_pipeline_state(
     }
 
     const auto result = original(device, desc, riid, pipeline_state);
+    d3d12->m_pipeline_states_created.fetch_add(1, std::memory_order_relaxed);
 
     auto& shader_registry = render::ShaderOverrideRegistry::get();
     if (shader_registry.should_track_d3d12_pipelines() &&
@@ -1173,6 +1174,7 @@ HRESULT WINAPI D3D12Hook::create_pipeline_state(
     }
 
     const auto result = original(device, desc, riid, pipeline_state);
+    d3d12->m_pipeline_states_created.fetch_add(1, std::memory_order_relaxed);
 
     auto& shader_registry = render::ShaderOverrideRegistry::get();
     if (shader_registry.should_track_d3d12_pipelines() &&
