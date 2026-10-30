@@ -1278,18 +1278,29 @@ for ($run = 1; $run -le $Runs; $run++) {
     # Raising the version skips every migration below it, so the ones before 2 are applied here as UEVR would
     # (Mods.cpp migrate_mopic_defaults): without migration 1 an old config keeps VR_UseFMallocSceneViewExtensions=false,
     # and Stray then crashed in FMallocBinned2 on every quit of a perf run (2026-10-08) but never for a user.
+    $configVersion = 0
+    if ($hadConfig) {
+        $versionLine = Select-String -LiteralPath $ConfigPath -Pattern '^\s*Mopic_ConfigVersion\s*=\s*(\d+)' | Select-Object -First 1
+        if ($versionLine) { $configVersion = [int]$versionLine.Matches[0].Groups[1].Value }
+    }
     if (-not $NoPerf -and -not $NoInject) {
         $overrides["VR_PerfLog"] = "true"
-        $configVersion = 0
-        if ($hadConfig) {
-            $versionLine = Select-String -LiteralPath $ConfigPath -Pattern '^\s*Mopic_ConfigVersion\s*=\s*(\d+)' | Select-Object -First 1
-            if ($versionLine) { $configVersion = [int]$versionLine.Matches[0].Groups[1].Value }
-        }
         if ($configVersion -lt 2) { $overrides["Mopic_ConfigVersion"] = "2" }
         if ($hadConfig -and $configVersion -lt 1) { $overrides["VR_UseFMallocSceneViewExtensions"] = "true" }
     }
     foreach ($key in $RecipeConfig.Keys) { $overrides[$key] = $RecipeConfig[$key] }
     foreach ($kv in $SetPairs) { $overrides[$kv[0]] = $kv[1] }
+    # Migration 3 moves a stored VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames of 30 (the old default) to 15
+    # on load. A run that sets it raises the version to 3, or its 30 would become 15 in every run (the config is put back
+    # afterwards), and applies the migrations below 3 itself, as above.
+    $gdfRefreshKey = "VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"
+    if ($overrides.ContainsKey($gdfRefreshKey) -and $configVersion -lt 3) {
+        $overrides["Mopic_ConfigVersion"] = "3"
+        if ($hadConfig -and $configVersion -lt 1 -and -not $overrides.ContainsKey("VR_UseFMallocSceneViewExtensions")) {
+            $overrides["VR_UseFMallocSceneViewExtensions"] = "true"
+        }
+        if ($hadConfig -and $configVersion -lt 2 -and -not $overrides.ContainsKey("VR_PerfLog")) { $overrides["VR_PerfLog"] = "false" }
+    }
     Set-ConfigValues $ConfigPath $overrides
     Copy-Item $ConfigPath (Join-Path $runDir "config.txt") -Force
 

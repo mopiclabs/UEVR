@@ -27282,7 +27282,8 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // update on every right-eye render: 1.00 (p10 0.97) at +7.9 ms per frame on a 3080 laptop; one in every other
     // 20 s window already keeps both halves at 1.00, so every Nth frame bounds the stale copies to N frames at 1/N of
     // that cost. N = 15 keeps the right eye at most half a second behind at 30 fps; on Wukong (4090 laptop, 6 runs that
-    // switched between 15 and 30 every 20 s) it added about 0.3 ms GPU a frame over N = 30, frame rate within noise.
+    // switched between 15 and 30 every 20 s, with the idle treasure chest's every-frame updates not counted as changes,
+    // so that the cap set the rate) it added about 0.3 ms GPU a frame over N = 30, frame rate within noise.
     // r.AOGlobalDistanceFieldForceFullUpdate is render-thread safe, so holding it at 1 around the second submission
     // applies to that render alone.
     // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames (M, default 8; 0 = off): with the change signal

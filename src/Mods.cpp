@@ -140,7 +140,7 @@ bool migrate_ui_invert_alpha(utility::Config& cfg) {
 // Mopic config migrations, applied once to an existing config.txt. The version is stored in
 // Mopic_ConfigVersion (a VR option, so config saves keep it).
 constexpr const char* MOPIC_CONFIG_VERSION_KEY = "Mopic_ConfigVersion";
-constexpr int32_t MOPIC_CONFIG_VERSION = 3;
+constexpr int32_t MOPIC_CONFIG_VERSION = 3;  // also the default of VR's Mopic_ConfigVersion option
 
 bool migrate_mopic_defaults(utility::Config& cfg) {
     int32_t version = 0;

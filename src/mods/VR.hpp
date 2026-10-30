@@ -1746,7 +1746,9 @@ private:
     const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), false) };
     const ModToggle::Ptr m_ghosting_fix_bootstrap_view_states{ ModToggle::create(generate_name("GhostingFixBootstrapViewStates"), false) };
     // Version of the Mopic config defaults this config.txt has been migrated to (see Mods::reload_config).
-    const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 1, true) };
+    // Mods.cpp's MOPIC_CONFIG_VERSION: a reset config holds every current default, and a lower version would run the
+    // migrations on it again (migration 3 would take an N of 30 chosen after the reset back to 15).
+    const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 3, true) };
     const ModToggle::Ptr m_mopic_force_windowed_fullscreen{ ModToggle::create(generate_name("MopicForceWindowedFullscreen"), true) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), true) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
