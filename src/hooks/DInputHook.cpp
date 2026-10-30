@@ -151,7 +151,8 @@ HRESULT DInputHook::enum_devices_hooked(
 
     // the purpose of this is to stop some games from spamming calls to EnumDevices
     // without a real controller connected, which causes the game to drop to single digit FPS
-    auto should_call_original = g_framework->is_ready() && !VR::get()->is_using_controllers_within(std::chrono::seconds(5));
+    // (Not ready: VR hasn't started, e.g. it waits for the game's shader compile, so the game's own devices count.)
+    auto should_call_original = !g_framework->is_ready() || !VR::get()->is_using_controllers_within(std::chrono::seconds(5));
 
     if (should_call_original) {
         auto result = og(This, dwDevType, lpCallback, pvRef, dwFlags);

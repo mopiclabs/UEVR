@@ -892,6 +892,9 @@ void Framework::on_frame_d3d12() {
         spdlog::info("Framework initialized");
         m_next_d3d12_init_attempt = {};
         m_d3d12_init_failure_count = 0;
+        // Until the next Present decides whether VR waits for a shader compile, the mods and their config aren't up
+        // either (first_frame_initialize clears this when it doesn't wait or can't initialize).
+        m_vr_start_deferred = m_first_frame_d3d_initialize;
         m_initialized = true;
         return;
     }
@@ -2117,6 +2120,7 @@ bool Framework::first_frame_initialize() {
     const bool is_init_ok = m_error.empty() && m_game_data_initialized;
 
     if (!is_init_ok || !m_first_frame_d3d_initialize) {
+        m_vr_start_deferred = false; // an initialization error shows in the UI
         return is_init_ok;
     }
 
