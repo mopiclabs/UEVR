@@ -24940,10 +24940,25 @@ private:
 // AddPrimitive. Each hooked function must then see UPrimitiveComponent objects for its first calls, or its count is off.
 // The hooks are mid hooks at the function entry, which keep every register, so a slot the shape search took for one of
 // these but which takes more arguments still runs with the arguments it was given.
+// A component that sends its transform in (nearly) every frame for s_constant_update_frames frames counts no more until
+// it pauses: UpdatePrimitiveTransform is called whether or not the transform changed, and static meshes attached to an
+// animated skeletal mesh are sent every frame even while it stands still. Black Myth: Wukong's chapter 1 start: one
+// treasure chest's lid and base (on its skeletal mesh) were about all the relevant calls, so the right eye was rebuilt
+// every M frames for good (+10 ms GPU per rebuild on a 4090 laptop, fewer fps and more hitches). Something that really
+// moves the whole time is left to the N-frame cap, as without the signal.
 namespace gdf_change_signal {
 enum Slot : size_t { Add = 0, Remove = 1, Transform = 2, Count = 3 };
 static constexpr std::array<const char*, Count> s_names{"AddPrimitive", "RemovePrimitive", "UpdatePrimitiveTransform"};
 static constexpr uint32_t s_validation_calls = 64;
+static constexpr uint32_t s_constant_update_frames = 60;
+static constexpr uint32_t s_constant_update_gap_frames = 4;  // an update rate optimization may skip a few frames
+static constexpr uint32_t s_constant_updates_logged = 16;
+
+struct ComponentUpdates {
+    uint32_t run_start{0};
+    uint32_t last{0};
+    bool constant{false};
+};
 
 struct State {
     std::array<safetyhook::MidHook, Count> hooks{};
@@ -24952,6 +24967,11 @@ struct State {
     std::atomic<uint32_t> changes{0};
     std::atomic<uint64_t> changes_total{0};
     std::atomic<uint64_t> calls_total{0};
+    std::atomic<uint64_t> constant_total{0};
+    std::atomic<uint32_t> frame{0};  // take_changes calls, one per frame
+    std::mutex updates_mtx{};
+    std::unordered_map<uintptr_t, ComponentUpdates> updates{};  // relevant components seen, by address
+    uint32_t constant_logged{0};                                // under updates_mtx
     bool attempted{false};
     bool installed{false};
     sdk::UClass* static_mesh_class{};
@@ -25000,6 +25020,47 @@ static bool is_distance_field_relevant(sdk::UObject* component) {
     return true;
 }
 
+// Any thread the engine updates transforms on. True while the component has been sent in (nearly) every frame for
+// s_constant_update_frames frames.
+static bool is_constant_update(sdk::UObject* component) {
+    auto& s = state();
+    const auto frame = s.frame.load(std::memory_order_relaxed);
+    bool constant{false};
+    bool log_it{false};
+
+    {
+        std::scoped_lock _{s.updates_mtx};
+        auto [it, inserted] = s.updates.try_emplace((uintptr_t)component, ComponentUpdates{frame, frame, false});
+        auto& u = it->second;
+
+        // Signed: another thread may already have stored the next frame's number.
+        const auto since_last = static_cast<int32_t>(frame - u.last);
+        if (!inserted && since_last > static_cast<int32_t>(s_constant_update_gap_frames)) {
+            u = ComponentUpdates{frame, frame, false};
+        } else if (since_last > 0) {
+            u.last = frame;
+        }
+
+        if (!u.constant && static_cast<int32_t>(frame - u.run_start) >= static_cast<int32_t>(s_constant_update_frames)) {
+            u.constant = true;
+            log_it = s.constant_logged < s_constant_updates_logged;
+            s.constant_logged += log_it ? 1 : 0;
+        }
+
+        constant = u.constant;
+    }
+
+    if (log_it) {
+        try {
+            SPDLOG_INFO("[NativeStereoFix] {} is sent in every frame; not a distance field change while it keeps that up",
+                utility::narrow(component->get_full_name()));
+        } catch (...) {
+        }
+    }
+
+    return constant;
+}
+
 static void on_call(Slot slot, sdk::UObject* component) {
     auto& s = state();
     s.calls_total.fetch_add(1, std::memory_order_relaxed);
@@ -25020,10 +25081,17 @@ static void on_call(Slot slot, sdk::UObject* component) {
         }
     }
 
-    if (is_distance_field_relevant(component)) {
-        s.changes.fetch_add(1, std::memory_order_relaxed);
-        s.changes_total.fetch_add(1, std::memory_order_relaxed);
+    if (!is_distance_field_relevant(component)) {
+        return;
     }
+
+    if (is_constant_update(component)) {
+        s.constant_total.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    s.changes.fetch_add(1, std::memory_order_relaxed);
+    s.changes_total.fetch_add(1, std::memory_order_relaxed);
 }
 
 // At the entry of FScene::X(this, UPrimitiveComponent*): the component is the second argument, in rdx.
@@ -25218,15 +25286,31 @@ static bool is_validated() {
     return false;
 }
 
-// Game thread: the relevant changes seen since the last call.
+// Game thread, once per frame: the relevant changes seen since the last call. Also advances the frame count the
+// constant-update check uses, and now and then forgets components not seen for a while (destroyed or streamed out).
 static uint32_t take_changes() {
-    return state().changes.exchange(0, std::memory_order_acq_rel);
+    auto& s = state();
+    const auto frame = s.frame.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    if (frame % 600 == 0) {
+        std::scoped_lock _{s.updates_mtx};
+        std::erase_if(s.updates, [frame](const auto& entry) { return static_cast<int32_t>(frame - entry.second.last) > 600; });
+    }
+
+    return s.changes.exchange(0, std::memory_order_acq_rel);
 }
 
 static void log_totals(uint64_t refreshes_on_change, uint64_t refreshes_backstop) {
     auto& s = state();
-    SPDLOG_INFO("[NativeStereoFix] Distance field change signal: {} calls, {} relevant changes, right eye rebuilt {} times on change and {} times by the frame cap",
-        s.calls_total.load(std::memory_order_relaxed), s.changes_total.load(std::memory_order_relaxed), refreshes_on_change, refreshes_backstop);
+    size_t constant_components{0};
+    {
+        std::scoped_lock _{s.updates_mtx};
+        constant_components = std::count_if(s.updates.begin(), s.updates.end(), [](const auto& entry) { return entry.second.constant; });
+    }
+
+    SPDLOG_INFO("[NativeStereoFix] Distance field change signal: {} calls, {} relevant changes, {} skipped as sent in every frame ({} components now), right eye rebuilt {} times on change and {} times by the frame cap",
+        s.calls_total.load(std::memory_order_relaxed), s.changes_total.load(std::memory_order_relaxed),
+        s.constant_total.load(std::memory_order_relaxed), constant_components, refreshes_on_change, refreshes_backstop);
 }
 }
 
@@ -27286,8 +27370,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames (M, default 8; 0 = off): with the change signal
     // (gdf_change_signal, hooked at the first submission), the rebuild comes in the right-eye render of the frame in
     // which a static mesh appeared, disappeared or moved, at most every M frames, and the N above only caps the wait. Scenes where nothing of the
-    // distance field changes then cost nothing between caps; a fight with props and weapons moving every frame rebuilds
-    // every M frames (about 8 ms / M per frame on a 3080 laptop). Without a working signal nothing says when a rebuild
+    // distance field changes then cost nothing between caps; props that move now and then rebuild every M frames while
+    // they do (about 8 ms / M per frame on a 3080 laptop), and a component sent in every frame for a second or more is
+    // left to the cap (see gdf_change_signal). Without a working signal nothing says when a rebuild
     // is needed, and a full rebuild is dear where the field is large (Expedition 33: ~45 ms, +1.5 ms a frame at every
     // 30th), so the cap is then 10 N: the stale copies build up over minutes, a rebuild every 10 s still holds them off.
     static uint32_t gdf_frames_since_refresh{0};
