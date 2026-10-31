@@ -727,7 +727,7 @@ public:
         return m_native_stereo_fix_second_lumen_surface_cache_freeze->value();
     }
 
-    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames (default 30, 0 = off): r.AOGlobalDistanceFieldForceFullUpdate
+    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames (default 15, 0 = off): r.AOGlobalDistanceFieldForceFullUpdate
     // is held at 1 for every Nth right-eye render, so its own Global Distance Field clipmaps catch up with the primitives
     // that moved, which only the left eye's render is told about (see begin_render_viewfamily_real).
     int32_t get_native_stereo_fix_second_gdf_refresh_frames() const {
@@ -738,7 +738,7 @@ public:
     // RemovePrimitive / UpdatePrimitiveTransform are hooked to count static meshes that appear, disappear or move, and the
     // right eye's distance field is rebuilt in the frame of such a change, at most every M frames; the N above then only
     // caps the wait (N = 0 turns the rebuild off altogether), and where no such entry is found or called, the cap is
-    // 10 N (see gdf_change_signal in FFakeStereoRenderingHook.cpp).
+    // 20 N (see gdf_change_signal in FFakeStereoRenderingHook.cpp).
     int32_t get_native_stereo_fix_second_gdf_refresh_on_change_frames() const {
         return m_native_stereo_fix_second_gdf_refresh_on_change_frames->value();
     }
@@ -1746,7 +1746,9 @@ private:
     const ModToggle::Ptr m_ghosting_fix{ ModToggle::create(generate_name("GhostingFix"), false) };
     const ModToggle::Ptr m_ghosting_fix_bootstrap_view_states{ ModToggle::create(generate_name("GhostingFixBootstrapViewStates"), false) };
     // Version of the Mopic config defaults this config.txt has been migrated to (see Mods::reload_config).
-    const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 1, true) };
+    // Mods.cpp's MOPIC_CONFIG_VERSION: a reset config holds every current default, and a lower version would run the
+    // migrations on it again (migration 3 would take an N of 30 chosen after the reset back to 15).
+    const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 3, true) };
     const ModToggle::Ptr m_mopic_force_windowed_fullscreen{ ModToggle::create(generate_name("MopicForceWindowedFullscreen"), true) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), true) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
@@ -1754,7 +1756,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), true) };
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
     const ModToggle::Ptr m_native_stereo_fix_second_lumen_surface_cache_freeze{ ModToggle::create(generate_name("NativeStereoFixSecondLumenSurfaceCacheFreeze"), true) };
-    const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 30) };
+    const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 15) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_on_change_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames"), 8) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };

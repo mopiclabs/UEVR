@@ -27273,7 +27273,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // each render updates it (card captures and relighting); the left eye's update is enough, as in a flat render.
     LumenSurfaceCacheFreezeHold second_surface_cache_hold{vr->is_native_stereo_fix_second_lumen_surface_cache_freeze_enabled()};
 
-    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames (N, default 30; 0 = off): each eye's render keeps its own
+    // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames (N, default 15; 0 = off): each eye's render keeps its own
     // Global Distance Field clipmaps, but the scene's list of primitives that moved this frame is used up by the first
     // render of the frame, so the second render's clipmaps never learn of them: stale copies of moving characters stay
     // in the right eye's distance field along their path and occlude its Lumen traces. Black Myth: Wukong (UE5.0)
@@ -27281,15 +27281,19 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // 0.80), growing with time, and the left eye is the dark one when it is rendered second. A full distance field
     // update on every right-eye render: 1.00 (p10 0.97) at +7.9 ms per frame on a 3080 laptop; one in every other
     // 20 s window already keeps both halves at 1.00, so every Nth frame bounds the stale copies to N frames at 1/N of
-    // that cost. r.AOGlobalDistanceFieldForceFullUpdate is render-thread safe, so holding it at 1 around the second
-    // submission applies to that render alone.
+    // that cost. N = 15 keeps the right eye at most half a second behind at 30 fps; on Wukong (4090 laptop, 6 runs that
+    // switched between 15 and 30 every 20 s, with the idle treasure chest's every-frame updates not counted as changes,
+    // so that the cap set the rate) it added about 0.3 ms GPU a frame over N = 30, frame rate within noise.
+    // r.AOGlobalDistanceFieldForceFullUpdate is render-thread safe, so holding it at 1 around the second submission
+    // applies to that render alone.
     // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames (M, default 8; 0 = off): with the change signal
     // (gdf_change_signal, hooked at the first submission), the rebuild comes in the right-eye render of the frame in
     // which a static mesh appeared, disappeared or moved, at most every M frames, and the N above only caps the wait. Scenes where nothing of the
     // distance field changes then cost nothing between caps; a fight with props and weapons moving every frame rebuilds
     // every M frames (about 8 ms / M per frame on a 3080 laptop). Without a working signal nothing says when a rebuild
     // is needed, and a full rebuild is dear where the field is large (Expedition 33: ~45 ms, +1.5 ms a frame at every
-    // 30th), so the cap is then 10 N: the stale copies build up over minutes, a rebuild every 10 s still holds them off.
+    // 30th), so the cap is then 20 N (300 frames at the default N): the stale copies build up over minutes, a rebuild
+    // every 10 s still holds them off.
     static uint32_t gdf_frames_since_refresh{0};
     static uint32_t gdf_pending_changes{0};
     static uint64_t gdf_refreshes_on_change{0};
@@ -27298,9 +27302,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     const auto gdf_refresh = vr->get_native_stereo_fix_second_gdf_refresh_frames();
     const auto gdf_change_refresh = vr->get_native_stereo_fix_second_gdf_refresh_on_change_frames();
     // N = 0 turns the rebuild off altogether; M = 0 leaves the plain every-Nth-frame rebuild; with the signal wanted
-    // but no hooked entry ever called, the cap is 10 N.
+    // but no hooked entry ever called, the cap is 20 N.
     const bool gdf_signal = gdf_refresh > 0 && gdf_change_refresh > 0 && gdf_change_signal::is_validated();
-    const uint32_t gdf_cap = gdf_refresh <= 0 ? 0u : (gdf_change_refresh <= 0 || gdf_signal) ? (uint32_t)gdf_refresh : (uint32_t)gdf_refresh * 10u;
+    const uint32_t gdf_cap = gdf_refresh <= 0 ? 0u : (gdf_change_refresh <= 0 || gdf_signal) ? (uint32_t)gdf_refresh : (uint32_t)gdf_refresh * 20u;
     ++gdf_frames_since_refresh;
     if (gdf_change_refresh > 0 && gdf_change_signal::is_installed()) {
         gdf_pending_changes += gdf_change_signal::take_changes();
