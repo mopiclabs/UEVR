@@ -24948,9 +24948,9 @@ private:
 // the component's world transform (USceneComponent::ComponentToWorld, not a reflected property) differs from the one at
 // its last call. Its offset is found once, on the game thread: where what K2_GetComponentLocation returns sits in the
 // component as an FTransform's translation (a unit quaternion before it, a scale after it), one offset common to
-// s_transform_matches primitive components, relevant or not. Without it, and for something that really moves the whole
-// time, a component sent in (nearly) every frame for s_constant_update_frames frames counts no more until it pauses,
-// and is left to the N-frame cap as without the signal.
+// s_transform_matches primitive components sent to UpdatePrimitiveTransform, relevant or not. Without it, and for
+// something that really moves the whole time, a component sent in (nearly) every frame for s_constant_update_frames
+// frames counts no more until it pauses, and is left to the N-frame cap as without the signal.
 namespace gdf_change_signal {
 enum Slot : size_t { Add = 0, Remove = 1, Transform = 2, Count = 3 };
 static constexpr std::array<const char*, Count> s_names{"AddPrimitive", "RemovePrimitive", "UpdatePrimitiveTransform"};
@@ -24992,7 +24992,7 @@ struct State {
     std::unordered_map<uintptr_t, ComponentUpdates> updates{};  // relevant components seen, by address
     uint32_t constant_logged{0};                                // under updates_mtx
     std::atomic<TransformSearch> transform_search{TransformSearch::Searching};
-    std::atomic<uint32_t> transform_search_calls{0};  // updates while searching once the game thread is known, on any thread
+    std::atomic<uint32_t> transform_search_calls{0};  // transform updates while searching once the game thread is known, on any thread
     uint32_t transform_offset{0};                // of the rotation; written before transform_search turns Found
     size_t transform_element{0};                 // sizeof(float) or sizeof(double)
     std::vector<uint32_t> transform_candidates{};  // game thread only, while searching
@@ -25259,8 +25259,10 @@ static void on_call(Slot slot, sdk::UObject* component) {
     }
 
     // Any primitive shows the world transform's offset: Black Myth: Wukong's chapter 1 start sends only the treasure
-    // chest's two relevant components.
-    if (s.transform_search.load(std::memory_order_acquire) == TransformSearch::Searching) {
+    // chest's two relevant components. Only UpdatePrimitiveTransform, which alone can be Unchanged: Add and Remove also
+    // come at registration and from BeginDestroy during garbage collection, where ProcessEvent asserts on titles that
+    // ship with checks.
+    if (slot == Transform && s.transform_search.load(std::memory_order_acquire) == TransformSearch::Searching) {
         if (const auto game_thread = s.game_thread.load(std::memory_order_relaxed); game_thread != 0) {
             s.transform_search_calls.fetch_add(1, std::memory_order_relaxed);
             if (GetCurrentThreadId() == game_thread) {
@@ -25492,7 +25494,7 @@ static uint32_t take_changes() {
     if (s.transform_search.load(std::memory_order_acquire) == TransformSearch::Searching && s.transform_tried.empty() &&
         s.transform_search_calls.load(std::memory_order_relaxed) >= s_transform_search_calls)
     {
-        stop_transform_search("100000 updates, none on the game thread");
+        stop_transform_search("100000 transform updates, none on the game thread");
     }
 
     if (frame % 600 == 0) {
@@ -25505,10 +25507,14 @@ static uint32_t take_changes() {
 
 static void log_totals(uint64_t refreshes_on_change, uint64_t refreshes_backstop) {
     auto& s = state();
+    // Still in its run: a component flagged before the offset was found and Unchanged since keeps its flag.
+    const auto frame = s.frame.load(std::memory_order_relaxed);
     size_t constant_components{0};
     {
         std::scoped_lock _{s.updates_mtx};
-        constant_components = std::count_if(s.updates.begin(), s.updates.end(), [](const auto& entry) { return entry.second.constant; });
+        constant_components = std::count_if(s.updates.begin(), s.updates.end(), [frame](const auto& entry) {
+            return entry.second.constant && static_cast<int32_t>(frame - entry.second.last) <= static_cast<int32_t>(s_constant_update_gap_frames);
+        });
     }
 
     SPDLOG_INFO("[NativeStereoFix] Distance field change signal: {} calls, {} relevant changes, {} skipped as unchanged, {} as in every frame ({} components now), right eye rebuilt {} times on change and {} times by the frame cap",
