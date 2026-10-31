@@ -955,6 +955,49 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	unset(CMKR_SOURCES)
 endif()
 
+# Target window-filter-tests
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET window-filter-tests)
+	set(window-filter-tests_SOURCES "")
+
+	list(APPEND window-filter-tests_SOURCES
+		"tests/WindowFilterTests.cpp"
+		"src/WindowFilter.cpp"
+	)
+
+	list(APPEND window-filter-tests_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${window-filter-tests_SOURCES})
+	add_executable(window-filter-tests)
+
+	if(window-filter-tests_SOURCES)
+		target_sources(window-filter-tests PRIVATE ${window-filter-tests_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT window-filter-tests)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${window-filter-tests_SOURCES})
+
+	target_compile_features(window-filter-tests PRIVATE
+		cxx_std_23
+	)
+
+	target_include_directories(window-filter-tests PRIVATE
+		"src/"
+	)
+
+	add_test(NAME window-filter-tests COMMAND window-filter-tests)
+	set_tests_properties(window-filter-tests PROPERTIES TIMEOUT 60)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
 # Target perf-log-tests
 if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	set(CMKR_TARGET perf-log-tests)

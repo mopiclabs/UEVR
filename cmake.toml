@@ -304,6 +304,17 @@ add_test(NAME input-hook-installation-tests COMMAND input-hook-installation-test
 set_tests_properties(input-hook-installation-tests PROPERTIES TIMEOUT 60)
 """
 
+[target.window-filter-tests]
+condition = "compatibility-policy-tests"
+type = "executable"
+sources = ["tests/WindowFilterTests.cpp", "src/WindowFilter.cpp"]
+include-directories = ["src/"]
+compile-features = ["cxx_std_23"]
+cmake-after = """
+add_test(NAME window-filter-tests COMMAND window-filter-tests)
+set_tests_properties(window-filter-tests PROPERTIES TIMEOUT 60)
+"""
+
 [target.perf-log-tests]
 condition = "compatibility-policy-tests"
 type = "executable"

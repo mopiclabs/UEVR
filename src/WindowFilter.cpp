@@ -12,27 +12,38 @@ WindowFilter& WindowFilter::get() {
 }
 
 WindowFilter::WindowFilter() {
-    // We create a job thread because GetWindowTextA can actually deadlock inside
+    // is_filtered counts the job thread as dead once this is 2 s old, so it must not start at the clock's epoch:
+    // windows queued before the first tick would be let through.
+    m_last_job_tick = std::chrono::steady_clock::now();
+
+    // We create a job thread because looking up a window can actually deadlock inside
     // the present thread...
     m_job_thread = std::make_unique<std::jthread>([this](std::stop_token s){
         while (!s.stop_requested()) {
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
 
-            m_last_job_tick = std::chrono::steady_clock::now();
+            std::vector<HWND> jobs{};
 
-            if (m_window_jobs.empty()) {
-                return;
+            {
+                std::scoped_lock _{m_mutex};
+                m_last_job_tick = std::chrono::steady_clock::now();
+                jobs.assign(m_window_jobs.begin(), m_window_jobs.end());
             }
 
-            std::scoped_lock _{m_mutex};
+            // Not under the lock: is_filtered takes it on the present thread, and the game thread can be
+            // waiting for that present (Black Myth: Wukong hung at startup this way). The jobs stay queued
+            // until they're decided, so their windows stay filtered meanwhile.
+            for (const auto hwnd : jobs) {
+                const auto filtered = is_filtered_nocache(hwnd);
 
-            for (const auto hwnd : m_window_jobs) {
-                if (is_filtered_nocache(hwnd)) {
+                std::scoped_lock _{m_mutex};
+
+                if (filtered) {
                     filter_window(hwnd);
                 }
-            }
 
-            m_window_jobs.clear();
+                m_window_jobs.erase(hwnd);
+            }
         }
     });
 }
@@ -72,16 +83,18 @@ bool WindowFilter::is_filtered(HWND hwnd) {
 
 bool WindowFilter::is_filtered_nocache(HWND hwnd) {
     // get window name
-    char window_name[256]{};
-    GetWindowTextA(hwnd, window_name, sizeof(window_name));
+    // InternalGetWindowText reads the title Windows keeps for the window. GetWindowText would send WM_GETTEXT
+    // to a window of this process and wait until its thread answers, which it can't while it waits for a frame.
+    wchar_t window_name[256]{};
+    InternalGetWindowText(hwnd, window_name, static_cast<int>(std::size(window_name)));
 
-    const auto sv = std::string_view{window_name};
+    const auto sv = std::wstring_view{window_name};
 
-    if (sv.find("UE4SS") != std::string_view::npos) {
+    if (sv.find(L"UE4SS") != std::wstring_view::npos) {
         return true;
     }
 
-    if (sv.find("PimaxXR") != std::string_view::npos) {
+    if (sv.find(L"PimaxXR") != std::wstring_view::npos) {
         return true;
     }
 
