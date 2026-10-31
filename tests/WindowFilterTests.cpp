@@ -55,7 +55,9 @@ void test_present_while_window_thread_waits() {
 
     std::thread present{[&] {
         auto& filter = WindowFilter::get();
-        first_sight_filtered = filter.is_filtered(game) && filter.is_filtered(ue4ss);
+        // Asked twice before the job thread's first tick: both times still pending.
+        first_sight_filtered = filter.is_filtered(game) && filter.is_filtered(ue4ss) && filter.is_filtered(game) &&
+                               filter.is_filtered(ue4ss);
 
         const auto end = std::chrono::steady_clock::now() + std::chrono::seconds{1};
         while (std::chrono::steady_clock::now() < end) {

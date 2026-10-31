@@ -12,6 +12,10 @@ WindowFilter& WindowFilter::get() {
 }
 
 WindowFilter::WindowFilter() {
+    // is_filtered counts the job thread as dead once this is 2 s old, so it must not start at the clock's epoch:
+    // windows queued before the first tick would be let through.
+    m_last_job_tick = std::chrono::steady_clock::now();
+
     // We create a job thread because looking up a window can actually deadlock inside
     // the present thread...
     m_job_thread = std::make_unique<std::jthread>([this](std::stop_token s){
