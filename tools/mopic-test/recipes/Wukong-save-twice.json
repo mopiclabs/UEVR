@@ -3,7 +3,7 @@
   "process": "b1-Win64-Shipping",
   "source": "mopic",
   "max_width": 1280,
-  "notes": "Wukong-save with its play steps run twice in one session (PSO check, 2026-11-01): the first pass is measured as \"first\", the same keys again right after it as \"again\". Read with the pso / pso_us columns of perf-frames.csv. Route and save handling as in Wukong-save.json.",
+  "notes": "Wukong-save with its play steps run twice in one session (PSO check, 2026-11-01): the first pass is measured as \"first\", the same keys again right after it as \"again\". Read with the pso / pso_us columns of perf-frames.csv. Route and save handling as in Wukong-save.json. Both passes take about 2 x (4 x play_s + 50) s, more than the harness's default 900 s window for a recipe: run it with -Seconds 1500 (play_s 90), or the harness stops the pilot in the second pass (MENU_FAIL, 2026-11-01).",
   "config": {
     "FrameworkConfig_RememberMenuState": "true",
     "FrameworkConfig_MenuOpen": "false"
