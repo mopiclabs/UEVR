@@ -232,10 +232,11 @@ title A B B A A B, so 3 alternating pairs, on two PCs: RTX 4090 Laptop and RTX 3
   (that title kept 2 pairs) and one Dead as Disco and one Stray menu miss (run again).
 - Wukong's hitches are not first-time pipeline state creation. A build that logs the game's
   `CreateGraphicsPipelineState` / `CreatePipelineState` calls per frame (`pso` / `pso_us` in perf-frames.csv, not
-  merged) played the same keys twice in one session (`Wukong-save-twice`, 2 runs): the first pass created 32-41
-  pipeline states in 414 s (5-6 ms inside those calls; 2 of its 72 hitches had one), the second none, and the hitch
-  rate stayed (>= 58 ms 5.2 then 6.7 a minute, >= 108 ms 1.45 then 1.30). `CreateComputePipelineState` was not counted,
-  but a first-time compile of any kind would have shown as fewer hitches in the second pass.
+  merged) played the same keys twice in one session (`Wukong-save-twice`, 2 runs): each first pass created 32-41
+  pipeline states in 414 s (5-6 ms inside those calls; 2 of the two first passes' 72 hitches had one), the second
+  none, and the hitch rate stayed (>= 58 ms 5.2 then 6.7 a minute, >= 108 ms 1.45 then 1.30).
+  `CreateComputePipelineState` was not counted, but a first-time compile of any kind would have shown as fewer
+  hitches in the second pass.
 
 ## Known gaps
 
@@ -254,9 +255,10 @@ title A B B A A B, so 3 alternating pairs, on two PCs: RTX 4090 Laptop and RTX 3
   (exe+0xe133300) deleting the objects in one of its arrays, and one entry's object has a garbage vtable pointer,
   0x1e30900e0: a use-after-free in the game's own exit code, about 1 s after UEVR ended the session, with no UEVR
   frame. That address falls in the stack reservation of whichever game thread starts about 11 s after launch (Bink's
-  async decode thread on a cold start), and that thread ends during shutdown with and without UEVR. Separately,
-  every Wukong exit, with and without UEVR, leaves a WER dump of Steam's `crashhandler64.dll` calling abort
-  (0xc0000409) while the process still exits with 0; the harness rightly passes those.
+  async decode thread on a cold start); that thread ended during shutdown in 3 of 8 runs with UEVR and 1 of 8
+  without, with no crash. Separately, every Wukong exit, with and without UEVR, leaves a WER dump of Steam's
+  `crashhandler64.dll` calling abort (0xc0000409) while the process still exits with 0; the harness rightly passes
+  those.
 - Assetto Corsa Competizione (D3D11): nothing reaches the Mopic display. UEVR's D3D11 component can't get the
   back buffer ("Failed to get back buffer (D3D11)" / "Failed to setup D3D11Component" every frame), while
   UEVR does render the stereo pair into the game's own window in a session. The game runs and quits cleanly.
