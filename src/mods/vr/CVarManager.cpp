@@ -885,9 +885,9 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
 // the Native Stereo Fix the engine renders twice per frame, and in Hogwarts Legacy (UE 4.27) the left eye, the first
 // render of each frame, lost its sky light for one frame once per capture cycle: every 12 engine frames the left eye was
 // ~26% darker (up-facing ground 30-44%) while the right eye was unchanged, 16-76 times per 4-minute open-world run on
-// every build back to 2026-10-04. Held at 0, each render captures the sky whole: 1 such frame per run, same frame rate
-// (19.7 fps and 46 ms of work, against 19.7-20.1 fps and 44-46 ms). Engine.ini's [SystemSettings] doesn't take there
-// (the game sets it from a higher source); SetByConsole does.
+// every build back to 2026-10-04. Held at 0, each render captures the sky whole: 1 such frame in each of two runs and
+// no 12-frame pattern left, same frame rate (19.8 fps, against 19.7-20.1); Black Myth: Wukong, GPU-bound: 38.5 fps
+// with it, 37.7 without. Hogwarts sets it back once at its level load; the next check holds it again.
 //
 // UE ignores a Set below the priority the value was last set with. Our default is SetByCode; a game that sets the cvar
 // from a higher source (Black Myth: Wukong keeps r.Streamline.DLSSG.Enable at 1, which matters once HAGS lets DLSS-G run)
