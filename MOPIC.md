@@ -58,6 +58,7 @@ Keep these as separate commits on top of each joeyhodge release. Re-check each o
 | VR: Rebuild the right eye's distance field when a static mesh changed | Mid hooks on `FScene::AddPrimitive`, `RemovePrimitive` and `UpdatePrimitiveTransform` count the primitives the distance field holds (static mesh components, instanced ones included, with `bAffectDistanceFieldLighting`); after such a change the rebuild comes on the next frame, at most every `VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames` (M, default 8) frames, and the Nth-frame rebuild only caps the wait. The vtable slots are found by shape (the primitive's submit time compared against 0.0001f; only UpdatePrimitiveTransform calls AddPrimitive / RemovePrimitive through the vtable, RemovePrimitive the slot after AddPrimitive), and a hooked function must see `UPrimitiveComponent` objects for its first 64 calls or its count is left off. Where none counts, the cap is 20 N (300 frames at the default N; 10 N before N went to 15). | A rebuild every Nth frame leaves the right eye up to N frames behind on moving geometry, and a full rebuild is dear where the field is large (Wukong ~8 ms, Expedition 33 ~45 ms on a 3080 laptop: +1.5 ms a frame at every 30th). With the signal the rebuild only comes when something the field holds changed. | Wukong: `Hooked FScene::UpdatePrimitiveTransform (vtable slot 5) as a distance field change signal`; forest fight right/left 1.000 (p10 0.97) at about 0.5 ms a frame; a still scene costs nothing between caps. Expedition 33 and Sonic Racing CrossWorlds hook a slot that is never called and run at the 20 N cap (E33 ~0.15 ms a frame). |
 | VR: Count a distance field change only when the component's world transform changed | `UpdatePrimitiveTransform` also comes for updates that leave the component where it was. The component's world transform (`USceneComponent::ComponentToWorld`, not a reflected property) is found once on the game thread: the offset where `K2_GetComponentLocation`'s result sits as an FTransform translation (a unit quaternion before it, a scale after it), common to 3 primitive components the game thread sends to `UpdatePrimitiveTransform` (not Add/Remove, which also come at registration and garbage collection); the search gives up after 100000 transform updates with none on the game thread. An update that leaves rotation, translation and scale as they were at the component's last call is not a change. A relevant component sent in every frame (gaps of up to 4 frames) for 60 frames counts no more until it pauses, and one not seen for 600 frames is forgotten: this covers a mesh that really moves the whole time, and every component when the offset is not found. | Wukong's chapter 1 start sends one idle treasure chest (BoxCover and BoxBase on an animated skeletal mesh) in every frame while it stands still, so the signal never went quiet and the right eye was rebuilt every M = 8 frames for good: 450 rebuilds per 3600 frames, +10-11 ms GPU each on the 4090 laptop; 40.9 fps against 42.6-43.9 without on-change rebuilds, hitches >= 58 ms 5.5/min against 3.5-3.6. | `Component world transform at +0x260 (doubles, ...)` on Wukong, 4.5 s after the hook validated; the totals line `Distance field change signal: ... skipped as unchanged ...` (Wukong, 120 s of play: 46382 skipped, no component in every frame, 2 rebuilds on change; 20 with the 60-frame rule alone). 3080 laptop, 3 runs against 3 of the base: 2-3 change rebuilds a run against about 680, right/left luma 1.002 (p10 0.970) against 0.999 (p10 0.965). |
 | Look up filtered windows without holding the lock or waiting on their thread | `WindowFilter`'s job thread copies the queued windows under its mutex and looks each one up without it, reading the title with `InternalGetWindowText` (the title Windows keeps for the window) instead of `GetWindowTextA` (WM_GETTEXT, answered by the window's thread). A queued window stays filtered until it's decided. The job thread no longer ends the first time its queue is empty, and `m_last_job_tick` starts at construction, so a window asked about twice before the first tick stays filtered. | Black Myth: Wukong hung once at startup (2026-10-30, cold shader cache): the job thread held the mutex inside `GetWindowTextA` waiting for the game thread, the game thread waited for the Present thread, and Present waited for the mutex in `is_filtered`. Since the job thread ended on its first idle tick, a UE4SS or PimaxXR window first seen more than about 2 s after the filter's first job wasn't filtered. | `window-filter-tests` passes (it reproduces the hang; the old code times out there). If joeyhodge changes `src/WindowFilter.cpp`, keep the lookup off the lock and off WM_GETTEXT. |
+| Framework: Start VR after the game's startup shader compile | `D3D12Hook` counts and times the game's `CreateGraphicsPipelineState` / `CreatePipelineState` calls (file-scope atomics, so they survive a rehook). The mods' first-frame initialization (OpenXR, the stereo hooks) waits, starting in the Present that initializes the framework, while over 1 s windows at least 2 threads on average were inside those calls, and runs once no window reached that for 3 s (30 minutes at most). Meanwhile `is_ready()` is false: window messages go straight to the game, the DirectInput `EnumDevices` hook calls the original, and the menu key can't save the config before it is loaded. A start without a compile waits one window, so every D3D12 game's VR starts about 1 s after the framework. | After a driver update a UE game builds its pipeline states again at startup (Wukong: about 56,000, minutes on every core). With VR up the runtime composites and tracks the viewer's eyes (eyetracking_hub about 1.8 cores) on a laptop at its thermal limit, and the compile took 17 % longer: Wukong from cold on the i9-14900HX + 4090 laptop 315 s without UEVR, 368 s with 27021b70, 302.5-319 s with the wait (Ryzen 9 5900HX + 3080 laptop: 617-621 s against 643-660 s). Counting calls alone also counted pipeline states the driver had cached (microseconds each), which would have held VR back on every start of a game that precompiles one a frame from its cache. | Wukong from cold (its PSO file and its D3DSCache folder moved aside) logs `The game is compiling shaders` and, VR starting about 3 s after the compile, `The shader compile is over`; a warm start logs neither and VR starts about 1 s after the framework. A game that enumerates DirectInput devices before VR is up still finds its wheel or pad. |
 
 ## Updating to a new joeyhodge release
 
@@ -215,6 +216,28 @@ Hogwarts, monado `build-release` with the Mopic app pacer; one build after the o
   sit back to back and hold the same view state, so the scan counted the right view's copies too); its left/right
   luma difference stays 3-5 %, the same as before.
 
+Results on 2026-10-31/11-01 (the weekend's rows above, from starting VR after the shader compile to the window
+filter lookup: a build of fc08e339 against 27021b70; `-EngineDir ...\1.0.5.1`, Steam online, the Hub runtime; per
+title A B B A A B, so 3 alternating pairs, on two PCs: RTX 4090 Laptop and RTX 3080 Laptop):
+
+- No title moved beyond run-to-run noise on either PC. The one consistent change is TEKKEN 8 on the 3080 Laptop:
+  +0.8 fps (+1.5 %, all 3 pairs), work -0.35 ms; on the 4090 Laptop it sits at the 60 fps cap. Wukong +0.5 ± 1.3 fps
+  and GPU busy -0.44 ms on the 4090 Laptop, -0.07 fps on the 3080 Laptop. Hogwarts' work went up at the same fps,
+  +0.25 ms (2 pairs) and +0.54 ms (3 pairs); the change signal's per-frame components (7-15 there) are the candidate.
+- Right-eye distance field rebuilds on change per run: Wukong ~2,900 -> 2 (plus 1,350-1,600 by the frame cap of 15),
+  TEKKEN 8 870-1,170 -> 52-65, Stray ~408 -> 178-212, Hogwarts ~440 -> 343-373; E33 and Sonic make no calls.
+- VR starts no later with the shader-compile wait (warm cache). No CRASH, FREEZE or EXIT_* in either set. The
+  MENU_FAILs are recipe-side: Hozy's quit (its Halloween update moved the pause menu; re-recorded 11-01) and one
+  TEKKEN 8 and one Wukong menu miss, all after their gameplay was measured; before it one Hogwarts character card
+  (that title kept 2 pairs) and one Dead as Disco and one Stray menu miss (run again).
+- Wukong's hitches are not first-time pipeline state creation. A build that logs the game's
+  `CreateGraphicsPipelineState` / `CreatePipelineState` calls per frame (`pso` / `pso_us` in perf-frames.csv, not
+  merged) played the same keys twice in one session (`Wukong-save-twice`, 2 runs): each first pass created 32-41
+  pipeline states in 414 s (5-6 ms inside those calls; 2 of the two first passes' 72 hitches had one), the second
+  none, and the hitch rate stayed (>= 58 ms 5.2 then 6.7 a minute, >= 108 ms 1.45 then 1.30).
+  `CreateComputePipelineState` was not counted, but a first-time compile of any kind would have shown as fewer
+  hitches in the second pass.
+
 ## Known gaps
 
 - TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 12 full
@@ -225,6 +248,17 @@ Hogwarts, monado `build-release` with the Mopic app pacer; one build after the o
   `exit-hang.dmp` with the memory the stacks point at; on the next occurrence
   `workerobj.py runs\<run>\exit-hang.dmp <game.exe> 5e09369` should name the worker's class (vtable/RTTI; see
   "Reading an EXIT_HANG dump" in `tools\mopic-test\README.md`).
+- Black Myth: Wukong: closing the game right after its cold startup shader compile crashed 3 of 7 times with UEVR and
+  0 of 5 without (2026-10-30; 27021b70 and an early build of the shader-compile wait). On fc08e339 (11-01) it didn't
+  come back: 0 of 4 with UEVR and 0 of 4 without, cold, closed once the compile was over, and the same warm, closed
+  near the title. In both dumps the main thread is in the game's atexit destructor of a global object
+  (exe+0xe133300) deleting the objects in one of its arrays, and one entry's object has a garbage vtable pointer,
+  0x1e30900e0: a use-after-free in the game's own exit code, about 1 s after UEVR ended the session, with no UEVR
+  frame. That address falls in the stack reservation of whichever game thread starts about 11 s after launch (Bink's
+  async decode thread on a cold start); that thread ended during shutdown in 3 of 8 runs with UEVR and 1 of 8
+  without, with no crash. Separately, every Wukong exit, with and without UEVR, leaves a WER dump of Steam's
+  `crashhandler64.dll` calling abort (0xc0000409) while the process still exits with 0; the harness rightly passes
+  those.
 - Assetto Corsa Competizione (D3D11): nothing reaches the Mopic display. UEVR's D3D11 component can't get the
   back buffer ("Failed to get back buffer (D3D11)" / "Failed to setup D3D11Component" every frame), while
   UEVR does render the stereo pair into the game's own window in a session. The game runs and quits cleanly.

@@ -3,12 +3,12 @@
   "process": "CozyGame-Win64-Shipping",
   "source": "window",
   "max_width": 1280,
-  "notes": "Mouse driven. Read from the desktop window: with UEVR the game's UI (menus, HUD) does not show on the Mopic display (2026-10-01), only the 3D scene. Route: main menu > Resume > island overview (slowly rotating; click the yellow house) > Attic > Continue (never Restart: it resets the room) > idle in the room > Esc > Quit > Yes. No clicks in the room itself (they would move the player's items).",
+  "notes": "Mouse driven. Read from the desktop window: with UEVR the game's UI (menus, HUD) does not show on the Mopic display (2026-10-01), only the 3D scene. Route: main menu > Resume > island overview (slowly rotating; click the yellow house) > Attic > Continue (never Restart: it resets the room) > idle in the room > Esc > Quit > Yes. The 2026-10-22 Halloween update (installed 10-23) restyled the menus: the pause menu's buttons moved up (quit at y 493) and its pause_menu checkpoint (the 'to map' button) was re-recorded 11-01. No clicks in the room itself (they would move the player's items).",
   "checkpoints": {
     "main_menu": {"image": "main_menu.png", "region": [36, 60, 410, 145], "threshold": 0.8},
     "house_continue": {"image": "house_continue.png", "region": [812, 492, 174, 58], "threshold": 0.8},
     "in_room": {"image": "in_room.png", "region": [1192, 18, 68, 68], "threshold": 0.8},
-    "pause_menu": {"image": "pause_menu.png", "region": [74, 362, 140, 60], "threshold": 0.8},
+    "pause_menu": {"image": "pause_menu.png", "region": [80, 396, 160, 66], "threshold": 0.8},
     "quit_confirm": {"image": "quit_confirm.png", "region": [530, 310, 220, 46], "threshold": 0.8}
   },
   "steps": [
@@ -27,7 +27,7 @@
     {"key": "esc"},
     {"wait_for": "pause_menu", "timeout": 30, "press": "esc", "every": 5},
     {"phase": "leave"},
-    {"click": [130, 522]},
+    {"click": [137, 493]},
     {"wait_for": "quit_confirm", "timeout": 15},
     {"phase": "exit"},
     {"click": [675, 382]},
