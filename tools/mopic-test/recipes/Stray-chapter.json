@@ -11,7 +11,7 @@
     "main_menu": {"image": "main_menu.png", "region": [612, 578, 56, 64], "threshold": 0.8},
     "start_selected": {"image": "start_selected.png", "region": [604, 554, 74, 26], "threshold": 0.8},
     "save_select": {"image": "save_select.png", "region": [564, 110, 154, 30], "threshold": 0.8},
-    "slot3_selected": {"image": "slot3_selected.png", "region": [1169, 250, 3, 170], "threshold": 0.8, "mode": "highlight", "margin": 2},
+    "slot3_selected": {"image": "slot3_selected.png", "region": [1167, 250, 5, 170], "threshold": 0.8, "mode": "highlight", "margin": 2},
     "slot3_continue_selected": {"image": "slot3_continue_selected.png", "region": [974, 488, 60, 32], "threshold": 0.8},
     "slot3_chapters_selected": {"image": "slot3_chapters_selected.png", "region": [980, 527, 48, 20], "threshold": 0.8, "mode": "highlight"},
     "dialog_band": {"image": "dialog_band.png", "region": [80, 300, 200, 40], "threshold": 0.8},
