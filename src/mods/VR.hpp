@@ -786,6 +786,14 @@ public:
         return m_native_stereo_fix_disable_frame_generation->value() && is_native_stereo_fix_enabled();
     }
 
+    // VR_NativeStereoFixWholeSkyCapture (default on): while the Native Stereo Fix is on, CVarManager holds
+    // r.SkyLight.RealTimeReflectionCapture.TimeSlice at 0 and puts it back when it is off, so every eye render captures
+    // the real-time sky light whole instead of one slice of it. With the capture spread over several renders, the left
+    // eye (the first render of each frame) lost its sky light for one frame once per capture cycle (Hogwarts Legacy).
+    bool should_hold_whole_sky_capture() const {
+        return m_native_stereo_fix_whole_sky_capture->value() && is_native_stereo_fix_enabled();
+    }
+
     // VR_MopicForceWindowedFullscreen (default on): on Mopic's 3D display CVarManager keeps the game out of exclusive
     // fullscreen (see CVarManager::enforce_mopic_windowed_fullscreen).
     bool should_force_mopic_windowed_fullscreen() const {
@@ -1766,6 +1774,7 @@ private:
     const ModToggle::Ptr m_stalker2_sharpen_priority{ ModToggle::create(generate_name("Stalker2SharpenExistingPriority"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
     const ModToggle::Ptr m_native_stereo_fix_disable_frame_generation{ ModToggle::create(generate_name("NativeStereoFixDisableFrameGeneration"), true) };
+    const ModToggle::Ptr m_native_stereo_fix_whole_sky_capture{ ModToggle::create(generate_name("NativeStereoFixWholeSkyCapture"), true) };
     const ModToggle::Ptr m_submit_once_per_engine_frame{ ModToggle::create(generate_name("SubmitOncePerEngineFrame"), true) };
 
     const ModSlider::Ptr m_custom_z_near{ ModSlider::create(generate_name("CustomZNear"), 0.001f, 100.0f, 0.01f, true) };
@@ -2107,6 +2116,7 @@ public:
             *m_stalker2_sharpen_priority,
             *m_native_stereo_fix_pair_snapshot,
             *m_native_stereo_fix_disable_frame_generation,
+            *m_native_stereo_fix_whole_sky_capture,
             *m_submit_once_per_engine_frame,
             *m_splitscreen_compatibility_mode,
             *m_splitscreen_view_index,

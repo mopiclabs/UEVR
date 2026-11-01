@@ -319,13 +319,14 @@ private:
     bool m_windrose_shadow_runtime_cvars_done{false};
     int m_windrose_shadow_runtime_cvar_attempts{0};
 
-    // VR_NativeStereoFixDisableFrameGeneration: the frame generation cvars' values from before they were held at 0
-    // (put back when the fix is off), one entry per name in enforce_frame_generation_cvars().
-    void enforce_frame_generation_cvars();
-    std::array<std::optional<int>, 3> m_frame_generation_cvar_originals{};
-    std::array<uint32_t, 3> m_frame_generation_cvar_forced_count{};
-    std::array<bool, 3> m_frame_generation_cvar_refused{}; // Set() left the value unchanged: not retried
-    std::chrono::steady_clock::time_point m_next_frame_generation_cvar_check{};
+    // VR_NativeStereoFixDisableFrameGeneration / VR_NativeStereoFixWholeSkyCapture: the values of the cvars held at 0
+    // while the Native Stereo Fix is on, from before they were (put back when it is off), one entry per name in
+    // enforce_native_stereo_fix_cvars().
+    void enforce_native_stereo_fix_cvars();
+    std::array<std::optional<int>, 4> m_nsf_held_cvar_originals{};
+    std::array<uint32_t, 4> m_nsf_held_cvar_forced_count{};
+    std::array<bool, 4> m_nsf_held_cvar_refused{}; // Set() left the value unchanged: not retried
+    std::chrono::steady_clock::time_point m_next_nsf_held_cvar_check{};
 
     // VR_AutoRes: see AutoResActuators.cpp.
     void process_autores(sdk::UGameEngine* engine);

@@ -30,7 +30,7 @@ namespace {
 using AutoResCVar = CVarManager::AutoResCVar;
 
 // UE's SetBy priorities in the top byte of a Set's flags, from SetByScalability up to SetByConsole as
-// enforce_frame_generation_cvars numbers them (UE5 inserts SetByGameOverride, which moves the upper names by one; the
+// enforce_native_stereo_fix_cvars numbers them (UE5 inserts SetByGameOverride, which moves the upper names by one; the
 // read-back below is what counts).
 constexpr uint32_t set_by_lowest = 0x1000000;
 constexpr uint32_t set_by_step = 0x1000000;
