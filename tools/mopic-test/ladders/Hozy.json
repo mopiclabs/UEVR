@@ -1,0 +1,10 @@
+{
+  "game": "Hozy",
+  "recipe": "Hozy-lr",
+  "notes": [
+    "Hozy has one unlocked room in this account's progress (the Attic; the floors above are locked), so its places are the island overview, the house screen and the Attic room, all measured in one run of Hozy-lr (2026-11-01)."
+  ],
+  "rungs": [
+    {"name": "island-house-attic", "tier": 1}
+  ]
+}
