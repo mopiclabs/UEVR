@@ -9418,6 +9418,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "
                 "Native Stereo Fix is on, and puts it back when the fix is off. Generated frames never reach the headset, "
                 "and their extra Presents between the two eye renders make the right eye show the previous frame.");
+            m_native_stereo_fix_whole_sky_capture->draw("Capture the Sky Light Whole");
+            ImGui::TextWrapped(
+                "Default on. Holds r.SkyLight.RealTimeReflectionCapture.TimeSlice at 0 while the Native Stereo Fix is on, "
+                "so each eye render captures the real-time sky light whole instead of one slice of it, and puts it back "
+                "when the fix is off. Sliced across the two eye renders, the capture left the left eye without sky light "
+                "for one frame per cycle (Hogwarts Legacy: every 12th frame, 26% darker).");
             m_submit_once_per_engine_frame->draw("Submit Once per Engine Frame");
             ImGui::TextWrapped(
                 "Default on. Skips the VR work of Present calls that carry no new engine frame (frame generation) while "

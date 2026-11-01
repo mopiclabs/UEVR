@@ -868,48 +868,77 @@ void CVarManager::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     }
 
     enforce_mopic_windowed_fullscreen(engine);
-    enforce_frame_generation_cvars();
+    enforce_native_stereo_fix_cvars();
     process_autores(engine);
 }
 
-// VR_NativeStereoFixDisableFrameGeneration: while the Native Stereo Fix is on, hold the engine's frame generation off.
-// UEVR copies the engine's two eye targets, so generated frames never reach the headset; their extra Presents only add
-// submits, and one landing between the left and right eye renders sends the right eye one engine frame late (Hogwarts
-// Legacy, XeFG X2, 2026-10-03: 14 lone-eye lags/min with it, 0 without, engine ~20 fps either way). Checked once a
-// second because games re-apply their own settings (level loads, the options menu); the values from before are put back
-// once the fix is off.
+// Engine cvars held at 0 while the Native Stereo Fix is on, each behind its own option, and put back once the fix (or
+// the option) is off. Checked once a second because games re-apply their own settings (level loads, the options menu).
+//
+// VR_NativeStereoFixDisableFrameGeneration: the engine's frame generation. UEVR copies the engine's two eye targets, so
+// generated frames never reach the headset; their extra Presents only add submits, and one landing between the left and
+// right eye renders sends the right eye one engine frame late (Hogwarts Legacy, XeFG X2, 2026-10-03: 14 lone-eye
+// lags/min with it, 0 without, engine ~20 fps either way).
+//
+// VR_NativeStereoFixWholeSkyCapture: UE's real-time sky light capture is time-sliced by default
+// (r.SkyLight.RealTimeReflectionCapture.TimeSlice 1), one capture of the sky cubemap spread over several renders. Under
+// the Native Stereo Fix the engine renders twice per frame, and in Hogwarts Legacy (UE 4.27) the left eye, the first
+// render of each frame, lost its sky light for one frame once per capture cycle: every 12 engine frames the left eye was
+// ~26% darker (up-facing ground 30-44%) while the right eye was unchanged, 16-76 times per 4-minute open-world run on
+// every build back to 2026-10-04. Held at 0, each render captures the sky whole: 1 such frame per run, same frame rate
+// (19.7 fps and 46 ms of work, against 19.7-20.1 fps and 44-46 ms). Engine.ini's [SystemSettings] doesn't take there
+// (the game sets it from a higher source); SetByConsole does.
 //
 // UE ignores a Set below the priority the value was last set with. Our default is SetByCode; a game that sets the cvar
 // from a higher source (Black Myth: Wukong keeps r.Streamline.DLSSG.Enable at 1, which matters once HAGS lets DLSS-G run)
 // would refuse it, so a refused write is retried once with SetByConsole, the highest source a game normally uses.
 // Wukong with HAGS, 2026-10-14: DLSS-G off (Presents per engine tick 2.00 -> 1.00), the eyes stay in sync on fast
 // turns and the flicker on the way into gameplay is gone.
-static constexpr uint32_t frame_generation_set_by_console = 0x9000000; // ECVF_SetByConsole
+static constexpr uint32_t native_stereo_fix_set_by_console = 0x9000000; // ECVF_SetByConsole
 
-void CVarManager::enforce_frame_generation_cvars() {
-    static constexpr std::array<const wchar_t*, 3> frame_generation_cvars{
-        L"r.XeFG.Enabled",            // Intel XeSS frame generation (XeSS UE plugin)
-        L"r.Streamline.DLSSG.Enable", // NVIDIA DLSS frame generation (Streamline UE plugin)
-        L"r.FidelityFX.FI.Enabled",   // AMD FSR frame interpolation (FidelityFX UE plugin)
+void CVarManager::enforce_native_stereo_fix_cvars() {
+    struct HeldCVar {
+        const wchar_t* name;
+        bool (VR::*wanted)() const;
+        const char* tag;
+        const char* why; // logged when it is held
     };
-    static_assert(frame_generation_cvars.size() == std::tuple_size_v<decltype(m_frame_generation_cvar_originals)>);
+
+    static constexpr const char* frame_generation_why =
+        "generated frames never reach the headset and split the eye pair (VR_NativeStereoFixDisableFrameGeneration)";
+
+    static constexpr std::array<HeldCVar, 4> held_cvars{{
+        // Intel XeSS frame generation (XeSS UE plugin)
+        { L"r.XeFG.Enabled", &VR::should_disable_frame_generation, "[FrameGen]", frame_generation_why },
+        // NVIDIA DLSS frame generation (Streamline UE plugin)
+        { L"r.Streamline.DLSSG.Enable", &VR::should_disable_frame_generation, "[FrameGen]", frame_generation_why },
+        // AMD FSR frame interpolation (FidelityFX UE plugin)
+        { L"r.FidelityFX.FI.Enabled", &VR::should_disable_frame_generation, "[FrameGen]", frame_generation_why },
+        // UE 4.26+ real-time sky light capture
+        { L"r.SkyLight.RealTimeReflectionCapture.TimeSlice", &VR::should_hold_whole_sky_capture, "[SkyCapture]",
+          "each eye render captures the sky light whole; sliced, the left eye lost it for one frame per cycle "
+          "(VR_NativeStereoFixWholeSkyCapture)" },
+    }};
+    static_assert(std::tuple_size_v<decltype(held_cvars)> == std::tuple_size_v<decltype(m_nsf_held_cvar_originals)>);
 
     const auto now = std::chrono::steady_clock::now();
 
-    if (now < m_next_frame_generation_cvar_check) {
+    if (now < m_next_nsf_held_cvar_check) {
         return;
     }
 
-    m_next_frame_generation_cvar_check = now + std::chrono::seconds{1};
+    m_next_nsf_held_cvar_check = now + std::chrono::seconds{1};
 
     const auto& vr = VR::get();
-    const auto want_off = vr != nullptr && vr->should_disable_frame_generation();
-    const auto any_forced = std::any_of(m_frame_generation_cvar_originals.begin(), m_frame_generation_cvar_originals.end(),
-        [](const auto& original) { return original.has_value(); }) ||
-        std::any_of(m_frame_generation_cvar_refused.begin(), m_frame_generation_cvar_refused.end(),
-            [](bool refused) { return refused; });
+    std::array<bool, std::tuple_size_v<decltype(held_cvars)>> want_off{};
+    bool any{};
 
-    if (!want_off && !any_forced) {
+    for (size_t i = 0; i < held_cvars.size(); ++i) {
+        want_off[i] = vr != nullptr && (vr.get()->*held_cvars[i].wanted)();
+        any = any || want_off[i] || m_nsf_held_cvar_originals[i].has_value() || m_nsf_held_cvar_refused[i];
+    }
+
+    if (!any) {
         return;
     }
 
@@ -919,8 +948,9 @@ void CVarManager::enforce_frame_generation_cvars() {
         return;
     }
 
-    for (size_t i = 0; i < frame_generation_cvars.size(); ++i) {
-        const auto name = frame_generation_cvars[i];
+    for (size_t i = 0; i < held_cvars.size(); ++i) {
+        const auto& held = held_cvars[i];
+        const auto name = held.name;
         const auto object = console_manager->find(name);
 
         if (object == nullptr) {
@@ -928,13 +958,13 @@ void CVarManager::enforce_frame_generation_cvars() {
         }
 
         auto variable = (sdk::IConsoleVariable*)object;
-        auto& original = m_frame_generation_cvar_originals[i];
+        auto& original = m_nsf_held_cvar_originals[i];
 
         try {
             const auto before = variable->GetInt();
 
-            if (want_off) {
-                if (before == 0 || m_frame_generation_cvar_refused[i]) {
+            if (want_off[i]) {
+                if (before == 0 || m_nsf_held_cvar_refused[i]) {
                     continue;
                 }
 
@@ -946,48 +976,47 @@ void CVarManager::enforce_frame_generation_cvars() {
                 auto after = variable->GetInt();
 
                 if (after == before) {
-                    ok = variable->Set(L"0", frame_generation_set_by_console);
+                    ok = variable->Set(L"0", native_stereo_fix_set_by_console);
                     after = variable->GetInt();
-                    SPDLOG_INFO("[FrameGen] {} refused 0 at SetByCode; with SetByConsole: {} -> {} (ok={})",
-                        utility::narrow(name), before, after, ok);
+                    SPDLOG_INFO("{} {} refused 0 at SetByCode; with SetByConsole: {} -> {} (ok={})",
+                        held.tag, utility::narrow(name), before, after, ok);
                 }
 
                 if (after == before) {
                     // The game keeps it even at console priority: stop asking until the fix is off again, and leave
                     // nothing to put back.
-                    m_frame_generation_cvar_refused[i] = true;
+                    m_nsf_held_cvar_refused[i] = true;
                     original.reset();
-                    SPDLOG_WARN("[FrameGen] Native Stereo Fix is on, but {} stays {} after setting it to 0 (ok={}); not "
-                        "retrying", utility::narrow(name), after, ok);
+                    SPDLOG_WARN("{} Native Stereo Fix is on, but {} stays {} after setting it to 0 (ok={}); not "
+                        "retrying", held.tag, utility::narrow(name), after, ok);
                     continue;
                 }
 
-                const auto count = ++m_frame_generation_cvar_forced_count[i];
+                const auto count = ++m_nsf_held_cvar_forced_count[i];
 
                 // The first few, then every 60th: a game that keeps turning it back on would fill the log otherwise.
                 if (count <= 3 || count % 60 == 0) {
-                    SPDLOG_INFO("[FrameGen] Native Stereo Fix is on: {} {} -> {} (ok={}, time {}); generated frames never reach "
-                        "the headset and split the eye pair (VR_NativeStereoFixDisableFrameGeneration)",
-                        utility::narrow(name), before, after, ok, count);
+                    SPDLOG_INFO("{} Native Stereo Fix is on: {} {} -> {} (ok={}, time {}); {}",
+                        held.tag, utility::narrow(name), before, after, ok, count, held.why);
                 }
-            } else if (m_frame_generation_cvar_refused[i]) {
-                m_frame_generation_cvar_refused[i] = false;
+            } else if (m_nsf_held_cvar_refused[i]) {
+                m_nsf_held_cvar_refused[i] = false;
             } else if (original.has_value()) {
                 const auto value = std::to_wstring(*original);
                 auto ok = variable->Set(value.c_str());
 
                 if (variable->GetInt() != *original) {
-                    // It was turned off at console priority: put it back at the same priority.
-                    ok = variable->Set(value.c_str(), frame_generation_set_by_console);
+                    // It was set to 0 at console priority: put it back at the same priority.
+                    ok = variable->Set(value.c_str(), native_stereo_fix_set_by_console);
                 }
 
-                SPDLOG_INFO("[FrameGen] Native Stereo Fix is off: {} put back {} -> {} (ok={})",
-                    utility::narrow(name), before, variable->GetInt(), ok);
+                SPDLOG_INFO("{} Native Stereo Fix is off: {} put back {} -> {} (ok={})",
+                    held.tag, utility::narrow(name), before, variable->GetInt(), ok);
                 original.reset();
-                m_frame_generation_cvar_forced_count[i] = 0;
+                m_nsf_held_cvar_forced_count[i] = 0;
             }
         } catch (...) {
-            SPDLOG_WARN("[FrameGen] reading or setting {} threw", utility::narrow(name));
+            SPDLOG_WARN("{} reading or setting {} threw", held.tag, utility::narrow(name));
         }
     }
 }
