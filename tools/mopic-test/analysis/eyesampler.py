@@ -55,6 +55,7 @@ STATUS_POLL_IDLE_S = 0.05   # ... and this often while no segment is open (a seg
                             # that matter: the field guide toggles a state right after the key press)
 PAUSE_GAP_S = 0.25       # a sample after a longer gap (a closed segment, a stall) has no diff
 MATCH_RATIO = 3.0        # a lagging eye's later change is within this factor of the first eye's change
+BURST_SETTLE_S = 3.0     # --burst-every: no burst in a segment's first seconds (the step that opened it may still act)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -158,13 +159,92 @@ def segment_at(segments, t):
     return None
 
 
+def write_burst_pngs(raw_path, out_dir):
+    """A burstcap.exe burst file -> out_dir\\fNN.png (side by side, as grabbed) and out_dir\\burst.json."""
+    from PIL import Image
+    os.makedirs(out_dir, exist_ok=True)
+    frames = []
+    with open(raw_path, "rb") as f:
+        magic = f.read(4)
+        version, w, h, n = np.frombuffer(f.read(16), np.uint32)
+        if magic != b"BRST" or version != 1:
+            raise ValueError(f"{raw_path}: not a burst file")
+        for i in range(int(n)):
+            grab_ns, present_ns = (int(v) for v in np.frombuffer(f.read(16), np.int64))
+            refreshes = int(np.frombuffer(f.read(8), np.uint32)[0])
+            bgr = np.frombuffer(f.read(int(w) * int(h) * 3), np.uint8).reshape(int(h), int(w), 3)
+            name = f"f{i:02d}.png"
+            Image.fromarray(bgr[:, :, ::-1], "RGB").save(os.path.join(out_dir, name), compress_level=1)
+            frames.append({"file": name, "grab_ns": grab_ns, "present_ns": present_ns, "refreshes": refreshes})
+    doc = {"width": int(w), "height": int(h), "frames": frames}
+    with open(os.path.join(out_dir, "burst.json"), "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=1)
+    return {"frames": len(frames), "skipped": sum(max(0, fr["refreshes"] - 1) for fr in frames)}
+
+
+class Bursts:
+    """capture\\burstcap.exe kept running for --burst-every: one burst at a time, asked for and waited on by a worker
+    thread, so the strip sampling goes on meanwhile. The burst files (bursts\\<n>-seg<s>.brst, ~190 MB for 30 frames
+    at 1920x1080) stay as they are: analysis\\bursts.py turns them into PNGs (doing it here took the sampler's time)."""
+
+    def __init__(self, exe, display, scale, out_dir, frames):
+        import subprocess
+        import threading
+        self.out_dir, self.frames = out_dir, frames
+        self.lock, self.thread, self.done = threading.Lock(), None, []
+        self.proc = None
+        try:
+            self.proc = subprocess.Popen([exe, "--rect", "%d,%d,%d,%d" % tuple(display), "--scale", str(scale)],
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         text=True, bufsize=1)
+            self.ready = self.proc.stdout.readline().strip()   # "ready <source> <w> <h>" or "error ..."
+        except OSError as e:
+            self.ready = f"error {e}"
+        self.ok = self.ready.startswith("ready")
+
+    def busy(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self, t_ns, seg, index):
+        import threading
+        self.thread = threading.Thread(target=self._run, args=(t_ns, seg, index), daemon=True)
+        self.thread.start()
+
+    def _run(self, t_ns, seg, index):
+        name = f"{index:03d}-seg{-1 if seg is None else seg}"
+        d = os.path.join(self.out_dir, "bursts")
+        os.makedirs(d, exist_ok=True)
+        raw = os.path.join(d, name + ".brst")
+        entry = {"t_ns": t_ns, "seg": seg, "file": f"bursts\\{name}.brst"}
+        try:
+            self.proc.stdin.write(f"burst {self.frames} {raw}\n")
+            self.proc.stdin.flush()
+            entry["reply"] = self.proc.stdout.readline().strip()   # ok <frames> <refreshes skipped> <ms>
+        except (OSError, ValueError) as e:
+            entry["error"] = str(e)
+        with self.lock:
+            self.done.append(entry)
+
+    def close(self):
+        if self.thread is not None:
+            self.thread.join(timeout=120)
+        if self.proc is not None:
+            try:
+                self.proc.stdin.write("quit\n")
+                self.proc.stdin.flush()
+                self.proc.wait(timeout=5)
+            except (OSError, ValueError, Exception):
+                self.proc.kill()
+
+
 class Sampler:
     """Grabs the strip at `hz` and writes eyes.csv; grab/clock/sleep/alive are replaceable (the self-test drives it
     with synthetic frames on a fake clock)."""
 
     def __init__(self, out_dir, rect, hz=120, status_path=None, seconds=None, stop_file=None, alive=None, shots=40,
                  shot_threshold=1.0, black_level=8.0, bright_min=20.0, lr_every=12, grab=None, clock=time.perf_counter_ns,
-                 sleep=time.sleep, full_every=0.0, full_rect=None, full_max=60, full_width=1920, full_grab=None):
+                 sleep=time.sleep, full_every=0.0, full_rect=None, full_max=60, full_width=1920, full_grab=None,
+                 bursts=None, burst_every=0.0, burst_max=20):
         self.out_dir, self.rect, self.hz, self.lr_every = out_dir, rect, hz, max(1, lr_every)
         self.status_path, self.seconds, self.stop_file, self.alive = status_path, seconds, stop_file, alive
         self.shots_left, self.shot_threshold = shots, shot_threshold
@@ -178,6 +258,13 @@ class Sampler:
         self.full_grab = full_grab
         if full_every and full_rect:
             self.meta["full_frames"] = []
+        # --burst-every: consecutive frames of the whole display (Bursts), every N s of a measured segment once it has
+        # been open BURST_SETTLE_S
+        self.bursts = bursts if bursts is not None and bursts.ok else None
+        self.burst_every, self.burst_max = burst_every, burst_max
+        if bursts is not None:
+            self.meta["burst_source"] = bursts.ready
+            self.meta["bursts"] = []
 
     def read_status(self):
         """read_segments() of the pilot's status file, opened only when os.stat says it changed: the pilot replaces
@@ -210,6 +297,7 @@ class Sampler:
         prev, prev_t, prev_seg = None, None, None
         last_shot = None
         last_full = None
+        last_burst, bursts_started, seg_since, seen_seg = None, 0, None, None
         next_t = start
         w, h = self.rect["width"], self.rect["height"]
         with open(os.path.join(self.out_dir, "eyes.csv"), "w", newline="\n", encoding="utf-8") as f:
@@ -263,6 +351,14 @@ class Sampler:
                         (last_full is None or t0 - last_full >= self.full_every * 1e9)):
                     self.save_full(t0, seg)
                     last_full = t0
+                if seg != seen_seg:
+                    seen_seg, seg_since = seg, t0
+                if (self.bursts and bursts_started < self.burst_max and not self.bursts.busy() and
+                        (not self.status_path or seg is not None) and t0 - seg_since >= BURST_SETTLE_S * 1e9 and
+                        (last_burst is None or t0 - last_burst >= self.burst_every * 1e9)):
+                    self.bursts.start(t0, seg, bursts_started)
+                    bursts_started += 1
+                    last_burst = t0
                 if t1 - last_flush > 1e9:
                     f.flush()
                     last_flush = t1
@@ -273,6 +369,9 @@ class Sampler:
                 else:
                     self.sleep((next_t - now) / 1e9)
         self.meta["ended_qpc_ns"] = self.clock()
+        if self.bursts:
+            self.bursts.close()
+            self.meta["bursts"] = sorted(self.bursts.done, key=lambda b: b["t_ns"])
         self.write_meta()
         return self.meta
 
@@ -659,6 +758,11 @@ def main():
     s.add_argument("--lr-every", type=int, default=12, help="the left/right match on every Nth sample (it costs as much as a grab)")
     s.add_argument("--full-every", type=float, default=0, help="also save the whole side-by-side display every N s of a measured segment (binocular\\, for analysis\\binocular.py; 0: off)")
     s.add_argument("--full-max", type=int, default=60, help="at most this many whole-display frames")
+    s.add_argument("--burst-every", type=float, default=0, help="also grab --burst-frames consecutive frames of the whole display every N s of a measured segment (capture\\burstcap.exe; bursts\\, for analysis\\bursts.py; 0: off)")
+    s.add_argument("--burst-frames", type=int, default=30)
+    s.add_argument("--burst-max", type=int, default=20, help="at most this many bursts")
+    s.add_argument("--burst-scale", type=int, default=2, help="burst frames are the display scaled down this much")
+    s.add_argument("--burst-exe", default=os.path.join(TOOLS, "capture", "burstcap.exe"))
     s = sub.add_parser("report", help="find one-eye changes and black eyes in a run folder's eyes.csv")
     s.add_argument("path")
     s.add_argument("--threshold", type=float, default=1.0, help="an eye changed when its mean luma diff exceeds this")
@@ -692,11 +796,16 @@ def main():
         Image.fromarray(np.hstack([left, right]).clip(0, 255).astype(np.uint8), "L").save(args.out)
         print(json.dumps(dict(measure(left, right, None), rect=rect, out=os.path.abspath(args.out))))
         return
+    bursts = None
+    if args.burst_every:
+        bursts = Bursts(args.burst_exe, display, args.burst_scale, args.out, args.burst_frames)
+        if not bursts.ok:
+            print(f"eyesampler: no bursts ({bursts.ready})", file=sys.stderr)
     sampler = Sampler(args.out, rect, hz=args.hz, status_path=args.status or None, seconds=args.seconds or None,
                       stop_file=args.stop_file or None, alive=process_alive_fn(args.pid) if args.pid else None,
                       shots=args.shots, lr_every=args.lr_every, full_every=args.full_every,
                       full_rect={"left": display[0], "top": display[1], "width": display[2], "height": display[3]},
-                      full_max=args.full_max)
+                      full_max=args.full_max, bursts=bursts, burst_every=args.burst_every, burst_max=args.burst_max)
     sampler.meta["display"] = list(display)
     sampler.meta["refresh_hz"] = refresh
     meta = sampler.run()
