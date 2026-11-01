@@ -914,7 +914,7 @@ void CVarManager::enforce_native_stereo_fix_cvars() {
         { L"r.Streamline.DLSSG.Enable", &VR::should_disable_frame_generation, "[FrameGen]", frame_generation_why },
         // AMD FSR frame interpolation (FidelityFX UE plugin)
         { L"r.FidelityFX.FI.Enabled", &VR::should_disable_frame_generation, "[FrameGen]", frame_generation_why },
-        // UE 4.26+ real-time sky light capture
+        // UE's real-time sky light capture (Hogwarts Legacy's UE 4.27 has it; an engine without it is skipped)
         { L"r.SkyLight.RealTimeReflectionCapture.TimeSlice", &VR::should_hold_whole_sky_capture, "[SkyCapture]",
           "each eye render captures the sky light whole; sliced, the left eye lost it for one frame per cycle "
           "(VR_NativeStereoFixWholeSkyCapture)" },
