@@ -216,6 +216,27 @@ Hogwarts, monado `build-release` with the Mopic app pacer; one build after the o
   sit back to back and hold the same view state, so the scan counted the right view's copies too); its left/right
   luma difference stays 3-5 %, the same as before.
 
+Results on 2026-10-31/11-01 (the weekend's rows above, from starting VR after the shader compile to the window
+filter lookup: a build of fc08e339 against 27021b70; `-EngineDir ...\1.0.5.1`, Steam online, the Hub runtime; per
+title A B B A A B, so 3 alternating pairs, on two PCs: RTX 4090 Laptop and RTX 3080 Laptop):
+
+- No title moved beyond run-to-run noise on either PC. The one consistent change is TEKKEN 8 on the 3080 Laptop:
+  +0.8 fps (+1.5 %, all 3 pairs), work -0.35 ms; on the 4090 Laptop it sits at the 60 fps cap. Wukong +0.5 ± 1.3 fps
+  and GPU busy -0.44 ms on the 4090 Laptop, -0.07 fps on the 3080 Laptop. Hogwarts' work went up at the same fps,
+  +0.25 ms (2 pairs) and +0.54 ms (3 pairs); the change signal's per-frame components (7-15 there) are the candidate.
+- Right-eye distance field rebuilds on change per run: Wukong ~2,900 -> 2 (plus 1,350-1,600 by the frame cap of 15),
+  TEKKEN 8 870-1,170 -> 52-65, Stray ~408 -> 178-212, Hogwarts ~440 -> 343-373; E33 and Sonic make no calls.
+- VR starts no later with the shader-compile wait (warm cache). No CRASH, FREEZE or EXIT_* in either set. The
+  MENU_FAILs are recipe-side: Hozy's quit (its Halloween update moved the pause menu; re-recorded 11-01) and one
+  TEKKEN 8 and one Wukong menu miss, all after their gameplay was measured; before it one Hogwarts character card
+  (that title kept 2 pairs) and one Dead as Disco and one Stray menu miss (run again).
+- Wukong's hitches are not first-time pipeline state creation. A build that logs the game's
+  `CreateGraphicsPipelineState` / `CreatePipelineState` calls per frame (`pso` / `pso_us` in perf-frames.csv, not
+  merged) played the same keys twice in one session (`Wukong-save-twice`, 2 runs): the first pass created 32-41
+  pipeline states in 414 s (5-6 ms inside those calls; 2 of its 72 hitches had one), the second none, and the hitch
+  rate stayed (>= 58 ms 5.2 then 6.7 a minute, >= 108 ms 1.45 then 1.30). `CreateComputePipelineState` was not counted,
+  but a first-time compile of any kind would have shown as fewer hitches in the second pass.
+
 ## Known gaps
 
 - TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 12 full
@@ -226,6 +247,16 @@ Hogwarts, monado `build-release` with the Mopic app pacer; one build after the o
   `exit-hang.dmp` with the memory the stacks point at; on the next occurrence
   `workerobj.py runs\<run>\exit-hang.dmp <game.exe> 5e09369` should name the worker's class (vtable/RTTI; see
   "Reading an EXIT_HANG dump" in `tools\mopic-test\README.md`).
+- Black Myth: Wukong: closing the game right after its cold startup shader compile crashed 3 of 7 times with UEVR and
+  0 of 5 without (2026-10-30; 27021b70 and an early build of the shader-compile wait). On fc08e339 (11-01) it didn't
+  come back: 0 of 4 with UEVR and 0 of 4 without, cold, closed once the compile was over, and the same warm, closed
+  near the title. In both dumps the main thread is in the game's atexit destructor of a global object
+  (exe+0xe133300) deleting the objects in one of its arrays, and one entry's object has a garbage vtable pointer,
+  0x1e30900e0: a use-after-free in the game's own exit code, about 1 s after UEVR ended the session, with no UEVR
+  frame. That address falls in the stack reservation of whichever game thread starts about 11 s after launch (Bink's
+  async decode thread on a cold start), and that thread ends during shutdown with and without UEVR. Separately,
+  every Wukong exit, with and without UEVR, leaves a WER dump of Steam's `crashhandler64.dll` calling abort
+  (0xc0000409) while the process still exits with 0; the harness rightly passes those.
 - Assetto Corsa Competizione (D3D11): nothing reaches the Mopic display. UEVR's D3D11 component can't get the
   back buffer ("Failed to get back buffer (D3D11)" / "Failed to setup D3D11Component" every frame), while
   UEVR does render the stereo pair into the game's own window in a session. The game runs and quits cleanly.
