@@ -9370,7 +9370,11 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             } else {
                 m_native_stereo_fix_same_pass->draw("Use Same Stereo Pass");
             }
-            m_native_stereo_fix_preserve_secondary_pass->draw("Preserve Secondary Pass on UE5.5+");
+            m_native_stereo_fix_preserve_secondary_pass->draw("Preserve Secondary Pass on UE5.7+");
+            ImGui::TextWrapped(
+                "UE5.7 renders the right eye in a family linked to the left eye's. On UE5.5/5.6 it renders alone and is "
+                "relabeled PRIMARY: kept SECONDARY there, it lost work the engine shares from the PRIMARY eye, such as the "
+                "sun's shadow (Hozy).");
             if (stalker2_native_fix_requires_same_pass_cached()) {
                 m_stalker2_native_pair_experiment->draw("Experimental Stalker 2 Exact Native Pair");
                 ImGui::TextWrapped("Default off. UE5.5 DX12 Native Fix and OpenXR double-wide only. Requires a validated render/RHI transaction; otherwise retains the existing path. Owned pair reuse is bounded to three frames/100 ms and costs additional GPU memory/bandwidth.");
