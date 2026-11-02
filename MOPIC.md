@@ -106,6 +106,11 @@ cmake --build build-jh --config Release --target uevr
 Output: `build-jh\bin\uevr\UEVRBackend.dll` (+ `.pdb`). Mopic Hub loads it from
 `%APPDATA%\MOPIC\mopichub\engines\mopic-uevr\<version>\UEVRBackend.dll`.
 
+The injector, `UEVRInjector.exe`, comes from mopiclabs/uevr-frontend (Dev Release builds its `main`), a fork of
+joeyhodge/uevr-frontend. Launched with `--attach=<game>` (Mopic Hub, the harness), it shows no window, skips its
+warning dialogs and exits with the game; `--show` keeps the window. Build it with
+`dotnet publish <uevr-frontend> --output <dir> --configuration Release` (.NET 6 target; a newer SDK builds it).
+
 ## Verification
 
 `tools\mopic-test\` has the test harness (`run-test.ps1`), the game pilot (`gamepilot.py`), recorded recipes and
