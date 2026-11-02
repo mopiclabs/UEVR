@@ -111,6 +111,10 @@ The injector, `UEVRInjector.exe`, comes from mopiclabs/uevr-frontend (Dev Releas
 joeyhodge/uevr-frontend. Launched with `--attach=<game>` (Mopic Hub, the harness), it shows no window, skips its
 warning dialogs and exits with the game; `--show` keeps the window. Build it with
 `dotnet publish <uevr-frontend> --output <dir> --configuration Release` (.NET 6 target; a newer SDK builds it).
+Dev Release uses the .NET 9 SDK: with the .NET 6 SDK it built a file of 0694ef3b that Microsoft Defender quarantines
+(`Behavior:Win32/DefenseEvasion.A!ml`, 2026-11-02, after one Hozy run on blade18). The other CI run of that code built
+a file Defender blocks too, while the .NET 9 SDK builds of the same code (local, hidden and visible) ran clean. Check
+a new injector file with a few harness runs and Defender's protection history before releasing it.
 
 ## Verification
 

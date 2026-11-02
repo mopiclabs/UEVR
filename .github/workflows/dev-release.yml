@@ -44,10 +44,13 @@ jobs:
           ref: main
           path: frontend
 
+      # Mopic: the .NET 6 SDK's injector of mopiclabs/uevr-frontend 0694ef3b is quarantined by Microsoft Defender
+      # (Behavior:Win32/DefenseEvasion.A!ml), and every run with that SDK built a file Defender blocks again. The
+      # .NET 9 SDK builds the same net6.0 target into another file.
       - name: Set up dotnet
         uses: actions/setup-dotnet@v1
         with:
-          dotnet-version: 6.0.x
+          dotnet-version: 9.0.x
 
       - name: Build frontend
         run: dotnet publish '${{github.workspace}}/frontend' --output '${{github.workspace}}/build/bin/${{matrix.target}}' --configuration Release
