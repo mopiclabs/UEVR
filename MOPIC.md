@@ -109,8 +109,8 @@ Output: `build-jh\bin\uevr\UEVRBackend.dll` (+ `.pdb`). Mopic Hub loads it from
 
 The injector, `UEVRInjector.exe`, comes from mopiclabs/uevr-frontend (Dev Release builds its `main`), a fork of
 joeyhodge/uevr-frontend. Launched with `--attach=<game>` (Mopic Hub, the harness), it creates no window at all: it
-injects with the settings its window saved, exits with the game, and gives up after 10 minutes without the game;
-`--show` opens the window instead. Build it with
+injects with the settings its window saved, shows no error boxes, exits with the game, and gives up after 30 minutes
+(awake) without the game; `--show` opens the window instead. Build it with
 `dotnet publish <uevr-frontend> --output <dir> --configuration Release` (.NET 6 target; a newer SDK builds it).
 Dev Release uses the .NET 9 SDK: with the .NET 6 SDK it built a file of 0694ef3b that Microsoft Defender quarantines
 (`Behavior:Win32/DefenseEvasion.A!ml`, 2026-11-02, after one Hozy run on blade18). The other CI run of that code built
