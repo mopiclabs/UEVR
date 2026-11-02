@@ -23225,6 +23225,13 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         // frame where both final eyes can originate from the primary view.
         if (capture_generation_ready) {
             const bool is_ue55_or_newer = is_ue_5_5_runtime() || is_ue_5_6_or_newer();
+            // Mopic: on UE5.5/5.6 the right eye renders in a view family of its own, where a SECONDARY view expects a
+            // PRIMARY view of the same family to have done the work the engine shares between the eyes. Hozy (UE5.6)
+            // lost the directional light's shadow in the right eye: its Attic came out washed white (L/R 13.6 %,
+            // 0.05 % relabeled PRIMARY). From UE5.7 on joeyhodge's behavior stays: 5.7 renders it in a family linked
+            // to the left eye's (use_ue57_linked_family_transaction), whose validation needs the SECONDARY identity
+            // (Dead as Disco fails closed without it); 5.8+ is untested.
+            const bool right_eye_renders_alone = is_ue55_or_newer && !is_ue_5_7_or_newer();
             const bool force_primary_constructor_pass = subnautica2_is_current_game();
             const bool hellblade_preserve_secondary_pass =
                 hellblade_is_current_game() &&
@@ -23242,6 +23249,7 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
                 swgr_preserve_secondary_pass ||
                 dune_preserve_secondary_pass ||
                 (is_ue55_or_newer &&
+                 !right_eye_renders_alone &&
                  vr->is_native_stereo_fix_preserve_secondary_pass_enabled() &&
                  !vr->should_force_native_stereo_fix_same_pass() &&
                  !force_primary_constructor_pass);
@@ -23259,6 +23267,9 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
                 if (force_primary_constructor_pass) {
                     SPDLOG_INFO_ONCE(
                         "[Subnautica2][NativeStereoFix] Using PRIMARY constructor pass with hidden view list");
+                } else if (right_eye_renders_alone && vr->is_native_stereo_fix_preserve_secondary_pass_enabled()) {
+                    SPDLOG_INFO_ONCE(
+                        "[NativeStereoFix] Relabeling the secondary eye as PRIMARY on UE5.5/5.6: the right eye renders in a family of its own");
                 } else {
                     SPDLOG_INFO_ONCE(
                         "[NativeStereoFix] Relabeling the secondary eye as PRIMARY using the legacy same-pass path");
