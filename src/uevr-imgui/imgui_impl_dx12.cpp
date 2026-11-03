@@ -286,6 +286,24 @@ void ImGui_ImplDX12_RenderDrawData(ImDrawData* draw_data, ID3D12GraphicsCommandL
     }
 }
 
+// UEVR: the font upload's command queue, allocator, list and fence, made once per device and reused by every upload
+// (both of the framework's backends, every font rebuild). They are never released. The upload runs on the thread
+// that presents, and under DLSS frame generation that is Streamline's own present thread: releasing a command queue
+// there stayed in the NVIDIA driver for good (Black Myth: Wukong with frame generation on, 2026-11-03: the render
+// thread waited on that present thread and UE ended the game after 120 s). Only used under the framework's ImGui
+// mutex.
+struct ImGui_ImplDX12_FontUploader
+{
+    ID3D12Device*               pd3dDevice;
+    ID3D12CommandQueue*         pQueue;
+    ID3D12CommandAllocator*     pAllocator;
+    ID3D12GraphicsCommandList*  pList;
+    ID3D12Fence*                pFence;
+    UINT64                      fenceValue;     // The last value signalled
+};
+
+static ImGui_ImplDX12_FontUploader g_fontUploader = {};
+
 static void ImGui_ImplDX12_CreateFontsTexture()
 {
     // Build texture atlas
@@ -374,55 +392,91 @@ static void ImGui_ImplDX12_CreateFontsTexture()
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-        ID3D12Fence* fence = nullptr;
-        hr = bd->pd3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
-        IM_ASSERT(SUCCEEDED(hr));
+        ImGui_ImplDX12_FontUploader& up = g_fontUploader;
+
+        // A new device gets objects of its own; the old device's are left as they are.
+        if (up.pd3dDevice != bd->pd3dDevice)
+        {
+            up = {};
+            up.pd3dDevice = bd->pd3dDevice;
+        }
+
+        // An upload that never completed (see the wait below) still owns the allocator and the list: leave them to it.
+        if (up.pAllocator != nullptr && (up.pFence == nullptr || up.pFence->GetCompletedValue() < up.fenceValue))
+        {
+            up.pAllocator = nullptr;
+            up.pList = nullptr;
+        }
+
+        if (up.pQueue == nullptr)
+        {
+            D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+            queueDesc.Type     = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            queueDesc.Flags    = D3D12_COMMAND_QUEUE_FLAG_NONE;
+            queueDesc.NodeMask = 1;
+
+            hr = bd->pd3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&up.pQueue));
+            IM_ASSERT(SUCCEEDED(hr));
+        }
+
+        if (up.pFence == nullptr)
+        {
+            hr = bd->pd3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&up.pFence));
+            IM_ASSERT(SUCCEEDED(hr));
+            up.fenceValue = 0;
+        }
+
+        // A list that doesn't reset still holds the last upload's commands and must not run again: new ones below.
+        if (up.pAllocator != nullptr && (FAILED(up.pAllocator->Reset()) || FAILED(up.pList->Reset(up.pAllocator, nullptr))))
+        {
+            up.pAllocator = nullptr;
+            up.pList = nullptr;
+        }
+
+        if (up.pAllocator == nullptr)
+        {
+            hr = bd->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&up.pAllocator));
+            IM_ASSERT(SUCCEEDED(hr));
+
+            hr = bd->pd3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, up.pAllocator, nullptr, IID_PPV_ARGS(&up.pList));
+            IM_ASSERT(SUCCEEDED(hr));
+        }
 
         HANDLE event = CreateEvent(0, 0, 0, 0);
         IM_ASSERT(event != nullptr);
 
-        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-        queueDesc.Type     = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        queueDesc.Flags    = D3D12_COMMAND_QUEUE_FLAG_NONE;
-        queueDesc.NodeMask = 1;
-
-        ID3D12CommandQueue* cmdQueue = nullptr;
-        hr = bd->pd3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&cmdQueue));
-        IM_ASSERT(SUCCEEDED(hr));
-
-        ID3D12CommandAllocator* cmdAlloc = nullptr;
-        hr = bd->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAlloc));
-        IM_ASSERT(SUCCEEDED(hr));
-
-        ID3D12GraphicsCommandList* cmdList = nullptr;
-        hr = bd->pd3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAlloc, nullptr, IID_PPV_ARGS(&cmdList));
-        IM_ASSERT(SUCCEEDED(hr));
-
+        ID3D12GraphicsCommandList* cmdList = up.pList;
         cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
         cmdList->ResourceBarrier(1, &barrier);
 
         hr = cmdList->Close();
         IM_ASSERT(SUCCEEDED(hr));
 
-        cmdQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmdList);
-        hr = cmdQueue->Signal(fence, 1);
-        IM_ASSERT(SUCCEEDED(hr));
+        if (SUCCEEDED(hr))
+        {
+            up.pQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmdList);
+            hr = up.pQueue->Signal(up.pFence, ++up.fenceValue);
+            IM_ASSERT(SUCCEEDED(hr));
+        }
+        else
+        {
+            // A list that failed to record is never run; the next upload makes new ones.
+            up.pAllocator = nullptr;
+            up.pList = nullptr;
+        }
 
-        fence->SetEventOnCompletion(1, event);
+        up.pFence->SetEventOnCompletion(up.fenceValue, event);
         // UEVR: never wait on the GPU for good here. This runs on the game's present thread with the framework's
         // mutexes held; when the GPU is paused (a fullscreen mode switch waiting on the game thread's message pump,
-        // a stalled compositor) an infinite wait deadlocks the game. After the timeout the upload objects are
-        // leaked (the copy is still in flight and lands whenever the GPU resumes) and the texture is used as is.
+        // a stalled compositor) an infinite wait deadlocks the game. After the timeout the upload buffer is leaked
+        // (the copy is still in flight and lands whenever the GPU resumes), the next upload leaves the allocator and
+        // the list to it, and the texture is used as is.
         const DWORD upload_wait = SUCCEEDED(hr) ? WaitForSingleObject(event, 2000) : WAIT_FAILED;
 
         if (upload_wait == WAIT_OBJECT_0) {
-            cmdList->Release();
-            cmdAlloc->Release();
-            cmdQueue->Release();
-            fence->Release();
             uploadBuffer->Release();
         } else {
-            OutputDebugStringA("[UEVR] ImGui DX12 font upload did not complete within 2 s; its command objects are left in flight\n");
+            OutputDebugStringA("[UEVR] ImGui DX12 font upload did not complete within 2 s; its upload buffer and command list are left in flight\n");
         }
         CloseHandle(event);
 
