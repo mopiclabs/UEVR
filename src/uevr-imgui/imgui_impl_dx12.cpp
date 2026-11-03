@@ -426,20 +426,19 @@ static void ImGui_ImplDX12_CreateFontsTexture()
             up.fenceValue = 0;
         }
 
+        // A list that doesn't reset still holds the last upload's commands and must not run again: new ones below.
+        if (up.pAllocator != nullptr && (FAILED(up.pAllocator->Reset()) || FAILED(up.pList->Reset(up.pAllocator, nullptr))))
+        {
+            up.pAllocator = nullptr;
+            up.pList = nullptr;
+        }
+
         if (up.pAllocator == nullptr)
         {
             hr = bd->pd3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&up.pAllocator));
             IM_ASSERT(SUCCEEDED(hr));
 
             hr = bd->pd3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, up.pAllocator, nullptr, IID_PPV_ARGS(&up.pList));
-            IM_ASSERT(SUCCEEDED(hr));
-        }
-        else
-        {
-            hr = up.pAllocator->Reset();
-            IM_ASSERT(SUCCEEDED(hr));
-
-            hr = up.pList->Reset(up.pAllocator, nullptr);
             IM_ASSERT(SUCCEEDED(hr));
         }
 
@@ -453,9 +452,18 @@ static void ImGui_ImplDX12_CreateFontsTexture()
         hr = cmdList->Close();
         IM_ASSERT(SUCCEEDED(hr));
 
-        up.pQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmdList);
-        hr = up.pQueue->Signal(up.pFence, ++up.fenceValue);
-        IM_ASSERT(SUCCEEDED(hr));
+        if (SUCCEEDED(hr))
+        {
+            up.pQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&cmdList);
+            hr = up.pQueue->Signal(up.pFence, ++up.fenceValue);
+            IM_ASSERT(SUCCEEDED(hr));
+        }
+        else
+        {
+            // A list that failed to record is never run; the next upload makes new ones.
+            up.pAllocator = nullptr;
+            up.pList = nullptr;
+        }
 
         up.pFence->SetEventOnCompletion(up.fenceValue, event);
         // UEVR: never wait on the GPU for good here. This runs on the game's present thread with the framework's
