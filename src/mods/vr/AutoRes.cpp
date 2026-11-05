@@ -164,6 +164,7 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
     }
 
     check_guards(openxr, cvars, inputs);
+    check_frame_bound(inputs);
 
     // The extension reports changes only: while the last edge's state lasts, its request is asked again once the last
     // step had time to show (5 s down, 10 s up; a level step also waits for the level interval). A runtime that keeps
@@ -245,6 +246,14 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_fps_window_start = {};
     m_vram_over_seconds = 0;
     m_sp_check.reset();
+    // Frame-bound is found again in each session: the runtime keeps nothing between them either.
+    m_tick_samples.clear();
+    m_frame_bound = ar::FrameBoundJudge{};
+    m_time_ratio.reset();
+    m_engine_frame_rate_seen = false;
+    m_gpu_hinted = false;
+    m_next_frame_bound_check = {};
+    m_next_frame_bound_log = {};
     m_active = true;
 
     SPDLOG_INFO("[autores] on{}: eye {}x{}, Base {}x{} (start {}), cap {} (runtime max {}x{}), up-steps {}, extension {}",
@@ -386,9 +395,11 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     // 2026-10-28), so only usage past it means the OS is already demoting memory.
     // For 5 s after a level change the old targets may not be released yet (UE deletes them a few frames later), so those
     // seconds don't count.
+    // Loading seconds don't count either: a load fills the pools past the budget for a moment (115-127 % at loads on an
+    // 8 GB 3080 laptop, 2026-11-04), which the level is not the cause of.
     m_vram_percent = query_vram_percent();
     const auto settling = m_last_level_change.time_since_epoch().count() != 0 && now - m_last_level_change < std::chrono::seconds{5};
-    m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f && !settling ? m_vram_over_seconds + 1 : 0;
+    m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f && !settling && !inputs.loading ? m_vram_over_seconds + 1 : 0;
     publish();
 
     const auto settled = !inputs.loading && now - m_activated_at > std::chrono::seconds{15} &&
@@ -468,8 +479,85 @@ void AutoResController::check_sp_step(CVarManager& cvars, const Inputs& inputs) 
     }
 }
 
-// Hints to the runtime (XR_EXT_performance_settings). GPU levels need UEVR's own GPU busy time, which it doesn't
-// measure yet; frame generation is sent as CPU BOOST (Mopic's design v1 draft: "FG on, freeze adjustments").
+// VR_AutoResFrameBoundDetect, once a second (AutoResPolicy.hpp FrameBoundJudge). The engine's own fixed frame rate is
+// bound at once (static); otherwise the game time against the wall time over the last 5 s (dynamic).
+void AutoResController::check_frame_bound(const Inputs& inputs) {
+    if (!inputs.frame_bound_detect) {
+        m_tick_samples.clear();
+        m_time_ratio.reset();
+        uevr::perf::set_autores_frame_bound(-1, -1);
+        return;
+    }
+
+    const auto now = clock::now();
+
+    if (now < m_next_frame_bound_check) {
+        return;
+    }
+
+    m_next_frame_bound_check = now + std::chrono::seconds{1};
+
+    if (inputs.engine_frame_rate != nullptr && !m_engine_frame_rate_seen) {
+        m_engine_frame_rate_seen = true;
+        const auto& engine = *inputs.engine_frame_rate;
+        const auto flag = [](const std::optional<bool>& value) { return value ? (*value ? "true" : "false") : "-"; };
+        const auto number = [](const std::optional<float>& value) { return value ? fmt::format("{:.1f}", *value) : std::string{"-"}; };
+        SPDLOG_INFO("[autores] engine: fixed={} {} smooth={} {}-{}", flag(engine.fixed), number(engine.fixed_fps),
+            flag(engine.smooth), number(engine.smooth_min), number(engine.smooth_max));
+
+        if (engine.fixed.value_or(false) && m_frame_bound.state != ar::FrameBound::bound) {
+            m_frame_bound.state = ar::FrameBound::bound;
+            SPDLOG_INFO("[autores] frame-bound: r=- fps={:.1f} static -> GPU BOOST", m_time_ratio_fps);
+        }
+    }
+
+    m_tick_samples.push_back(TickSample{.at = now, .delta_us = inputs.tick_delta_us, .real_us = inputs.tick_real_us,
+        .frames = uevr::perf::new_frames(), .loading = inputs.loading});
+
+    while (m_tick_samples.size() > 6) {
+        m_tick_samples.pop_front();
+    }
+
+    m_time_ratio.reset();
+    bool loading = false;
+
+    if (m_tick_samples.size() == 6) {
+        const auto& first = m_tick_samples.front();
+        const auto& last = m_tick_samples.back();
+        const auto real_us = last.real_us - first.real_us;
+        const auto seconds = std::chrono::duration<float>(last.at - first.at).count();
+
+        if (real_us > 0) {
+            m_time_ratio = (float)(last.delta_us - first.delta_us) / (float)real_us;
+        }
+
+        m_time_ratio_fps = seconds > 0.0f ? (float)(last.frames - first.frames) / seconds : 0.0f;
+
+        for (size_t i = 1; i < m_tick_samples.size(); ++i) {
+            loading = loading || m_tick_samples[i].loading;
+        }
+    }
+
+    if (m_frame_bound.update(m_time_ratio, m_time_ratio_fps, loading)) {
+        const auto bound = m_frame_bound.state == ar::FrameBound::bound;
+        SPDLOG_INFO("[autores] frame-bound: r={:.2f} fps={:.1f} dynamic -> {}", *m_time_ratio, m_time_ratio_fps,
+            bound ? "GPU BOOST" : "not bound, GPU SUSTAINED_HIGH");
+    }
+
+    if (now >= m_next_frame_bound_log) {
+        m_next_frame_bound_log = now + std::chrono::seconds{10};
+        SPDLOG_INFO("[autores] time ratio: r={} fps={:.1f}{} state={}", m_time_ratio ? fmt::format("{:.2f}", *m_time_ratio) : "-",
+            m_time_ratio_fps, loading ? " (loading)" : "",
+            m_frame_bound.state == ar::FrameBound::bound ? "bound" : m_frame_bound.state == ar::FrameBound::not_bound ? "not bound" : "unknown");
+    }
+
+    uevr::perf::set_autores_frame_bound(m_time_ratio ? (int32_t)(*m_time_ratio * 1000.0f + 0.5f) : -1, (int32_t)m_frame_bound.state);
+}
+
+// Hints to the runtime (XR_EXT_performance_settings, design v1 §3-2), once a second. GPU: BOOST when the game is
+// frame-bound (it needs 60), SUSTAINED_HIGH while the detector runs and has not found it; a runtime takes a session
+// without GPU hints for one without the detector, so they go every second. CPU: frame generation as BOOST ("FG on,
+// freeze adjustments").
 void AutoResController::send_hints(runtimes::OpenXR& openxr, const Inputs& inputs) {
     const auto now = clock::now();
 
@@ -478,6 +566,16 @@ void AutoResController::send_hints(runtimes::OpenXR& openxr, const Inputs& input
     }
 
     m_next_hint = now + std::chrono::seconds{1};
+
+    if (inputs.frame_bound_detect) {
+        const auto bound = m_frame_bound.state == ar::FrameBound::bound;
+
+        if (openxr.send_perf_settings_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
+                bound ? XR_PERF_SETTINGS_LEVEL_BOOST_EXT : XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT) && !m_gpu_hinted) {
+            SPDLOG_INFO("[autores] frame-bound detector on: hinting GPU {} once a second", bound ? "BOOST" : "SUSTAINED_HIGH");
+            m_gpu_hinted = true;
+        }
+    }
 
     if (inputs.frame_generation) {
         if (openxr.send_perf_settings_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_BOOST_EXT) &&

@@ -30,13 +30,16 @@ static void test_ladder() {
         ar::level_size(2, mopic) == ar::Size{1920, 2160} && ar::level_size(3, mopic) == ar::Size{2880, 2160} &&
         ar::level_size(4, mopic) == ar::Size{3840, 2160}, "on Mopic's eye the ladder is design v1's");
 
+    constexpr ar::Size min_start{1280, 1440};
+    expect(ar::level_size(2, min_start) == ar::Size{1920, 2160} && ar::level_size(3, min_start) == ar::Size{2880, 2160} &&
+        ar::level_size(4, min_start) == ar::Size{3840, 2160}, "on Mopic's display a session that starts at Min climbs the same table");
+    expect(ar::nearest_level(min_start, min_start) == ar::MIN_LEVEL, "a Min start is Min");
+
     constexpr ar::Size headset{2064, 2208};
-    expect(ar::level_size(0, headset) == ar::Size{1376, 1472} && ar::level_size(4, headset) == ar::Size{4128, 2208},
-        "another runtime's eye: the same ratios");
     expect(ar::level_size(0, headset, false) == ar::Size{1376, 1472} && ar::level_size(3, headset, false) == ar::Size{2522, 2698} &&
         ar::level_size(4, headset, false) == ar::Size{2924, 3128}, "other displays: uniform up-steps");
     expect(ar::highest_level_within(headset, ar::Size{2600, 2800}, false) == 3, "uniform levels are capped too");
-    expect(ar::level_size(1, ar::Size{1001, 1001}) == ar::Size{834, 834}, "sizes are even");
+    expect(ar::level_size(1, ar::Size{1001, 1001}, false) == ar::Size{834, 834}, "sizes are even");
 
     expect(ar::highest_level_within(mopic, ar::Size{3840, 2160}) == ar::MAX_LEVEL, "a max of 3840x2160 allows Max");
     expect(ar::highest_level_within(mopic, ar::Size{1920, 2160}) == ar::BASE_LEVEL, "a max of the eye itself stops at Base");
@@ -47,6 +50,47 @@ static void test_ladder() {
     expect(ar::nearest_level(ar::Size{960, 1080}, mopic) == ar::MIN_LEVEL, "below the ladder is Min");
     expect(ar::nearest_level(ar::Size{1536, 1728}, mopic) == 1, "a 0.8 slider is closest to Saver");
     expect(ar::nearest_level(ar::Size{2700, 2160}, mopic) == 3, "a wide eye is closest to Sharp");
+}
+
+static void test_frame_bound() {
+    ar::FrameBoundJudge judge{};
+    judge.update(0.5f, 30.0f, false);
+    judge.update(0.5f, 30.0f, false);
+    expect(judge.state == ar::FrameBound::unknown, "two slow seconds are not enough");
+    expect(judge.update(0.5f, 30.0f, false) && judge.state == ar::FrameBound::bound, "three slow seconds are bound");
+    expect(!judge.update(1.0f, 30.0f, false) && judge.state == ar::FrameBound::bound, "bound stays");
+
+    ar::FrameBoundJudge real{};
+    real.update(1.0f, 30.0f, false);
+    real.update(1.0f, 30.0f, false);
+    expect(real.update(0.99f, 30.0f, false) && real.state == ar::FrameBound::not_bound, "real time at 30 fps is not bound");
+
+    ar::FrameBoundJudge fast{};
+    for (int i = 0; i < 10; ++i) {
+        fast.update(0.5f, 60.0f, false);
+    }
+    expect(fast.state == ar::FrameBound::unknown, "at 60 fps nothing is judged");
+
+    ar::FrameBoundJudge loading{};
+    loading.update(0.5f, 30.0f, false);
+    loading.update(0.5f, 30.0f, true);
+    loading.update(0.5f, 30.0f, false);
+    loading.update(0.5f, 30.0f, false);
+    expect(loading.state == ar::FrameBound::unknown, "a load in between starts the count over");
+    expect(loading.update(0.5f, 30.0f, false) && loading.state == ar::FrameBound::bound, "then three in a row");
+
+    ar::FrameBoundJudge slow{};
+    for (int i = 0; i < 10; ++i) {
+        slow.update(0.5f, 18.0f, false);
+    }
+    expect(slow.state == ar::FrameBound::unknown, "under 22 fps nothing is judged");
+
+    ar::FrameBoundJudge between{};
+    between.update(0.5f, 40.0f, false);
+    between.update(0.85f, 40.0f, false);
+    between.update(0.5f, 40.0f, false);
+    between.update(0.5f, 40.0f, false);
+    expect(between.state == ar::FrameBound::unknown, "a second between the thresholds breaks the run");
 }
 
 static void test_edges() {
@@ -132,6 +176,7 @@ static void test_limits() {
 
 int main() {
     test_ladder();
+    test_frame_bound();
     test_edges();
     test_order();
     test_limits();

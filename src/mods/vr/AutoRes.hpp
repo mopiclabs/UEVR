@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <string>
 
@@ -14,6 +16,45 @@ class CVarManager;
 
 namespace runtimes {
 struct OpenXR;
+}
+
+namespace uevr::autores {
+// The engine's frame rate settings (UEngine's reflected properties), read once on the game thread. A property the
+// engine doesn't have stays empty.
+struct EngineFrameRate {
+    std::optional<bool> fixed{};      // bUseFixedFrameRate
+    std::optional<float> fixed_fps{}; // FixedFrameRate
+    std::optional<bool> smooth{};     // bSmoothFrameRate
+    std::optional<float> smooth_min{}, smooth_max{}; // SmoothedFrameRateRange's bounds, when bounded
+};
+
+// VR_AutoResFrameBoundDetect's clock (AutoResPolicy.hpp FrameBoundJudge): the game thread adds each engine tick's
+// DeltaSeconds and the wall time since the tick before; the present thread reads the sums once a second. A pair after a
+// gap over 250 ms (a stall or a load) is left out of both.
+class TickClock {
+public:
+    void on_tick(float delta) noexcept {
+        const auto now = std::chrono::steady_clock::now();
+        const auto gap = now - m_last;
+        const auto first = m_last.time_since_epoch().count() == 0;
+        m_last = now;
+
+        if (first || gap > std::chrono::milliseconds{250} || !(delta >= 0.0f) || delta > 0.25f) {
+            return;
+        }
+
+        m_delta_us.fetch_add((uint64_t)(delta * 1e6f), std::memory_order_relaxed);
+        m_real_us.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(gap).count(), std::memory_order_relaxed);
+    }
+
+    uint64_t delta_us() const noexcept { return m_delta_us.load(std::memory_order_relaxed); }
+    uint64_t real_us() const noexcept { return m_real_us.load(std::memory_order_relaxed); }
+
+private:
+    std::chrono::steady_clock::time_point m_last{}; // the game thread's only
+    std::atomic<uint64_t> m_delta_us{0};
+    std::atomic<uint64_t> m_real_us{0};
+};
 }
 
 // VR_AutoRes: automatic resolution on the present thread. After each consume_events it takes the runtime's
@@ -31,6 +72,10 @@ public:
         bool loading{false};            // the engine or the Presents stopped in the last seconds
         bool frame_generation{false};   // the game presents more often than its engine ticks
         bool level_possible{true};      // the eye size follows OpenXR (not the 2D screen or extreme compatibility mode)
+        bool frame_bound_detect{false}; // VR_AutoResFrameBoundDetect
+        uint64_t tick_delta_us{0};      // TickClock's sums
+        uint64_t tick_real_us{0};
+        const uevr::autores::EngineFrameRate* engine_frame_rate{nullptr}; // once the game thread has read it
     };
 
     void on_present(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
@@ -48,6 +93,7 @@ private:
     void step_down_now(runtimes::OpenXR& openxr, CVarManager& cvars, int count, const char* why);
     void check_guards(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
     void check_sp_step(CVarManager& cvars, const Inputs& inputs);
+    void check_frame_bound(const Inputs& inputs);
     void send_hints(runtimes::OpenXR& openxr, const Inputs& inputs);
     std::optional<float> query_vram_percent();
     void publish();
@@ -103,4 +149,19 @@ private:
     std::optional<SpCheck> m_sp_check{};
 
     bool m_frame_generation_hinted{false};
+
+    // VR_AutoResFrameBoundDetect: a second's sums, the last 6 for a 5 s window, and the judgement.
+    struct TickSample {
+        clock::time_point at{};
+        uint64_t delta_us{}, real_us{}, frames{};
+        bool loading{false};
+    };
+    std::deque<TickSample> m_tick_samples{};
+    uevr::autores::FrameBoundJudge m_frame_bound{};
+    std::optional<float> m_time_ratio{};
+    float m_time_ratio_fps{0.0f};
+    bool m_engine_frame_rate_seen{false};
+    bool m_gpu_hinted{false};
+    clock::time_point m_next_frame_bound_check{};
+    clock::time_point m_next_frame_bound_log{};
 };

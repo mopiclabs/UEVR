@@ -202,6 +202,9 @@ struct Counters {
     // and GPU memory in percent of the DXGI budget (-1: unknown).
     std::atomic<uint32_t> autores_event{}, autores_sp{100}, autores_upscaler{};
     std::atomic<int32_t> autores_level{-2}, autores_vram{-1};
+    // VR_AutoResFrameBoundDetect: game time / wall time over 5 s in thousandths (-1: none) and the judgement (0 unknown,
+    // 1 not bound, 2 bound; -1: off).
+    std::atomic<int32_t> autores_time_ratio{-1}, autores_bound{-1};
 };
 
 // Running totals copied into each per-frame record, so every perf-frames.csv row can say what happened since
@@ -224,6 +227,7 @@ struct FrameRecord {
     NativePair pair{NativePair::None};
     uint32_t autores_event{}, autores_sp{}, autores_upscaler{};
     int32_t autores_level{}, autores_vram{};
+    int32_t autores_time_ratio{}, autores_bound{};
     FrameTotals totals{};
 };
 
@@ -262,6 +266,12 @@ inline void set_autores(uint32_t event, uint32_t sp_percent, uint32_t upscaler_s
     g_counters.autores_upscaler.store(upscaler_steps, std::memory_order_relaxed);
     g_counters.autores_level.store(level, std::memory_order_relaxed);
     g_counters.autores_vram.store(vram_percent, std::memory_order_relaxed);
+}
+
+// The perf-frames.csv autores_time_ratio and autores_bound columns (VR_AutoResFrameBoundDetect).
+inline void set_autores_frame_bound(int32_t ratio_thousandths, int32_t bound) noexcept {
+    g_counters.autores_time_ratio.store(ratio_thousandths, std::memory_order_relaxed);
+    g_counters.autores_bound.store(bound, std::memory_order_relaxed);
 }
 
 inline void add(std::atomic<uint64_t>& counter, uint64_t value = 1) noexcept {
@@ -374,6 +384,8 @@ inline void note_xr_end(bool ok, bool projection, uint32_t frame, int64_t end_ti
     record.autores_upscaler = c.autores_upscaler.load(std::memory_order_relaxed);
     record.autores_level = c.autores_level.load(std::memory_order_relaxed);
     record.autores_vram = c.autores_vram.load(std::memory_order_relaxed);
+    record.autores_time_ratio = c.autores_time_ratio.load(std::memory_order_relaxed);
+    record.autores_bound = c.autores_bound.load(std::memory_order_relaxed);
 
     if (!ok) {
         record.kind = Submit::Failed;

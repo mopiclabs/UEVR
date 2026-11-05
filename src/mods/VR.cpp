@@ -1791,6 +1791,43 @@ sdk::FBoolProperty* get_bool_property_descriptor(sdk::UClass* klass, std::wstrin
     return nullptr;
 }
 
+// VR_AutoResFrameBoundDetect's static check (AutoRes.hpp): UEngine's frame rate settings, from its reflected properties.
+uevr::autores::EngineFrameRate read_engine_frame_rate(sdk::UGameEngine* engine) try {
+    uevr::autores::EngineFrameRate result{};
+    const auto klass = engine != nullptr ? engine->get_class() : nullptr;
+
+    if (klass == nullptr) {
+        return result;
+    }
+
+    if (const auto fixed = get_bool_property_descriptor(klass, L"bUseFixedFrameRate")) {
+        result.fixed = fixed->get_value_from_object(engine);
+    }
+
+    if (const auto fixed_fps = (const float*)engine->get_property_data(L"FixedFrameRate")) {
+        result.fixed_fps = *fixed_fps;
+    }
+
+    if (const auto smooth = get_bool_property_descriptor(klass, L"bSmoothFrameRate")) {
+        result.smooth = smooth->get_value_from_object(engine);
+    }
+
+    // FFloatRange: two TRangeBound<float> {uint8 Type (0 exclusive, 1 inclusive, 2 open), float Value}.
+    if (const auto range = (const uint8_t*)engine->get_property_data(L"SmoothedFrameRateRange")) {
+        if (range[0] != 2) {
+            result.smooth_min = *(const float*)(range + 4);
+        }
+
+        if (range[8] != 2) {
+            result.smooth_max = *(const float*)(range + 12);
+        }
+    }
+
+    return result;
+} catch (...) {
+    return {};
+}
+
 bool is_subnautica2_save_thumbnail_settings_class(sdk::UClass* klass) try {
     const auto thumbnails_enabled = get_bool_property_descriptor(klass, L"ThumbnailsEnabled");
     if (thumbnails_enabled == nullptr) {
@@ -4896,6 +4933,17 @@ void VR::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     const auto now = std::chrono::steady_clock::now();
     const auto previous_engine_tick = m_last_engine_tick.load(std::memory_order_relaxed);
     const bool hitch_diagnostics_enabled = m_enable_hitch_diagnostics->value();
+
+    // VR_AutoResFrameBoundDetect: the tick's game time against the wall time, and once the engine's frame rate settings.
+    if (m_autores->value() && m_autores_frame_bound_detect->value()) {
+        m_autores_tick_clock.on_tick(delta);
+
+        if (!m_autores_engine_frame_rate_read) {
+            m_autores_engine_frame_rate_read = true;
+            m_autores_engine_frame_rate = read_engine_frame_rate(engine);
+            m_autores_engine_frame_rate_ready.store(true, std::memory_order_release);
+        }
+    }
 
     m_cvar_manager->on_pre_engine_tick(engine, delta);
     if (!hitch_diagnostics_enabled) {
@@ -8745,6 +8793,10 @@ void VR::update_autores() {
         .loading = m_last_engine_stall.time_since_epoch().count() != 0 && now - m_last_engine_stall < std::chrono::seconds{3},
         .frame_generation = m_autores_frame_generation,
         .level_possible = !m_2d_screen_mode->value() && !m_extreme_compat_mode->value(),
+        .frame_bound_detect = m_autores_frame_bound_detect->value(),
+        .tick_delta_us = m_autores_tick_clock.delta_us(),
+        .tick_real_us = m_autores_tick_clock.real_us(),
+        .engine_frame_rate = m_autores_engine_frame_rate_ready.load(std::memory_order_acquire) ? &m_autores_engine_frame_rate : nullptr,
     });
 }
 
