@@ -1618,6 +1618,9 @@ private:
     // The synthetic edges start this long after automatic resolution starts (a test recipe still in the menus then would
     // lose its clicks to the steps).
     const ModInt32::Ptr m_autores_toggle_delay_seconds{ ModInt32::create(generate_name("AutoResToggleDelaySeconds"), 60, true) };
+    // With VR_AutoRes: find out whether the game's time runs with its frames (it would play in slow motion at 30 fps,
+    // TEKKEN 8) and hint the runtime once a second, GPU BOOST when it does and SUSTAINED_HIGH while it doesn't (AutoRes.hpp).
+    const ModToggle::Ptr m_autores_frame_bound_detect{ ModToggle::create(generate_name("AutoResFrameBoundDetect"), true, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -1994,6 +1997,7 @@ public:
             *m_autores_level_interval_seconds,
             *m_autores_toggle_seconds,
             *m_autores_toggle_delay_seconds,
+            *m_autores_frame_bound_detect,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,
@@ -2262,6 +2266,11 @@ private:
     uint32_t m_autores_engine_frames{0};
     int m_autores_last_frame_count{-1};
     bool m_autores_frame_generation{false};
+    // VR_AutoResFrameBoundDetect: the game thread's tick sums and the engine's frame rate settings (read once there).
+    uevr::autores::TickClock m_autores_tick_clock{};
+    uevr::autores::EngineFrameRate m_autores_engine_frame_rate{};
+    bool m_autores_engine_frame_rate_read{false}; // the game thread's only
+    std::atomic<bool> m_autores_engine_frame_rate_ready{false};
     int m_left_eye_frame_count{0};
     int m_right_eye_frame_count{0};
 

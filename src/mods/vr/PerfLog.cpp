@@ -54,7 +54,7 @@ constexpr std::string_view SUMMARY_HEADER =
 constexpr std::string_view FRAMES_HEADER =
     "qpc_ns,kind,frame,display_time,period_ns,end_us,wait_us,callsite,nsf,nsf_pair,flags,"
     "presents,dup_presents,present_us,ticks,ticks_skipped,tick_us,uevr_gt_us,uevr_rt_us,rt_blocked_us,"
-    "autores_event,sp_applied,upscaler_applied,level_applied,vram_pct\n";
+    "autores_event,sp_applied,upscaler_applied,level_applied,vram_pct,autores_time_ratio,autores_bound\n";
 
 // Shared with the frame paths, under g_frames_lock.
 SRWLOCK g_frames_lock = SRWLOCK_INIT;
@@ -360,7 +360,9 @@ void write_frame_rows(WriterState& w, size_t count) noexcept {
             .u(r.autores_sp).comma()
             .u(r.autores_upscaler).comma()
             .i(r.autores_level).comma()
-            .i(r.autores_vram)
+            .i(r.autores_vram).comma()
+            .f(r.autores_time_ratio < 0 ? -1.0 : r.autores_time_ratio / 1000.0).comma()
+            .i(r.autores_bound)
             .end_line();
         pos = row.pos();
         ++pending_rows;
