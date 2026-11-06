@@ -1696,6 +1696,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/OverlayComponent.hpp"
 	"src/mods/vr/PerfLog.hpp"
 	"src/mods/vr/RenderTargetPoolHook.hpp"
+	"src/mods/vr/RtSceneShare.hpp"
 	"src/mods/vr/SWZeroCompanyBinary.hpp"
 	"src/mods/vr/SatisfactoryModular.hpp"
 	"src/mods/vr/SatisfactoryRuntime.hpp"
