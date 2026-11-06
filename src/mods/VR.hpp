@@ -745,6 +745,20 @@ public:
         return m_native_stereo_fix_second_gdf_refresh_on_change_frames->value();
     }
 
+    // VR_ExperimentRightEyeRTShare (EXPERIMENT, default 0 = off; 1 = observe and validate, 2 = share once validated,
+    // 3 = share in even 10-second QPC windows): the Native Stereo Fix right eye's renderer borrows the ray tracing scene
+    // the left eye's renderer built in the same frame (see RtSceneShare.hpp).
+    int32_t get_experiment_right_eye_rt_share() const {
+        return m_experiment_right_eye_rt_share->value();
+    }
+
+    // VR_ExperimentRightEyeRTShareCullGather (EXPERIMENT, default off): in frames whose right eye borrows the left eye's
+    // scene (one decision per frame, see RtSceneShare.hpp), the right eye's own (unused) ray tracing instance gathering
+    // is culled (see uevr::rt_share::RightGatherCullHold).
+    bool is_experiment_right_eye_rt_share_cull_gather() const {
+        return m_experiment_right_eye_rt_share_cull_gather->value();
+    }
+
     bool is_native_stereo_fix_texture_array_submit_enabled() const {
         if (uevr::nascar::is_target()) { return false; }
         const auto runtime = get_runtime();
@@ -1768,6 +1782,8 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_second_lumen_surface_cache_freeze{ ModToggle::create(generate_name("NativeStereoFixSecondLumenSurfaceCacheFreeze"), true) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 15) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_on_change_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames"), 8) };
+    const ModInt32::Ptr m_experiment_right_eye_rt_share{ ModInt32::create(generate_name("ExperimentRightEyeRTShare"), 0) };
+    const ModToggle::Ptr m_experiment_right_eye_rt_share_cull_gather{ ModToggle::create(generate_name("ExperimentRightEyeRTShareCullGather"), false) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
     const ModToggle::Ptr m_stalker2_native_pair_experiment{ ModToggle::create(generate_name("Stalker2NativePairExperiment"), false) };
@@ -2110,6 +2126,8 @@ public:
             *m_native_stereo_fix_second_lumen_surface_cache_freeze,
             *m_native_stereo_fix_second_gdf_refresh_frames,
             *m_native_stereo_fix_second_gdf_refresh_on_change_frames,
+            *m_experiment_right_eye_rt_share,
+            *m_experiment_right_eye_rt_share_cull_gather,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
             *m_stalker2_native_pair_experiment,

@@ -127,6 +127,7 @@
 #include "../../utility/BuildIdentity.hpp"
 
 #include "FFakeStereoRenderingHook.hpp"
+#include "RtSceneShare.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
@@ -27416,6 +27417,13 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         gdf_change_signal::ensure_installed(reinterpret_cast<sdk::FSceneInterface*>(view_family_scene));
     }
 
+    // EXPERIMENT: VR_ExperimentRightEyeRTShare (see RtSceneShare.hpp). Both families' render targets identify them on
+    // the render thread.
+    if (const auto rt_share_mode = vr->get_experiment_right_eye_rt_share(); rt_share_mode != 0 && !use_hellblade_paired_renderer_transaction) {
+        uevr::rt_share::on_left_submission(rt_share_mode,
+            reinterpret_cast<uintptr_t>(view_family->get_render_target()), reinterpret_cast<uintptr_t>(rtfrt));
+    }
+
     {
         LumenViewOriginHold first_hold{hold_lumen_origin};
         call_original();
@@ -27635,6 +27643,8 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     }
 
     GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild};
+    uevr::rt_share::RightGatherCullHold second_rt_cull_hold{vr->is_experiment_right_eye_rt_share_cull_gather() &&
+        uevr::rt_share::right_eye_shares_this_frame()};
 
     const auto render_secondary_view = [&]() {
         if (uses_tarrayview) {
@@ -27650,6 +27660,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                 canvas,
                 view_family);
         }
+        uevr::rt_share::on_right_submitted();
     };
 
     bool daysgone_offscreen_contract_restored{true};
@@ -28796,6 +28807,7 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
     }
 
     const auto frame_count = *(uint32_t*)((uintptr_t)&view_family + SceneViewExtensionAnalyzer::frame_count_offset);
+    uevr::rt_share::on_family_render(frame_count, reinterpret_cast<uintptr_t>(view_family.get_render_target()));
     struct NativePreRenderKey {
         uint32_t frame{};
         uintptr_t family{};
