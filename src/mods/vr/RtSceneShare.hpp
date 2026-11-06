@@ -34,6 +34,7 @@
 #include <utility/Module.hpp>
 #include <utility/PointerHook.hpp>
 #include <utility/Scan.hpp>
+#include <utility/String.hpp>
 
 #include <sdk/CVar.hpp>
 #include <sdk/ConsoleManager.hpp>
@@ -85,11 +86,11 @@ struct State {
     // game thread -> render thread. The family's frame number is not set yet when the game thread submits it (the
     // renderer stamps its own copy), so submissions are counted instead: left_seq counts left submissions whose right
     // eye follows, right_seq the right submissions done; the render thread renders the left families in submission
-    // order and counts them in consumed_seq. Both families are recognized by their render targets.
+    // order and counts them in consumed_seq. Both families are recognized by their render targets, which each
+    // submission records in its ring slot: a render target recreated between submission and render (a resolution
+    // change) must not make the render thread miss a left family and fall a submission behind for good.
     std::atomic<uint64_t> left_seq{0};
     std::atomic<uint64_t> right_seq{0};
-    std::atomic<uintptr_t> left_target{};
-    std::atomic<uintptr_t> right_target{};
     uint64_t consumed_seq{0};    // render thread
     bool right_queued{};         // render thread: the current pair's right family was already submitted
 
@@ -98,9 +99,15 @@ struct State {
     // Deciding twice let them disagree for a frame or two after a violation, and then the right eye rendered its culled
     // (nearly empty) instance list without the left's scene.
     static constexpr size_t kIntentRing = 16;
-    std::atomic<uint8_t> intent[kIntentRing]{};  // by left_seq; written before left_seq is published
+    struct Submission {
+        std::atomic<uint8_t> intent{};
+        std::atomic<uintptr_t> left_target{};
+        std::atomic<uintptr_t> right_target{};
+    };
+    Submission ring[kIntentRing]{};              // by left_seq; written before left_seq is published
     std::atomic<bool> current_intent{false};     // game thread: decision of the latest left submission
     bool left_intent{};                          // render thread: decision of the pair being rendered
+    std::atomic<uint64_t> pair_resyncs{0};       // left families found further ahead than the next submission
 
     // RHI thread: the pipelines the left eye bound into its scene this frame (mode 1 compares the right's against them)
     std::vector<uintptr_t> last_left_pipelines{};
@@ -515,9 +522,6 @@ inline void on_left_submission(int32_t mode, uintptr_t left_target, uintptr_t ri
     if (mode == 0 || s.failed) {
         return;
     }
-    s.left_target = left_target;
-    s.right_target = right_target;
-
     bool intent = (Mode)mode == Mode::Share && s.validated;
     if ((Mode)mode == Mode::ShareAlternating && s.validated) {
         LARGE_INTEGER qpc{}, frequency{};
@@ -525,7 +529,10 @@ inline void on_left_submission(int32_t mode, uintptr_t left_target, uintptr_t ri
         QueryPerformanceFrequency(&frequency);
         intent = (qpc.QuadPart / frequency.QuadPart / 10) % 2 == 0;
     }
-    s.intent[(s.left_seq.load() + 1) % State::kIntentRing] = intent ? 1 : 0;
+    auto& slot = s.ring[(s.left_seq.load() + 1) % State::kIntentRing];
+    slot.intent = intent ? 1 : 0;
+    slot.left_target = left_target;
+    slot.right_target = right_target;
     s.current_intent = intent;
     ++s.left_seq;
 
@@ -575,10 +582,15 @@ inline void on_left_submission(int32_t mode, uintptr_t left_target, uintptr_t ri
             // RHIRayTraceDispatch also starts with the shader table lookup (scene, pipeline). Optional: without it the
             // right eye's frame with a pipeline the left did not use keeps empty hit groups.
             const auto dispatch_call = first_call(fn(slot0 + 8 * kDispatchSlotDelta));
-            const bool hook_dispatch_slot = dispatch_call && *dispatch_call == *miss_call;
+            bool hook_dispatch_slot = dispatch_call && *dispatch_call == *miss_call;
+            for (const auto slot : slots) {
+                if (fn(slot + 8 * kDispatchSlotDelta) != fn(slot0 + 8 * kDispatchSlotDelta)) {
+                    hook_dispatch_slot = false;   // optional: share without the redirect
+                }
+            }
 
             for (const auto slot : slots) {
-                for (const auto delta : {0, kClearSlotDelta, kSetHitGroupsSlotDelta, kSetHitGroupSlotDelta, kDispatchSlotDelta}) {
+                for (const auto delta : {0, kClearSlotDelta, kSetHitGroupsSlotDelta, kSetHitGroupSlotDelta}) {
                     if (fn(slot + 8 * delta) != fn(slot0 + 8 * delta)) {
                         SPDLOG_WARN("[RtShare] Context vtables {:x} and {:x} differ at +{}; off", slot0, slot, delta);
                         s.failed = true;
@@ -631,18 +643,37 @@ inline void on_family_render(uint32_t frame, uintptr_t target) {
     using namespace detail;
     auto& s = state();
     if (s.mode.load() == 0 || !s.create_hooked) {
+        // Turned off at run time: let go of a left scene still waiting for its right eye (its held clear is then
+        // done by the scene's destructor).
+        if (s.left_scene_ref) {
+            drop_ref(s.left_scene);
+        }
+        s.left_scene = 0;
+        s.left_scene_ref = false;
         s.role = Role::None;
         return;
     }
     Role role = Role::None;
-    if (target != 0 && target == s.right_target.load()) {
+    const uint64_t newest = s.left_seq.load();
+    if (target == 0) {
+    } else if (s.consumed_seq > 0 && target == s.ring[s.consumed_seq % State::kIntentRing].right_target.load()) {
         role = Role::Right;
-    } else if (target != 0 && target == s.left_target.load() && s.consumed_seq < s.left_seq.load()) {
-        // The next left submission in order; its right eye is already queued when right_seq has reached it.
-        role = Role::Left;
-        ++s.consumed_seq;
-        s.right_queued = s.right_seq.load() >= s.consumed_seq;
-        s.left_intent = s.intent[s.consumed_seq % State::kIntentRing].load() != 0;
+    } else {
+        // The next left submission in order (or, if a left family was missed, a later one within the ring); its right
+        // eye is already queued when right_seq has reached it.
+        for (uint64_t seq = s.consumed_seq + 1; seq <= newest && seq < s.consumed_seq + State::kIntentRing; ++seq) {
+            const auto& slot = s.ring[seq % State::kIntentRing];
+            if (target == slot.left_target.load()) {
+                if (seq != s.consumed_seq + 1) {
+                    ++s.pair_resyncs;
+                }
+                role = Role::Left;
+                s.consumed_seq = seq;
+                s.right_queued = s.right_seq.load() >= seq;
+                s.left_intent = slot.intent.load() != 0;
+                break;
+            }
+        }
     }
     if (role == Role::Left && s.last_pair_frame != frame) {
         close_pair();
@@ -719,11 +750,12 @@ inline void maybe_log() {
     }
     SPDLOG_INFO("[RtShare] mode {} validated {} pairs {} bad {} shared {} | builds skipped {} clears held {} hit-group batches skipped {} "
         "single skipped {} (calls {}) | pipeline mismatch {} (in shared frames {}) instance mismatch {} right without stash {} "
-        "stale refs {} intended but not shared {} | right dispatches moved to the left's pipeline {} unmatched {}",
+        "stale refs {} intended but not shared {} pair resyncs {} | right dispatches moved to the left's pipeline {} unmatched {}",
         s.mode.load(), s.validated.load(), s.pairs.load(), s.bad_pairs.load(), s.shared_frames.load(), s.builds_skipped.load(),
         s.clears_held.load(), s.hit_groups_skipped.load(), s.hit_group_skipped.load(), s.set_hit_group_calls.load(),
         s.pipeline_mismatch.load(), s.pipeline_mismatch_shared.load(), s.instance_mismatch.load(), s.right_without_stash.load(),
-        s.stale_refs.load(), s.intended_not_shared.load(), s.dispatch_redirected.load(), s.dispatch_unmatched.load());
+        s.stale_refs.load(), s.intended_not_shared.load(), s.pair_resyncs.load(), s.dispatch_redirected.load(),
+        s.dispatch_unmatched.load());
 }
 }  // namespace detail
 
@@ -777,11 +809,26 @@ private:
         if (auto it = cache.find(name); it != cache.end()) {
             return it->second;
         }
+        const auto console_manager = sdk::FConsoleManager::get();
+        if (console_manager == nullptr) {
+            return nullptr;   // not cached: look again next time
+        }
         sdk::IConsoleVariable* cvar{};
-        if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
-            auto* object = console_manager->find(name);
-            if (object != nullptr && object->AsCommand() == nullptr) {
-                cvar = static_cast<sdk::IConsoleVariable*>(object);
+        auto* object = console_manager->find(name);
+        if (object != nullptr && object->AsCommand() == nullptr) {
+            cvar = static_cast<sdk::IConsoleVariable*>(object);
+            // Held on the game thread around the right submission: only a render-thread-safe cvar (the render thread
+            // gets the value in order with that family's render) applies to that render alone. Otherwise the render
+            // thread reads the live value whenever it runs, which could be during the left eye's render (the scene
+            // the right eye borrows). FConsoleVariableBase: vtable, FString Help, EConsoleVariableFlags at +0x18
+            // (UE 4.26-5.x); ECVF_RenderThreadSafe = 0x20.
+            const auto flags_at = (const uint32_t*)((uintptr_t)cvar + 0x18);
+            const bool flags_ok = detail::readable(flags_at, 4);
+            const uint32_t flags = flags_ok ? *flags_at : 0u;
+            if (!flags_ok || (flags & 0x20) == 0) {
+                SPDLOG_WARN("[RtShare] {} is not render-thread safe (flags {:x}); the right eye's gathering is not culled with it",
+                    utility::narrow(std::wstring{name}), flags);
+                cvar = nullptr;
             }
         }
         cache[name] = cvar;
@@ -801,7 +848,12 @@ private:
             if (!before) {
                 return;
             }
-            const auto text = *before == std::floor(*before) ? std::to_wstring((int64_t)*before) : std::to_wstring(*before);
+            wchar_t text[64]{};
+            if (*before == std::floor(*before) && std::fabs(*before) < 1e15) {
+                swprintf_s(text, L"%lld", (long long)*before);
+            } else {
+                swprintf_s(text, L"%.9g", (double)*before);   // a float round-trips in 9 significant digits
+            }
             if (cvar->Set(value)) {
                 m_held.emplace_back(cvar, text);
             }

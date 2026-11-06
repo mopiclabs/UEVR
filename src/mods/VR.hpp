@@ -752,8 +752,9 @@ public:
         return m_experiment_right_eye_rt_share->value();
     }
 
-    // VR_ExperimentRightEyeRTShareCullGather (EXPERIMENT, default off): while the share is validated, the right eye's own
-    // (unused) ray tracing instance gathering is culled (see uevr::rt_share::RightGatherCullHold).
+    // VR_ExperimentRightEyeRTShareCullGather (EXPERIMENT, default off): in frames whose right eye borrows the left eye's
+    // scene (one decision per frame, see RtSceneShare.hpp), the right eye's own (unused) ray tracing instance gathering
+    // is culled (see uevr::rt_share::RightGatherCullHold).
     bool is_experiment_right_eye_rt_share_cull_gather() const {
         return m_experiment_right_eye_rt_share_cull_gather->value();
     }
