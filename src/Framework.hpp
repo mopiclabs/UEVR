@@ -333,6 +333,8 @@ private:
     // UI
     bool m_has_frame{false};
     std::atomic<uint64_t> m_d3d12_ui_generation{0};
+    bool m_d3d12_ui_target_idle{false};        // the last D3D12 UI pass drew nothing (its target is clear)
+    uint64_t m_d3d12_ui_passes_skipped{0};
     bool m_wants_device_object_cleanup{false};
     bool m_draw_ui{true};
     bool m_last_draw_ui{m_draw_ui};
