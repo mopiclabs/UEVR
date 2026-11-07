@@ -179,6 +179,10 @@ public:
     void refresh_frame_controller_types();
     XrPath frame_interaction_profile_path{XR_NULL_PATH};
     std::chrono::steady_clock::time_point last_frame_controller_refresh{};
+    // update_input: since when neither hand has an interaction profile (no controller), and the last sync while so
+    std::optional<std::chrono::steady_clock::time_point> input_idle_since{};
+    std::chrono::steady_clock::time_point last_idle_input_sync{};
+    std::atomic<bool> input_hands_idle{false};   // no controller for 2 s: update_poses skips the hand spaces
     int frame_binding_editor_hand{};
 
     std::optional<std::string> initialize_actions(const std::string& json_string);
