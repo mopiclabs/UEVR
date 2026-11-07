@@ -1665,7 +1665,9 @@ VRRuntime::Error OpenXR::update_poses(bool from_view_extensions, uint32_t frame_
         pipeline_state.coherent_matches_render = pipeline_state.coherent_complete;
     }
 
-    for (auto i = 0; i < this->hands.size(); ++i) {
+    // No controller (see update_input): the hand spaces have nothing to locate, skip their 4 xrLocateSpace calls.
+    const auto located_hands = this->input_hands_idle.load(std::memory_order_relaxed) ? 0 : this->hands.size();
+    for (auto i = 0; i < located_hands; ++i) {
         auto& hand = this->hands[i];
         hand.aim_location.next = &hand.aim_velocity;
         result = xrLocateSpace(hand.aim_space, this->stage_space, display_time, &hand.aim_location);
@@ -2171,7 +2173,20 @@ VRRuntime::Error OpenXR::update_input() {
 
     if (!this->ready() || this->session_state != XR_SESSION_STATE_FOCUSED) {
         this->frame_controller_profiles.invalidate();
+        this->input_idle_since.reset();
+        this->input_hands_idle = false;
         return (VRRuntime::Error)XR_ERROR_SESSION_NOT_READY;
+    }
+
+    // No controller on either hand for 2 s (a display like Mopic's has none; its runtime refuses every controller
+    // binding): sync at most every 250 ms instead of every frame, which cost 0.05-0.09 ms of the game thread per frame
+    // (xrSyncActions and the action reads, ETW 2026-11-07, six games). The action states stay as last synced (nothing is
+    // bound), and a controller that appears is picked up within 250 ms, after which input is synced every frame again.
+    const auto input_now = std::chrono::steady_clock::now();
+    if (this->input_idle_since.has_value() && input_now - *this->input_idle_since > std::chrono::seconds{2} &&
+        input_now - this->last_idle_input_sync < std::chrono::milliseconds{250})
+    {
+        return VRRuntime::Error::SUCCESS;
     }
 
     XrActiveActionSet active_action_set{this->action_set.handle, XR_NULL_PATH};
@@ -2189,6 +2204,22 @@ VRRuntime::Error OpenXR::update_input() {
     }
 
     refresh_frame_controller_types();
+
+    if (this->get_current_interaction_profile_path(VRRuntime::Hand::LEFT) == XR_NULL_PATH &&
+        this->get_current_interaction_profile_path(VRRuntime::Hand::RIGHT) == XR_NULL_PATH)
+    {
+        if (!this->input_idle_since.has_value()) {
+            this->input_idle_since = input_now;
+        } else if (input_now - *this->input_idle_since > std::chrono::seconds{2}) {
+            SPDLOG_INFO_ONCE("[VR] No controller interaction profile for 2 s: syncing OpenXR input every 250 ms until one appears");
+            this->input_hands_idle = true;
+        }
+        this->last_idle_input_sync = input_now;
+    } else {
+        this->input_idle_since.reset();
+        this->input_hands_idle = false;
+    }
+
     const auto current_interaction_profile = this->get_current_interaction_profile();
 
     for (auto i = 0; i < 2; ++i) {

@@ -39,7 +39,12 @@ public:
 
     void on_post_render_vr_framework_dx11(ID3D11DeviceContext* context, ID3D11Texture2D*, ID3D11RenderTargetView* rtv) override;
     void on_post_render_vr_framework_dx12(ID3D12GraphicsCommandList* command_list, ID3D12Resource* rt, D3D12_CPU_DESCRIPTOR_HANDLE* rtv) override;
-    
+    // Whether a plugin draws into the framework UI target (Framework::on_frame_d3d12 may skip an empty UI pass otherwise).
+    bool has_post_render_vr_framework_dx12_callbacks() {
+        std::shared_lock _{m_api_cb_mtx};
+        return !m_on_post_render_vr_framework_dx12_cbs.empty();
+    }
+
     void on_pre_engine_tick(sdk::UGameEngine* engine, float delta) override;
     void on_post_engine_tick(sdk::UGameEngine* engine, float delta) override;
     void on_pre_slate_draw_window(void* renderer, void* command_list, sdk::FViewportInfo* viewport_info) override;
