@@ -37818,10 +37818,16 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
     // runs of the test harness, none ever matched). On UE4 they stop after the first 120 calls if none matched.
     static std::atomic<uint32_t> ue55_probe_calls{0};
     static std::atomic<bool> ue55_probe_matched{false};
-    const bool probe_ue55 = !is_ue4_executable() || ue55_probe_matched.load(std::memory_order_relaxed) ||
-        ue55_probe_calls.fetch_add(1, std::memory_order_relaxed) < 120;
-    if (!probe_ue55) {
-        SPDLOG_INFO_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] UE4 executable: no UE 5.5 input layout in 120 calls; not probing it any more");
+    static std::atomic<bool> ue55_probe_stopped{false};
+    bool probe_ue55 = true;
+    if (is_ue4_executable() && !ue55_probe_matched.load(std::memory_order_relaxed)) {
+        if (ue55_probe_stopped.load(std::memory_order_relaxed)) {
+            probe_ue55 = false;
+        } else if (ue55_probe_calls.fetch_add(1, std::memory_order_relaxed) >= 120) {
+            ue55_probe_stopped.store(true, std::memory_order_relaxed);
+            probe_ue55 = false;
+            SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] UE4 executable: no UE 5.5 input layout in 120 calls; not probing it any more");
+        }
     }
 
     bool a4_is_ue_5_5_variant = probe_ue55 && try_read_ue55_slate_draw_inputs(a4, renderer, ue55_inputs);
