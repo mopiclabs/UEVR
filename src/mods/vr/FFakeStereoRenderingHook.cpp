@@ -152,6 +152,7 @@ static_assert(static_cast<int32_t>(VR::ALTERNATING) ==
 namespace {
 bool is_writable_process_range(uintptr_t address, size_t size);
 bool is_readable_process_range(uintptr_t address, size_t size);
+bool is_readable_and_writable_process_range(uintptr_t address, size_t read_size, size_t write_size);
 bool is_executable_process_range(uintptr_t address, size_t size);
 bool halloween_ue574_dx12_runtime();
 bool looks_like_vtable_object(void* object);
@@ -5546,14 +5547,19 @@ bool is_ue_5_7_runtime() {
 }
 
 bool is_ue_5_8() {
-    static const auto disk_version = sdk::get_file_version_info();
-    static const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+    // Cached: IsStereoEnabled asks on every call, and Black Myth: Wukong's worker threads call that ~5000 times a
+    // frame (the string compare was 0.025 ms of CPU per frame, ETW 2026-11-07).
+    static const bool result = []() {
+        const auto disk_version = sdk::get_file_version_info();
+        const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
 
-    if (str_version != "0.00") {
-        return str_version.starts_with("5.8");
-    }
+        if (str_version != "0.00") {
+            return str_version.starts_with("5.8");
+        }
 
-    return disk_version.dwFileVersionMS == 0x50008;
+        return disk_version.dwFileVersionMS == 0x50008;
+    }();
+    return result;
 }
 
 bool farfarwest_ue581_view_extension_layout_is_current_game() {
@@ -5684,6 +5690,21 @@ bool is_ue_5_4_dx_backend() {
     }
 
     return is_ue_5_4_runtime();
+}
+
+// A UE4 executable: the version string found in the binary says 4.x, or none is found and the file version is
+// 4.0-4.27 (a game's own exe version could be anything, so callers only use this to stop work that has also not
+// paid off at run time).
+bool is_ue4_executable() {
+    static const bool result = []() {
+        const auto found = sdk::search_for_version(utility::get_executable()).value_or(L"0.00");
+        if (found != L"0.00" && !found.empty()) {
+            return found.starts_with(L"4.");
+        }
+        const auto disk_version = sdk::get_file_version_info();
+        return HIWORD(disk_version.dwFileVersionMS) == 4 && LOWORD(disk_version.dwFileVersionMS) <= 27;
+    }();
+    return result;
 }
 
 bool is_ue_5_5_runtime() {
@@ -9427,6 +9448,41 @@ bool is_readable_process_range(uintptr_t address, size_t size) {
            protect == PAGE_EXECUTE_WRITECOPY;
 }
 
+// is_readable_process_range(address, read_size) && is_writable_process_range(address, write_size) with one
+// VirtualQuery instead of two: both ask about the same allocation, and VirtualQuery is a system call that took
+// ~0.05 ms per frame on Hogwarts Legacy's render thread for this pair alone (ETW, 2026-11-07).
+bool is_readable_and_writable_process_range(uintptr_t address, size_t read_size, size_t write_size) {
+    const auto size = std::max(read_size, write_size);
+    if (address == 0 || read_size == 0 || write_size == 0 || address + size < address) {
+        return false;
+    }
+
+    if (const auto section = find_module_section(address, size); section.has_value()) {
+        return section->write;   // every section of a loaded module is readable
+    }
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery((void*)address, &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+
+    const auto base = (uintptr_t)mbi.BaseAddress;
+    if (address + size > base + mbi.RegionSize) {
+        return false;
+    }
+
+    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+
+    // the writable protections are all readable too
+    const auto protect = mbi.Protect & 0xff;
+    return protect == PAGE_READWRITE ||
+           protect == PAGE_WRITECOPY ||
+           protect == PAGE_EXECUTE_READWRITE ||
+           protect == PAGE_EXECUTE_WRITECOPY;
+}
+
 bool is_executable_process_range(uintptr_t address, size_t size) {
     if (address == 0 || size == 0 || address + size < address) {
         return false;
@@ -9485,9 +9541,7 @@ bool is_probable_new_rhi_command(sdk::FRHICommandBase_New* command, const char*&
         return false;
     }
 
-    if (!is_readable_process_range(address, sizeof(*command)) ||
-        !is_writable_process_range(address, sizeof(void*)))
-    {
+    if (!is_readable_and_writable_process_range(address, sizeof(*command), sizeof(void*))) {
         reason = "unreadable or non-writable command";
         return false;
     }
@@ -11653,7 +11707,9 @@ struct GhostingFixOwnerCandidate {
 };
 
 bool ghosting_is_valid_scene_state(sdk::FSceneViewStateInterface* state) {
-    if (state == nullptr || !is_readable_process_range((uintptr_t)state, sizeof(uintptr_t))) {
+    // safe_read_value checks the range itself (a second VirtualQuery of the same pointer here cost ~0.06 ms per
+    // frame on Hogwarts Legacy's game thread)
+    if (state == nullptr) {
         return false;
     }
 
@@ -30727,7 +30783,7 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
     // Bodycam's derived viewport installs the stock Draw dispatch hook but never
     // reaches it. Treating installation alone as proof leaves stereo disabled,
     // so InitRHI cannot retrieve our render-target manager.
-    const bool draw_observation_required =
+    static const bool draw_observation_required =
         is_ue_5_8() || bodycam_ue554_is_current_game();
     const bool has_usable_game_viewport_draw =
         hook->m_has_game_viewport_client_draw_hook &&
@@ -37757,18 +37813,33 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
         return ret;
     }
 
-    bool a4_is_ue_5_5_variant = try_read_ue55_slate_draw_inputs(a4, renderer, ue55_inputs);
+    // The UE 5.5+ FSlateDrawWindowPassInputs probes below cost two VirtualQuery calls per call of this hook (0.26 ms
+    // per frame on Hogwarts Legacy's render thread, ETW 2026-11-07) and can't match on a UE4 executable (781 UE4
+    // runs of the test harness, none ever matched). On UE4 they stop after the first 120 calls if none matched.
+    static std::atomic<uint32_t> ue55_probe_calls{0};
+    static std::atomic<bool> ue55_probe_matched{false};
+    const bool probe_ue55 = !is_ue4_executable() || ue55_probe_matched.load(std::memory_order_relaxed) ||
+        ue55_probe_calls.fetch_add(1, std::memory_order_relaxed) < 120;
+    if (!probe_ue55) {
+        SPDLOG_INFO_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] UE4 executable: no UE 5.5 input layout in 120 calls; not probing it any more");
+    }
+
+    bool a4_is_ue_5_5_variant = probe_ue55 && try_read_ue55_slate_draw_inputs(a4, renderer, ue55_inputs);
     bool a4_has_ue_5_5_full_inputs = a4_is_ue_5_5_variant && try_read_ue55_slate_draw_inputs_full(a4, renderer, ue55_inputs_full);
     bool ue55_inputs_are_from_windows_array = false;
     void* ue55_draw_window_outputs_ptr = a2;
 
-    if (!a4_is_ue_5_5_variant && try_read_ue55_slate_draw_inputs(a4, a2, ue55_inputs)) {
+    if (!a4_is_ue_5_5_variant && probe_ue55 && try_read_ue55_slate_draw_inputs(a4, a2, ue55_inputs)) {
         // Some UE5.5 builds return FSlateDrawWindowPassOutputs by hidden sret
         // pointer, so RCX is the output struct and RDX is the renderer.
         a4_is_ue_5_5_variant = true;
         a4_has_ue_5_5_full_inputs = try_read_ue55_slate_draw_inputs_full(a4, a2, ue55_inputs_full);
         ue55_draw_window_outputs_ptr = renderer;
         SPDLOG_INFO_ONCE("[SlateRHIRenderer::DrawWindow_RenderThread] Using UE 5.5 sret FSlateDrawWindowPassInputs layout");
+    }
+
+    if (a4_is_ue_5_5_variant) {
+        ue55_probe_matched.store(true, std::memory_order_relaxed);
     }
 
     const bool use_ue55_draw_windows_array_layout =
