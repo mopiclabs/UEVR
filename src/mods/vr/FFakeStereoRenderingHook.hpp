@@ -1849,6 +1849,9 @@ private:
     bool m_has_view_extension_hook{false};
     bool m_has_game_viewport_client_draw_hook{false};
     std::atomic_bool m_game_viewport_client_draw_observed{false};
+    // IsStereoEnabled off the game thread: set while the game thread's last call found nothing title-specific and a
+    // usable Draw hook, so those calls only return the game thread's last answer (is_stereo_enabled).
+    std::atomic_bool m_stereo_enabled_off_thread_fast{false};
     std::atomic_bool m_bodycam_scene_target_rebuild_requested{false};
     bool m_attempted_hook_bodycam_scene_viewport_init_rhi{false};
     bool m_attempted_hook_bodycam_update_pre_exposure{false};

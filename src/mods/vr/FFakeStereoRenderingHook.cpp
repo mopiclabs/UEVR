@@ -9385,6 +9385,61 @@ std::optional<ModuleSectionRange> find_module_section(uintptr_t address, size_t 
     return std::nullopt;
 }
 
+// Heap objects: VirtualQuery reports RegionSize, and to find it the kernel walks forward over every page that shares
+// the queried page's attributes, which is long in a large committed heap region. On Hogwarts Legacy these checks
+// still took ~0.29 ms per frame on the game and render threads after the module-section cache (ETW, 2026-11-07).
+// QueryWorkingSetEx reads only the entries of the pages asked about. A resident (valid) page is committed and
+// accessible with the protection it reports, so a range on at most two resident pages whose protection allows the
+// access is answered here. false means "not known here": a page that is paged out or never touched, a guard or
+// no-access page, a protection that does not allow the access, a longer range or a failed query - the caller then
+// asks VirtualQuery as before.
+bool resident_pages_allow(uintptr_t address, size_t size, bool write) {
+    constexpr uintptr_t PAGE_SIZE_4K = 0x1000;
+    const auto first_page = address & ~(PAGE_SIZE_4K - 1);
+    const auto last_page = (address + size - 1) & ~(PAGE_SIZE_4K - 1);
+    if (last_page - first_page > PAGE_SIZE_4K) {
+        return false;
+    }
+
+    PSAPI_WORKING_SET_EX_INFORMATION pages[2]{};
+    const DWORD count = first_page == last_page ? 1 : 2;
+    pages[0].VirtualAddress = reinterpret_cast<void*>(first_page);
+    pages[1].VirtualAddress = reinterpret_cast<void*>(last_page);
+    if (!K32QueryWorkingSetEx(GetCurrentProcess(), pages, count * (DWORD)sizeof(pages[0]))) {
+        return false;
+    }
+
+    for (DWORD i = 0; i < count; ++i) {
+        const auto& attributes = pages[i].VirtualAttributes;
+        if (!attributes.Valid) {
+            return false;
+        }
+
+        const auto protection = (DWORD)attributes.Win32Protection;
+        if ((protection & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+            return false;
+        }
+
+        switch (protection & 0xff) {
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            break;
+        case PAGE_READONLY:
+        case PAGE_EXECUTE_READ:
+            if (write) {
+                return false;
+            }
+            break;
+        default:
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool is_writable_process_range(uintptr_t address, size_t size) {
     if (address == 0 || size == 0 || address + size < address) {
         return false;
@@ -9392,6 +9447,10 @@ bool is_writable_process_range(uintptr_t address, size_t size) {
 
     if (const auto section = find_module_section(address, size); section.has_value()) {
         return section->write;
+    }
+
+    if (resident_pages_allow(address, size, true)) {
+        return true;
     }
 
     MEMORY_BASIC_INFORMATION mbi{};
@@ -9422,6 +9481,10 @@ bool is_readable_process_range(uintptr_t address, size_t size) {
 
     // every PE section of a loaded module is readable
     if (find_module_section(address, size).has_value()) {
+        return true;
+    }
+
+    if (resident_pages_allow(address, size, false)) {
         return true;
     }
 
@@ -9459,6 +9522,10 @@ bool is_readable_and_writable_process_range(uintptr_t address, size_t read_size,
 
     if (const auto section = find_module_section(address, size); section.has_value()) {
         return section->write;   // every section of a loaded module is readable
+    }
+
+    if (resident_pages_allow(address, size, true)) {
+        return true;
     }
 
     MEMORY_BASIC_INFORMATION mbi{};
@@ -30706,7 +30773,39 @@ bool FFakeStereoRenderingHook::attempt_runtime_inject_stereo() {
     return true;
 }
 
+namespace {
+// GameThreadWorker::get() checks its function-local static's guard on every call; is_stereo_enabled asks per call.
+GameThreadWorker& g_stereo_game_thread_worker = GameThreadWorker::get();
+}
+
 bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
+    static std::atomic<bool> last_state = false;
+    auto hook = g_hook;
+
+    // Black Myth: Wukong's task-graph workers call this ~5000 times a frame, and a full pass over the checks below
+    // cost ~25 ns each time (~0.15 ms of worker CPU a frame, ETW 2026-11-07). Off the game thread, while the game
+    // thread's last call found nothing title-specific and a usable Draw hook, those checks only lead to
+    // `return last_state`, so return it directly.
+    const bool on_game_thread = g_stereo_game_thread_worker.is_same_thread();
+    if (!on_game_thread && hook->m_stereo_enabled_off_thread_fast.load(std::memory_order_acquire) &&
+        !hook->m_sceneview_data.inside_post_init_properties)
+    {
+        return last_state;
+    }
+
+    // Every game-thread call republishes that: it holds only if this call reaches the Draw-hook branch below.
+    bool off_thread_fast = false;
+    struct PublishOffThreadFast {
+        FFakeStereoRenderingHook* hook;
+        const bool& value;
+        bool on_game_thread;
+        ~PublishOffThreadFast() {
+            if (on_game_thread && hook->m_stereo_enabled_off_thread_fast.load(std::memory_order_relaxed) != value) {
+                hook->m_stereo_enabled_off_thread_fast.store(value, std::memory_order_release);
+            }
+        }
+    } publish_off_thread_fast{hook, off_thread_fast, on_game_thread};
+
     if (uevr::nascar::is_target() &&
         (!g_hook->m_nascar_ready.load(std::memory_order_acquire) || !VR::get()->is_nascar_code_preserving_mode() ||
          (VR::get()->is_using_strict_synchronized_afr() &&
@@ -30771,9 +30870,6 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
         return false;
     }*/
 
-    static std::atomic<bool> last_state = false;
-    auto hook = g_hook;
-
     // The best way to enable stereo rendering without causing crashes
     // while also allowing the desktop view to initially display
     // if the HMD is not on at the start. It only allows
@@ -30798,7 +30894,7 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
     }
 
     if (has_usable_game_viewport_draw) {
-        if (GameThreadWorker::get().is_same_thread()) {
+        if (on_game_thread) {
             if (hook->m_in_viewport_client_draw && !hook->m_was_in_viewport_client_draw) {
                 const auto is_hmd_active = VR::get()->is_hmd_active();
 
@@ -30811,6 +30907,8 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
             }
 
             hook->m_was_in_viewport_client_draw = hook->m_in_viewport_client_draw;
+            // NASCAR's ready checks and Dune's viewport ownership above change at run time; other titles settle here.
+            off_thread_fast = !uevr::nascar::is_target() && !dune_awakening_is_current_game();
         }
 
         return last_state;
