@@ -7878,8 +7878,17 @@ void VR::on_config_load(const utility::Config& cfg, bool set_defaults) {
             m_experiment_right_eye_rt_share_cull_gather->value() = true;
         }
 
-        spdlog::info("[RtShare] Hogwarts Legacy: share mode {}, cull {} (game default unless the config sets them)",
-            m_experiment_right_eye_rt_share->value(), m_experiment_right_eye_rt_share_cull_gather->value());
+        // Config loads repeat (twice at startup, again on every frontend reload): log only what changed.
+        static int32_t logged_mode{-1};
+        static int logged_cull{-1};
+        const auto mode = m_experiment_right_eye_rt_share->value();
+        const int cull = m_experiment_right_eye_rt_share_cull_gather->value() ? 1 : 0;
+        if (mode != logged_mode || cull != logged_cull) {
+            logged_mode = mode;
+            logged_cull = cull;
+            spdlog::info("[RtShare] Hogwarts Legacy: share mode {}, cull {} (applies only while sharing); game default "
+                "unless the config sets them", mode, cull != 0);
+        }
     }
 
     if (get_runtime() != nullptr && get_runtime()->loaded) {
