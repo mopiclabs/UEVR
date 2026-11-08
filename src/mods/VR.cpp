@@ -1380,6 +1380,24 @@ bool is_subnautica2_executable() {
     return is_subnautica2;
 }
 
+bool is_hogwarts_legacy_executable() {
+    static const bool is_hogwarts_legacy = []() {
+        const auto module_path = utility::get_module_pathw(utility::get_executable());
+        if (!module_path.has_value()) {
+            return false;
+        }
+
+        auto lowered = *module_path;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+
+        return lowered.ends_with(L"\\hogwartslegacy.exe");
+    }();
+
+    return is_hogwarts_legacy;
+}
+
 bool is_1666amsterdam_executable() {
     static const bool is_1666amsterdam = []() {
         const auto module_path = utility::get_module_pathw(utility::get_executable());
@@ -7841,6 +7859,36 @@ void VR::on_config_load(const utility::Config& cfg, bool set_defaults) {
         // Keep this game-specific guard enabled for fresh profiles, but let existing profiles override it.
         m_compatibility_subnautica2_native_water->value() = true;
         m_subnautica2_native_water_mode->value() = SUBNAUTICA2_NATIVE_WATER_SAFE_REFLECTIONS;
+    }
+
+    if (is_hogwarts_legacy_executable()) {
+        // Hogwarts Legacy (UE 4.27) builds a ray tracing scene per eye, most of its VR CPU cost with RT on. Its right
+        // eye borrows the left eye's scene by default (RtSceneShare.hpp): +15 % fps on a 4090 laptop, +9 to +15 % on a
+        // 3080 laptop, eyes identical (2026-11-06/07). With RT off nothing is shared. A config that stores a key keeps
+        // its value, so the user can still turn either off.
+        const auto uses_game_default = [&](const IModValue& option) {
+            return set_defaults || !cfg.get(option.get_config_name()).has_value();
+        };
+
+        if (uses_game_default(*m_experiment_right_eye_rt_share)) {
+            m_experiment_right_eye_rt_share->value() = 2;  // share once validated
+        }
+
+        if (uses_game_default(*m_experiment_right_eye_rt_share_cull_gather)) {
+            m_experiment_right_eye_rt_share_cull_gather->value() = true;
+        }
+
+        // Config loads repeat (twice at startup, again on every frontend reload): log only what changed.
+        static int32_t logged_mode{-1};
+        static int logged_cull{-1};
+        const auto mode = m_experiment_right_eye_rt_share->value();
+        const int cull = m_experiment_right_eye_rt_share_cull_gather->value() ? 1 : 0;
+        if (mode != logged_mode || cull != logged_cull) {
+            logged_mode = mode;
+            logged_cull = cull;
+            spdlog::info("[RtShare] Hogwarts Legacy: share mode {}, cull {} (applies only while sharing); game default "
+                "unless the config sets them", mode, cull != 0);
+        }
     }
 
     if (get_runtime() != nullptr && get_runtime()->loaded) {
