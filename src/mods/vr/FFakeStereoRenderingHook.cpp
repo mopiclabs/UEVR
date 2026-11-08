@@ -30773,7 +30773,39 @@ bool FFakeStereoRenderingHook::attempt_runtime_inject_stereo() {
     return true;
 }
 
+namespace {
+// GameThreadWorker::get() checks its function-local static's guard on every call; is_stereo_enabled asks per call.
+GameThreadWorker& g_stereo_game_thread_worker = GameThreadWorker::get();
+}
+
 bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
+    static std::atomic<bool> last_state = false;
+    auto hook = g_hook;
+
+    // Black Myth: Wukong's task-graph workers call this ~5000 times a frame, and a full pass over the checks below
+    // cost ~25 ns each time (~0.15 ms of worker CPU a frame, ETW 2026-11-07). Off the game thread, while the game
+    // thread's last call found nothing title-specific and a usable Draw hook, those checks only lead to
+    // `return last_state`, so return it directly.
+    const bool on_game_thread = g_stereo_game_thread_worker.is_same_thread();
+    if (!on_game_thread && hook->m_stereo_enabled_off_thread_fast.load(std::memory_order_acquire) &&
+        !hook->m_sceneview_data.inside_post_init_properties)
+    {
+        return last_state;
+    }
+
+    // Every game-thread call republishes that: it holds only if this call reaches the Draw-hook branch below.
+    bool off_thread_fast = false;
+    struct PublishOffThreadFast {
+        FFakeStereoRenderingHook* hook;
+        const bool& value;
+        bool on_game_thread;
+        ~PublishOffThreadFast() {
+            if (on_game_thread && hook->m_stereo_enabled_off_thread_fast.load(std::memory_order_relaxed) != value) {
+                hook->m_stereo_enabled_off_thread_fast.store(value, std::memory_order_release);
+            }
+        }
+    } publish_off_thread_fast{hook, off_thread_fast, on_game_thread};
+
     if (uevr::nascar::is_target() &&
         (!g_hook->m_nascar_ready.load(std::memory_order_acquire) || !VR::get()->is_nascar_code_preserving_mode() ||
          (VR::get()->is_using_strict_synchronized_afr() &&
@@ -30838,9 +30870,6 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
         return false;
     }*/
 
-    static std::atomic<bool> last_state = false;
-    auto hook = g_hook;
-
     // The best way to enable stereo rendering without causing crashes
     // while also allowing the desktop view to initially display
     // if the HMD is not on at the start. It only allows
@@ -30865,7 +30894,7 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
     }
 
     if (has_usable_game_viewport_draw) {
-        if (GameThreadWorker::get().is_same_thread()) {
+        if (on_game_thread) {
             if (hook->m_in_viewport_client_draw && !hook->m_was_in_viewport_client_draw) {
                 const auto is_hmd_active = VR::get()->is_hmd_active();
 
@@ -30878,6 +30907,8 @@ bool FFakeStereoRenderingHook::is_stereo_enabled(FFakeStereoRendering* stereo) {
             }
 
             hook->m_was_in_viewport_client_draw = hook->m_in_viewport_client_draw;
+            // NASCAR's ready checks and Dune's viewport ownership above change at run time; other titles settle here.
+            off_thread_fast = !uevr::nascar::is_target() && !dune_awakening_is_current_game();
         }
 
         return last_state;
