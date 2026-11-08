@@ -9385,6 +9385,61 @@ std::optional<ModuleSectionRange> find_module_section(uintptr_t address, size_t 
     return std::nullopt;
 }
 
+// Heap objects: VirtualQuery reports RegionSize, and to find it the kernel walks forward over every page that shares
+// the queried page's attributes, which is long in a large committed heap region. On Hogwarts Legacy these checks
+// still took ~0.29 ms per frame on the game and render threads after the module-section cache (ETW, 2026-11-07).
+// QueryWorkingSetEx reads only the entries of the pages asked about. A resident (valid) page is committed and
+// accessible with the protection it reports, so a range on at most two resident pages whose protection allows the
+// access is answered here. false means "not known here": a page that is paged out or never touched, a guard or
+// no-access page, a protection that does not allow the access, a longer range or a failed query - the caller then
+// asks VirtualQuery as before.
+bool resident_pages_allow(uintptr_t address, size_t size, bool write) {
+    constexpr uintptr_t PAGE_SIZE_4K = 0x1000;
+    const auto first_page = address & ~(PAGE_SIZE_4K - 1);
+    const auto last_page = (address + size - 1) & ~(PAGE_SIZE_4K - 1);
+    if (last_page - first_page > PAGE_SIZE_4K) {
+        return false;
+    }
+
+    PSAPI_WORKING_SET_EX_INFORMATION pages[2]{};
+    const DWORD count = first_page == last_page ? 1 : 2;
+    pages[0].VirtualAddress = reinterpret_cast<void*>(first_page);
+    pages[1].VirtualAddress = reinterpret_cast<void*>(last_page);
+    if (!K32QueryWorkingSetEx(GetCurrentProcess(), pages, count * (DWORD)sizeof(pages[0]))) {
+        return false;
+    }
+
+    for (DWORD i = 0; i < count; ++i) {
+        const auto& attributes = pages[i].VirtualAttributes;
+        if (!attributes.Valid) {
+            return false;
+        }
+
+        const auto protection = (DWORD)attributes.Win32Protection;
+        if ((protection & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+            return false;
+        }
+
+        switch (protection & 0xff) {
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            break;
+        case PAGE_READONLY:
+        case PAGE_EXECUTE_READ:
+            if (write) {
+                return false;
+            }
+            break;
+        default:
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool is_writable_process_range(uintptr_t address, size_t size) {
     if (address == 0 || size == 0 || address + size < address) {
         return false;
@@ -9392,6 +9447,10 @@ bool is_writable_process_range(uintptr_t address, size_t size) {
 
     if (const auto section = find_module_section(address, size); section.has_value()) {
         return section->write;
+    }
+
+    if (resident_pages_allow(address, size, true)) {
+        return true;
     }
 
     MEMORY_BASIC_INFORMATION mbi{};
@@ -9422,6 +9481,10 @@ bool is_readable_process_range(uintptr_t address, size_t size) {
 
     // every PE section of a loaded module is readable
     if (find_module_section(address, size).has_value()) {
+        return true;
+    }
+
+    if (resident_pages_allow(address, size, false)) {
         return true;
     }
 
@@ -9459,6 +9522,10 @@ bool is_readable_and_writable_process_range(uintptr_t address, size_t read_size,
 
     if (const auto section = find_module_section(address, size); section.has_value()) {
         return section->write;   // every section of a loaded module is readable
+    }
+
+    if (resident_pages_allow(address, size, true)) {
+        return true;
     }
 
     MEMORY_BASIC_INFORMATION mbi{};
