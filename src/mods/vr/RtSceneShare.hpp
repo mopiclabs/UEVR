@@ -1,9 +1,10 @@
 #pragma once
 
-// EXPERIMENT (VR_ExperimentRightEyeRTShare, default 0 = off): the Native Stereo Fix renders the right eye as a second
-// view family in the same engine frame, and a UE 4.26/4.27 renderer builds a ray tracing scene for every view it
-// renders (FDeferredShadingSceneRenderer::DispatchRayTracingWorldUpdates: RHICreateRayTracingScene, a TLAS build and
-// the hit-group shader binding tables per view). Hogwarts Legacy (4.27, RT reflections + RT AO on) spends ~8 ms of RHI
+// EXPERIMENT (VR_ExperimentRightEyeRTShare, default 0 = off; Hogwarts Legacy defaults to 2 with the cull option on, see
+// VR::on_config_load): the Native Stereo Fix renders the right eye as a second view family in the same engine frame,
+// and a UE 4.26/4.27 renderer builds a ray tracing scene for every view it renders
+// (FDeferredShadingSceneRenderer::DispatchRayTracingWorldUpdates: RHICreateRayTracingScene, a TLAS build and the
+// hit-group shader binding tables per view). Hogwarts Legacy (4.27, RT reflections + RT AO on) spends ~8 ms of RHI
 // thread and ~6 ms of render thread per frame on it, half of it for the right eye. Here the right eye's renderer borrows
 // the scene the left eye's renderer built in the same frame: its RHICreateRayTracingScene returns the left scene, its
 // TLAS build and its hit-group bindings into that scene are skipped (they would be the same TLAS, and the right's own
