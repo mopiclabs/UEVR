@@ -813,7 +813,9 @@ public:
     // `window` (VR::update_hmd_state keeps Slate.DrawToVRRenderTarget at 1 only while it does).
     bool is_legacy_slate_redirect_recent(std::chrono::nanoseconds window) const {
         const auto last = m_last_legacy_slate_redirect_ns.load(std::memory_order_relaxed);
-        return last != 0 && std::chrono::steady_clock::now().time_since_epoch().count() - last <= window.count();
+        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        return last != 0 && now - last <= window.count();
     }
 
     bool has_successful_command_list_hijack() const {

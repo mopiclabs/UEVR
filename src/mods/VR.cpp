@@ -332,14 +332,15 @@ bool is_everspace2_executable_cached() {
 
 // UE4 and UE5.0-5.3 (uevr::slate_vr_target::engine_uses_legacy_slate_vr_target): the engines whose DrawWindow takes
 // the Slate.DrawToVRRenderTarget branch through UEVR's generic Slate redirect and whose console variables UESDK reads
-// reliably. The version from the executable's embedded string, else its file version.
+// reliably. Only the executable's embedded engine version counts: its file version is usually the game's own product
+// version, so an executable without the embedded string is left to the game (TEKKEN 8, Sonic Racing CrossWorlds).
 bool is_legacy_slate_vr_target_runtime_cached() {
     static const bool result = []() {
         const auto embedded = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
-        auto version = uevr::slate_vr_target::parse_engine_version(embedded);
+        const auto version = uevr::slate_vr_target::parse_engine_version(embedded);
         if (!version || version->first == 0) {
-            const auto disk = sdk::get_file_version_info();
-            version = std::pair{(int)HIWORD(disk.dwFileVersionMS), (int)LOWORD(disk.dwFileVersionMS)};
+            spdlog::info("[SlateUI] No embedded engine version: Slate.DrawToVRRenderTarget is left to the game");
+            return false;
         }
 
         const auto legacy = uevr::slate_vr_target::engine_uses_legacy_slate_vr_target(version->first, version->second);
@@ -400,7 +401,14 @@ void update_slate_draw_to_vr_target(bool wanted) {
         });
     };
 
-    switch (uevr::slate_vr_target::decide(state, wanted, *value)) {
+    const auto gave_up_before = state.gave_up;
+    const auto action = uevr::slate_vr_target::decide(state, wanted, *value);
+    if (state.gave_up && !gave_up_before) {
+        spdlog::warn("[SlateUI] Slate.DrawToVRRenderTarget still reads 0 after {} writes of 1; not writing it again",
+            uevr::slate_vr_target::max_unstuck_writes);
+    }
+
+    switch (action) {
     case uevr::slate_vr_target::Action::SetOne:
         set(1);
         spdlog::info("[SlateUI] Slate.DrawToVRRenderTarget {} -> 1: Slate draws into the redirected viewport target instead of the swapchain", *value);

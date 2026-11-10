@@ -1833,6 +1833,28 @@ void test_slate_vr_target_latch() {
         expect(decide(state, false, 1) == Action::RestoreOriginal && !state.forced, "restore on the next real read");
     }
 
+    // A write that never sticks (Set ignored, or a failed GetInt reading 0) stops after max_unstuck_writes.
+    {
+        State state{};
+        int writes = 0;
+        for (int i = 0; i < 20; ++i) {
+            writes += decide(state, true, 0) == Action::SetOne ? 1 : 0;
+        }
+        expect(writes == max_unstuck_writes && state.gave_up, "stop writing after max_unstuck_writes unstuck writes");
+        expect(decide(state, true, 1) == Action::None && decide(state, true, 0) == Action::None, "gave up for the session");
+        expect(decide(state, false, 0) == Action::None && !state.forced, "nothing to restore over the game's 0");
+    }
+
+    // A game writing 0 now and then (Stellar Blade once after its first tick) is written again each time.
+    {
+        State state{};
+        for (int i = 0; i < max_unstuck_writes * 3; ++i) {
+            expect(decide(state, true, 0) == Action::SetOne && decide(state, true, 1) == Action::None,
+                "a write that sticks resets the unstuck count");
+        }
+        expect(!state.gave_up, "never gives up while writes stick");
+    }
+
     // The game took its own 0 back while the redirect went off: leave it, and forget the ownership.
     {
         State state{};

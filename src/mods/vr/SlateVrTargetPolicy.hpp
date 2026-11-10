@@ -45,9 +45,16 @@ enum class Action {
     RestoreOriginal, // write State::original (0) back
 };
 
+// Writes of 1 in a row that read back as 0 before UEVR stops writing: a game may write its own 0 again (Stellar Blade
+// did once after its first tick), but a write that never sticks (Set ignored, or a GetInt that failed and reads 0)
+// must not repeat for the whole session.
+inline constexpr int max_unstuck_writes = 5;
+
 struct State {
-    bool forced{false}; // UEVR wrote 1 and hasn't written the game's value back yet
-    int original{0};    // the value the game had when UEVR first wrote 1 (always 0, see decide)
+    bool forced{false};  // UEVR wrote 1 and hasn't written the game's value back yet
+    int original{0};     // the value the game had when UEVR first wrote 1 (always 0, see decide)
+    int unstuck_writes{0};
+    bool gave_up{false}; // max_unstuck_writes reached; nothing is written for the rest of the session
 };
 
 // wanted: the redirect is on (HMD active, no stereo emulation, a redirected DrawWindow within the last second).
@@ -60,12 +67,21 @@ inline Action decide(State& state, bool wanted, int current) {
 
     if (wanted) {
         if (current == 1) {
+            state.unstuck_writes = 0;
+            return Action::None;
+        }
+
+        if (state.gave_up) {
             return Action::None;
         }
 
         if (!state.forced) {
             state.original = current;
             state.forced = true;
+        } else if (++state.unstuck_writes >= max_unstuck_writes) {
+            // Still 0 after this many writes: stop. Ownership stays, so nothing is "restored" either.
+            state.gave_up = true;
+            return Action::None;
         }
 
         // Also when the game wrote its own 0 again while forced.
