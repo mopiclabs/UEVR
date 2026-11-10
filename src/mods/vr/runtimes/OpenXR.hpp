@@ -290,6 +290,9 @@ public:
     XrSpaceLocation view_space_location{XR_TYPE_SPACE_LOCATION};
 
     std::unordered_set<std::string> enabled_extensions{};
+    // XR_EXT_performance_settings is among them (set with them, VR.cpp): read on every Present by the AutoRes gate,
+    // where enabled_extensions.contains would build a std::string each time.
+    bool performance_settings_enabled{false};
 
     // XR_KHR_win32_convert_performance_counter_time, only so the perf log can map XrTime onto QPC time. Null when
     // the runtime lacks it or VR_PerfLog was off when the instance was created.

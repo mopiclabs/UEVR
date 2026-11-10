@@ -68,7 +68,7 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
     // guard's level step and its session cap) would act alone. VR_AutoRes is on by default, so that covers every runtime
     // without the extension (another runtime, a Mopic service before auto-resolution). VR_AutoResToggleSeconds
     // (measurements) makes its own edges and runs without it.
-    const auto has_extension = openxr.enabled_extensions.contains(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    const auto has_extension = openxr.performance_settings_enabled;
     const auto wanted = (inputs.enabled && has_extension) || inputs.toggle_seconds > 0;
 
     if (inputs.enabled && !has_extension && inputs.toggle_seconds <= 0 && openxr.ready() && !m_no_extension_logged) {

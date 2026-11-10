@@ -3196,6 +3196,8 @@ std::optional<std::string> VR::initialize_openxr() {
                     if (wanted_extensions.contains(extension_property.extensionName)) {
                         spdlog::info("[VR] Enabling {} extension", extension_property.extensionName);
                         m_openxr->enabled_extensions.insert(extension_property.extensionName);
+                        m_openxr->performance_settings_enabled = m_openxr->performance_settings_enabled ||
+                            std::string_view{extension_property.extensionName} == XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
                         extensions.push_back(extension_property.extensionName);
                     }
                 }
