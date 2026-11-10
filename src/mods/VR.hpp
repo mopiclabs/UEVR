@@ -1620,7 +1620,10 @@ private:
     const ModInt32::Ptr m_autores_toggle_delay_seconds{ ModInt32::create(generate_name("AutoResToggleDelaySeconds"), 60, true) };
     // With VR_AutoRes: find out whether the game's time runs with its frames (it would play in slow motion at 30 fps,
     // TEKKEN 8) and hint the runtime once a second, GPU BOOST when it does and SUSTAINED_HIGH while it doesn't (AutoRes.hpp).
-    const ModToggle::Ptr m_autores_frame_bound_detect{ ModToggle::create(generate_name("AutoResFrameBoundDetect"), true, true) };
+    // Off by default: a session that sends these GPU hints lets the Mopic runtime use its objective (A) (a clean 30 at a
+    // higher level), and the shipped default is (B), 60 first (design v1, 2026-11-10: (A)'s half cadence can hold a
+    // session on a mixed 33-35 fps). Without the hints the runtime runs every game at (B); no GPU hint goes out at all.
+    const ModToggle::Ptr m_autores_frame_bound_detect{ ModToggle::create(generate_name("AutoResFrameBoundDetect"), false, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
