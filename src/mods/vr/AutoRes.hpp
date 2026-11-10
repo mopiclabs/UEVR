@@ -110,6 +110,7 @@ private:
     uevr::autores::Request m_pending{uevr::autores::Request::none};
     const char* m_pending_why{""};
     bool m_waiting_logged{false};
+    bool m_no_extension_logged{false}; // VR_AutoRes on in a session without XR_EXT_performance_settings: said once
     // The last edge's request, asked again while its state lasts: the extension only reports changes, so a GPU that
     // stays IMPAIRED after a step sends nothing more.
     uevr::autores::Request m_last_request{uevr::autores::Request::none};

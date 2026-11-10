@@ -64,7 +64,17 @@ const char* still_why(ar::Request request) {
 }
 
 void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs) {
-    const auto wanted = inputs.enabled || inputs.toggle_seconds > 0;
+    // Only with XR_EXT_performance_settings in the session: without it no edge can come, and the local guards (the VRAM
+    // guard's level step and its session cap) would act alone. VR_AutoRes is on by default, so that covers every runtime
+    // without the extension (another runtime, a Mopic service before auto-resolution). VR_AutoResToggleSeconds
+    // (measurements) makes its own edges and runs without it.
+    const auto has_extension = openxr.enabled_extensions.contains(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    const auto wanted = (inputs.enabled && has_extension) || inputs.toggle_seconds > 0;
+
+    if (inputs.enabled && !has_extension && inputs.toggle_seconds <= 0 && openxr.ready() && !m_no_extension_logged) {
+        m_no_extension_logged = true;
+        SPDLOG_INFO("[autores] the runtime did not enable XR_EXT_performance_settings: automatic resolution stays off");
+    }
 
     if (!wanted || !openxr.ready() || openxr.view_configs.empty()) {
         if (m_active && (!wanted || openxr.view_configs.empty())) {
