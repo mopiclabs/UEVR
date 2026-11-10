@@ -1598,13 +1598,16 @@ private:
     // the new size (0 = off); the right eye of its first frames at the new size comes out black.
     const ModInt32::Ptr m_autores_source_hold_ms{ ModInt32::create(generate_name("AutoResSourceHoldMs"), 150, true) };
     // A live resolution change that the eye swapchain already fits keeps the swapchain: the eye pair goes to its top left
-    // and the projection views cover just that, so the runtime creates and imports nothing mid-session.
-    const ModToggle::Ptr m_autores_keep_swapchains{ ModToggle::create(generate_name("AutoResKeepSwapchains"), false, true) };
+    // and the projection views cover just that, so the runtime creates and imports nothing mid-session. On by default
+    // (2026-11-10, with VR_AutoRes: the combination measured in the auto-resolution campaigns).
+    const ModToggle::Ptr m_autores_keep_swapchains{ ModToggle::create(generate_name("AutoResKeepSwapchains"), true, true) };
     // Automatic resolution (AutoRes.hpp): request XR_EXT_performance_settings and answer the runtime's GPU / CPU edges
     // with one step each: r.ScreenPercentage (not under DLSS), the DLSS quality where the game has a DLSS plugin, then the
-    // eye size from a ladder around the recommended size (kept swapchain). Off by default; without a runtime that
-    // implements the extension nothing moves.
-    const ModToggle::Ptr m_autores{ ModToggle::create(generate_name("AutoRes"), false, true) };
+    // eye size from a ladder around the recommended size (kept swapchain). On by default since 2026-11-10, to go with
+    // the Mopic runtime's auto-resolution (on by default too): without it the runtime still picks the start size by the
+    // GPU, and an 8 GB laptop stays at its lowest level all session. Nothing moves without a session that has the
+    // extension (an older runtime, another runtime).
+    const ModToggle::Ptr m_autores{ ModToggle::create(generate_name("AutoRes"), true, true) };
     // Automatic level steps rebuild live also on the engine paths the version policy keeps the slider from: UE 5.0-5.2 and
     // versions UEVR can't read (TEKKEN 8 demo, Black Myth: Wukong and the Sonic Racing: CrossWorlds demo took 149 forced
     // live rebuilds without a fault on 2026-10-25). Not UE4 before 4.27, and never Stalker 2, whose live rebuild is
