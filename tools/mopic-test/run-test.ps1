@@ -1301,6 +1301,24 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
         if ($hadConfig -and $configVersion -lt 2 -and -not $overrides.ContainsKey("VR_PerfLog")) { $overrides["VR_PerfLog"] = "false" }
     }
+    # Migration 4 turns VR_AutoRes and VR_AutoResKeepSwapchains on once (both default to on since 2026-11-10). A run that
+    # sets either raises the version to 4, or a VR_AutoRes=false run would be turned back on at load, and applies the
+    # migrations below 4 itself, as above (3: a stored refresh of 30, the old default, becomes 15).
+    $autoResKeys = @("VR_AutoRes", "VR_AutoResKeepSwapchains")
+    if (@($autoResKeys | Where-Object { $overrides.ContainsKey($_) }).Count -gt 0 -and $configVersion -lt 4) {
+        $overrides["Mopic_ConfigVersion"] = "4"
+        if ($hadConfig -and $configVersion -lt 1 -and -not $overrides.ContainsKey("VR_UseFMallocSceneViewExtensions")) {
+            $overrides["VR_UseFMallocSceneViewExtensions"] = "true"
+        }
+        if ($hadConfig -and $configVersion -lt 2 -and -not $overrides.ContainsKey("VR_PerfLog")) { $overrides["VR_PerfLog"] = "false" }
+        if ($hadConfig -and $configVersion -lt 3 -and -not $overrides.ContainsKey($gdfRefreshKey) -and
+            (Select-String -LiteralPath $ConfigPath -Pattern "^\s*$gdfRefreshKey\s*=\s*30\s*$" -Quiet)) {
+            $overrides[$gdfRefreshKey] = "15"
+        }
+        foreach ($key in $autoResKeys) {
+            if (-not $overrides.ContainsKey($key)) { $overrides[$key] = "true" }
+        }
+    }
     Set-ConfigValues $ConfigPath $overrides
     Copy-Item $ConfigPath (Join-Path $runDir "config.txt") -Force
 

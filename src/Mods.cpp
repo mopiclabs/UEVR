@@ -140,7 +140,7 @@ bool migrate_ui_invert_alpha(utility::Config& cfg) {
 // Mopic config migrations, applied once to an existing config.txt. The version is stored in
 // Mopic_ConfigVersion (a VR option, so config saves keep it).
 constexpr const char* MOPIC_CONFIG_VERSION_KEY = "Mopic_ConfigVersion";
-constexpr int32_t MOPIC_CONFIG_VERSION = 3;  // also the default of VR's Mopic_ConfigVersion option
+constexpr int32_t MOPIC_CONFIG_VERSION = 4;  // also the default of VR's Mopic_ConfigVersion option
 
 bool migrate_mopic_defaults(utility::Config& cfg) {
     int32_t version = 0;
@@ -180,6 +180,14 @@ bool migrate_mopic_defaults(utility::Config& cfg) {
             }
         } catch (...) {
         }
+    }
+
+    // 4: VR_AutoRes and VR_AutoResKeepSwapchains now default to on, with the Mopic runtime's auto-resolution, but every
+    //    existing config stored the old default (false), and a stored value wins over the default. Switch both on once.
+    //    tools/mopic-test/run-test.ps1 raises Mopic_ConfigVersion to 4 when a run sets either, so its value stays.
+    if (version < 4) {
+        cfg.set<bool>("VR_AutoRes", true);
+        cfg.set<bool>("VR_AutoResKeepSwapchains", true);
     }
 
     cfg.set<int32_t>(MOPIC_CONFIG_VERSION_KEY, MOPIC_CONFIG_VERSION);
