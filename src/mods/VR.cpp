@@ -52,6 +52,7 @@
 
 #include "VR.hpp"
 #include "vr/Stalker2NativePolicy.hpp"
+#include "vr/SlateVrTargetPolicy.hpp"
 #include "UObjectHook.hpp"
 #include "GameSpecific.hpp"
 #include "vr/KtjLOpenXRFactory.hpp"
@@ -327,6 +328,90 @@ bool is_everspace2_executable_cached() {
     }();
 
     return is_everspace2;
+}
+
+// UE4 and UE5.0-5.3 (uevr::slate_vr_target::engine_uses_legacy_slate_vr_target): the engines whose DrawWindow takes
+// the Slate.DrawToVRRenderTarget branch through UEVR's generic Slate redirect and whose console variables UESDK reads
+// reliably. The version from the executable's embedded string, else its file version.
+bool is_legacy_slate_vr_target_runtime_cached() {
+    static const bool result = []() {
+        const auto embedded = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+        auto version = uevr::slate_vr_target::parse_engine_version(embedded);
+        if (!version || version->first == 0) {
+            const auto disk = sdk::get_file_version_info();
+            version = std::pair{(int)HIWORD(disk.dwFileVersionMS), (int)LOWORD(disk.dwFileVersionMS)};
+        }
+
+        const auto legacy = uevr::slate_vr_target::engine_uses_legacy_slate_vr_target(version->first, version->second);
+        spdlog::info("[SlateUI] Engine {}.{}: Slate.DrawToVRRenderTarget is {}",
+            version->first, version->second, legacy ? "kept at 1 while the Slate redirect is on" : "left to the game");
+        return legacy;
+    }();
+
+    return result;
+}
+
+// Keeps Slate.DrawToVRRenderTarget at 1 while UEVR's Slate hook redirects the viewport render target to its UI target
+// (wanted) and writes the game's 0 back when that stops (uevr::slate_vr_target::decide). A game at the engine default
+// (1) is only read. Read twice a second at most: a game can write its own value again (Stellar Blade wrote 0 once more
+// after its first tick).
+void update_slate_draw_to_vr_target(bool wanted) {
+    static uevr::slate_vr_target::State state{};
+    static bool last_wanted = false;
+    static auto next_check = std::chrono::steady_clock::time_point{};
+
+    if (!wanted && !state.forced) {
+        last_wanted = false;
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (wanted == last_wanted && now < next_check) {
+        return;
+    }
+    last_wanted = wanted;
+    next_check = now + std::chrono::milliseconds(500);
+
+    const auto cvarpp = sdk::find_cvar_cached(L"SlateRHIRenderer", L"Slate.DrawToVRRenderTarget");
+    if (cvarpp == nullptr || *cvarpp == nullptr) {
+        SPDLOG_WARN_ONCE("[SlateUI] Slate.DrawToVRRenderTarget not found; left to the game");
+        return;
+    }
+
+    const auto value = sdk::get_cvar_int(L"SlateRHIRenderer", L"Slate.DrawToVRRenderTarget");
+    if (!value) {
+        return;
+    }
+
+    if (*value != 0 && *value != 1) {
+        SPDLOG_WARN_ONCE("[SlateUI] Slate.DrawToVRRenderTarget read as {}, not 0 or 1; not trusting the read, left to the game", *value);
+    }
+
+    // A game can set the variable with ECVF_SetByConsole, the highest SetBy priority (Stellar Blade: flags 0x9000020),
+    // which makes a write with IConsoleVariable::Set's default ECVF_SetByCode a no-op. Write with the same priority.
+    constexpr uint32_t set_by_console = 0x09000000;
+    const auto set = [cvarpp](int new_value) {
+        GameThreadWorker::get().enqueue([cvarpp, new_value]() {
+            try {
+                (*cvarpp)->Set(std::to_wstring(new_value).c_str(), set_by_console);
+            } catch (...) {
+                SPDLOG_ERROR_ONCE("[SlateUI] Setting Slate.DrawToVRRenderTarget failed");
+            }
+        });
+    };
+
+    switch (uevr::slate_vr_target::decide(state, wanted, *value)) {
+    case uevr::slate_vr_target::Action::SetOne:
+        set(1);
+        spdlog::info("[SlateUI] Slate.DrawToVRRenderTarget {} -> 1: Slate draws into the redirected viewport target instead of the swapchain", *value);
+        break;
+    case uevr::slate_vr_target::Action::RestoreOriginal:
+        set(state.original);
+        spdlog::info("[SlateUI] Slate.DrawToVRRenderTarget 1 -> {}: the Slate redirect is off", state.original);
+        break;
+    default:
+        break;
+    }
 }
 
 bool is_directive8020_executable_cached() {
@@ -7579,6 +7664,14 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
         if (auto val = sdk::get_cvar_int(L"Slate", L"Slate.AllowBackgroundBlurWidgets"); val && *val != 0) {
             sdk::set_cvar_int(L"Slate", L"Slate.AllowBackgroundBlurWidgets", 0);
         }
+    }
+
+    // With Slate.DrawToVRRenderTarget 0 a UE4/UE5.0-5.3 game draws Slate to the swapchain, past the UI redirect
+    // (Stellar Blade). Keep it at 1 only while the redirect is on (the hook's own condition, and a redirected DrawWindow
+    // within the last second): with 1 and no redirect, Slate would draw over the scene target.
+    if (m_fake_stereo_hook != nullptr && is_legacy_slate_vr_target_runtime_cached()) {
+        update_slate_draw_to_vr_target(is_hmd_active() && !is_stereo_emulation_enabled() &&
+            m_fake_stereo_hook->is_legacy_slate_redirect_recent(std::chrono::seconds(1)));
     }
 
     if (!is_using_afr()) {

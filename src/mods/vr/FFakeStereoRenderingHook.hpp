@@ -809,6 +809,13 @@ public:
         return m_has_seen_stable_slate_draw;
     }
 
+    // The generic Slate DrawWindow hook redirected FViewportInfo's render target to UEVR's UI target within the last
+    // `window` (VR::update_hmd_state keeps Slate.DrawToVRRenderTarget at 1 only while it does).
+    bool is_legacy_slate_redirect_recent(std::chrono::nanoseconds window) const {
+        const auto last = m_last_legacy_slate_redirect_ns.load(std::memory_order_relaxed);
+        return last != 0 && std::chrono::steady_clock::now().time_since_epoch().count() - last <= window.count();
+    }
+
     bool has_successful_command_list_hijack() const {
         return m_has_successful_command_list_hijack;
     }
@@ -1715,6 +1722,7 @@ private:
     bool m_hooked_ue58_slate_output_texture_register{false};
     bool m_prefer_slate_thread_for_session{false};
     bool m_has_seen_stable_slate_draw{false};
+    std::atomic<int64_t> m_last_legacy_slate_redirect_ns{0}; // steady_clock ns of the last generic Slate redirect
     bool m_has_seen_prerender_viewfamily{false};
     std::atomic<bool> m_nascar25_ui_render_callback_seen{false};
     bool m_has_scene_view_family_offsets_ready{false};

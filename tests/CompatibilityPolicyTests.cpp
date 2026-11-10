@@ -3,6 +3,8 @@
 #include <iostream>
 #include <limits>
 #include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <sdk/FSceneView.hpp>
@@ -19,6 +21,7 @@
 #include "mods/vr/UE58OwnedUITexture.hpp"
 #include "mods/vr/CompatibilityPolicy.hpp"
 #include "mods/vr/StellarBladeRendererEntry.hpp"
+#include "mods/vr/SlateVrTargetPolicy.hpp"
 #include "mods/vr/HiFiRushRendererEntry.hpp"
 #include "mods/vr/SifuRendererEntry.hpp"
 #include "mods/vr/SifuMeshCommands.hpp"
@@ -1783,6 +1786,62 @@ void test_stellar_blade_callable_renderer_entry() {
     }
 }
 
+void test_slate_vr_target_latch() {
+    using namespace uevr::slate_vr_target;
+
+    // Engines: UE4 and UE5.0-5.3 only.
+    const auto v = [](std::string_view s) { return parse_engine_version(s); };
+    expect(v("4.26") == std::pair{4, 26} && v("5.3.2") == std::pair{5, 3} && v("5.0") == std::pair{5, 0},
+        "engine versions parse as major.minor");
+    expect(!v("") && !v("4") && !v("x.26") && !v("4.") && !v("4,26"), "malformed versions are rejected");
+    for (const auto [major, minor, legacy] : {std::tuple{4, 16, true}, std::tuple{4, 26, true}, std::tuple{4, 27, true},
+                                              std::tuple{5, 0, true}, std::tuple{5, 2, true}, std::tuple{5, 3, true},
+                                              std::tuple{5, 4, false}, std::tuple{5, 6, false}, std::tuple{5, 7, false},
+                                              std::tuple{3, 0, false}, std::tuple{0, 0, false}, std::tuple{1, 5, false},
+                                              std::tuple{6, 0, false}}) {
+        expect(engine_uses_legacy_slate_vr_target(major, minor) == legacy,
+            "Slate.DrawToVRRenderTarget is only touched on UE4 and UE5.0-5.3");
+    }
+
+    // A game at the engine default (1) is only read, never written.
+    {
+        State state{};
+        expect(decide(state, false, 0) == Action::None && !state.forced, "no request, no write");
+        expect(decide(state, true, 1) == Action::None && !state.forced, "already 1: no write and no ownership");
+        expect(decide(state, false, 1) == Action::None, "a 1 UEVR never wrote is never restored");
+    }
+
+    // Stellar Blade: the game's 0 becomes 1, the game writes 0 once more, then the redirect goes off.
+    {
+        State state{};
+        expect(decide(state, true, 0) == Action::SetOne && state.forced && state.original == 0, "0 -> 1, remember 0");
+        expect(decide(state, true, 1) == Action::None, "stays 1 while the redirect is on");
+        expect(decide(state, true, 0) == Action::SetOne && state.original == 0, "the game wrote 0 again: write 1 again");
+        expect(decide(state, false, 1) == Action::RestoreOriginal && !state.forced && state.original == 0,
+            "redirect off: write the game's 0 back");
+        expect(decide(state, false, 1) == Action::None, "restored once");
+    }
+
+    // A read that is neither 0 nor 1 is not trusted: never a write, ownership unchanged (UE 5.4 read 1089616160).
+    {
+        State state{};
+        expect(decide(state, true, 1089616160) == Action::None && !state.forced, "garbage read: no write");
+        expect(decide(state, true, -1) == Action::None && decide(state, true, 2) == Action::None, "other values: no write");
+        expect(decide(state, true, 0) == Action::SetOne && state.forced, "forced from a real 0");
+        expect(decide(state, true, 7) == Action::None && state.forced, "a garbage read keeps ownership");
+        expect(decide(state, false, 7) == Action::None && state.forced, "and doesn't restore on a garbage read");
+        expect(decide(state, false, 1) == Action::RestoreOriginal && !state.forced, "restore on the next real read");
+    }
+
+    // The game took its own 0 back while the redirect went off: leave it, and forget the ownership.
+    {
+        State state{};
+        expect(decide(state, true, 0) == Action::SetOne, "forced");
+        expect(decide(state, false, 0) == Action::None && !state.forced, "the game's value is kept");
+        expect(decide(state, true, 0) == Action::SetOne && state.forced, "the next session forces again");
+    }
+}
+
 void test_sw_zero_company_binary_revisions() {
     using namespace uevr::sw_zero_company;
     expect(binary_layouts.size() == 3 && binary_layouts[0].revision == 196320 &&
@@ -2442,6 +2501,7 @@ int main(int argc, char** argv) {
     test_mafia_discovery();
     test_family_snapshot_accessors();
     test_stellar_blade_callable_renderer_entry();
+    test_slate_vr_target_latch();
     test_hifi_rush_callable_renderer_entry();
     test_sifu_callable_renderer_entry();
     test_sifu_native_mesh_commands();
