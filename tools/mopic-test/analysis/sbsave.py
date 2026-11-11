@@ -66,8 +66,12 @@ def read_fstring(buf, pos):
     if n == 0:
         return "", pos
     if n < 0:  # UTF-16
-        raw = buf[pos:pos - 2 * n]
-        return raw.decode("utf-16-le").rstrip("\0"), pos - 2 * n
+        if n < -4096 or pos - 2 * n > len(buf):
+            raise SaveError(f"implausible string length {n} at {pos}")
+        try:
+            return buf[pos:pos - 2 * n].decode("utf-16-le").rstrip("\0"), pos - 2 * n
+        except UnicodeDecodeError as e:
+            raise SaveError(f"bad UTF-16 string at {pos}: {e}") from None
     if n > 4096 or pos + n > len(buf):
         raise SaveError(f"implausible string length {n} at {pos}")
     return buf[pos:pos + n].rstrip(b"\0").decode("latin-1"), pos + n
@@ -104,7 +108,7 @@ def account_info(body):
 
 
 def retarget(data, steam_id):
-    if not steam_id.isdigit():
+    if not (steam_id.isascii() and steam_id.isdigit()):
         raise SaveError(f"SteamID64 must be digits: {steam_id!r}")
     head, body, stored, actual = split(data)
     if stored != actual:
@@ -309,6 +313,18 @@ def selftest(work, real):
     damaged[100] ^= 0xFF
     raises("CRC mismatch refused", lambda: retarget(bytes(damaged), "1"), "CRC mismatch")
     raises("non-digit id refused", lambda: retarget(src, "7656x"), "must be digits")
+    raises("non-ASCII digits refused", lambda: retarget(src, "١٢٣"), "must be digits")
+    odd = bytearray(src)
+    i = odd.find(fstring("MapName"))
+    struct.pack_into("<i", odd, i, -3)  # a UTF-16 string of 6 bytes: "Map" read as three odd code units
+    odd[i + 4:i + 10] = b"\x00\xd8\x00\xd8\x00\xd8"  # unpaired surrogates: not decodable
+    p_odd = os.path.join(work, "odd-utf16.sav")
+    write_bytes(p_odd, join(odd[:8], bytes(odd[8:-4])))
+    cp = subprocess.run([sys.executable, "-I", os.path.abspath(__file__), "info", p_odd, "--json"],
+                        capture_output=True, text=True)
+    rows = json.loads(cp.stdout) if cp.returncode == 0 else []
+    check("info: a bad UTF-16 string is that file's error row, no traceback",
+          len(rows) == 1 and "bad UTF-16 string" in rows[0].get("error", ""), cp.stdout + cp.stderr)
     raises("not a save refused", lambda: retarget(b"GVAS" + src[8:], "1"), "not an EVAS/GVAS")
     raises("save without OnlineAccountInfo refused",
            lambda: retarget(join(src[:8], src[8:-4].replace(b"OnlineAccountInfo", b"OnlineAccountInfX")), "1"),

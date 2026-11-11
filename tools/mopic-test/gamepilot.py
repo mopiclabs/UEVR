@@ -148,6 +148,26 @@ def dialog_ok_button(box):
     return (buttons[0][1], buttons[0][2]) if buttons else None
 
 
+def dialog_text(box):
+    """The message of a standard box: its Static children's text, joined (the icon's Static has none)."""
+    parts = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(hwnd, _):
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        if cls.value == "Static":
+            n = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if buf.value.strip():
+                parts.append(" ".join(buf.value.split()))
+        return True
+
+    user32.EnumChildWindows(box, cb, 0)
+    return " / ".join(parts)
+
+
 class PROCESSENTRY32W(ctypes.Structure):
     _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
                 ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wt.DWORD), ("cntThreads", wt.DWORD),
@@ -1315,20 +1335,23 @@ class Pilot:
         Waits up to `timeout` s for it; when none comes, an optional step goes on, otherwise the run fails."""
         end = time.time() + timeout
         pressed = 0
+        seen = set()
         while True:
             boxes = dialog_windows(self.proc, title)
             for hwnd in boxes:
                 # WM_COMMAND BN_CLICKED from its OK button to the box: its own OK handling, no focus or mouse needed
                 ok = dialog_ok_button(hwnd)
                 cid, button = ok if ok else (1, 0)  # no button found: IDOK
+                if hwnd not in seen:
+                    # the message goes to the log: the same title also comes with other errors (a missing DLL)
+                    self.log(f"  '{title}' box: \"{dialog_text(hwnd)}\"; pressing control {cid}")
+                    seen.add(hwnd)
                 user32.PostMessageW(wt.HWND(hwnd), 0x0111, wt.WPARAM(cid & 0xFFFF), wt.LPARAM(button))
-                if pressed == 0:
-                    self.log(f"  '{title}' box: pressing control {cid}")
                 pressed += 1
             if boxes:
                 self.sleep(1.0)
                 if not dialog_windows(self.proc, title):
-                    self.log(f"  dismissed {pressed} '{title}' box(es)")
+                    self.log(f"  dismissed {len(seen)} '{title}' box(es) ({pressed} press(es))")
                     return
             if time.time() >= end:
                 if pressed == 0 and optional:

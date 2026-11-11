@@ -350,7 +350,7 @@ showing right now.
 | `{"expect_exit": 60}` | wait for the process to end; still running afterwards = `EXIT_HANG` |
 | `{"shot": "name"}` / `{"note": "..."}` | save a screenshot / comment |
 | `{"fail": "why", "if": "x"}` | end the recipe as `MENU_FAIL` with this message when checkpoint x shows (a screen the route can't get past, e.g. locked content), instead of timing out later |
-| `{"dismiss_dialog": "System Error", "timeout": 120}` | press OK on the game's own message box whose title contains the text, the way a player clicks it away (WM_COMMAND from its OK button, with the button's own control id: a system-error box's lone OK is IDCANCEL), and wait until it is gone. `timeout` defaults to 30 s; `"optional": true` (default) goes on when none showed within it, `false` fails the run |
+| `{"dismiss_dialog": "System Error", "timeout": 120}` | press OK on the game's own message box whose title contains the text, the way a player clicks it away (WM_COMMAND from its OK button, with the button's own control id: a system-error box's lone OK is IDCANCEL), and wait until it is gone. pilot.log gets each box's message (the same title also comes with other errors, such as a missing DLL). `timeout` defaults to 30 s; `"optional": true` (default) goes on when none showed within it, `false` fails the run |
 | `"measure": true` / `"<label>"` / `false` on a step | its frame rate is measured (see "Frame rate"): `play` and `play_until` are, as `gameplay`, unless `false`; `true` = `gameplay` |
 
 Checkpoints compare a region of the live screenshot with the saved crop (grayscale, shifts up to `margin` px,
@@ -486,7 +486,8 @@ can be stale. Check the top system function before concluding a thread is blocke
   to 설정 > 나가기 (last item; the list doesn't wrap) > 게임을 종료하고 나가기 > Space (예). Never 새로운 게임. The
   recipes need UEVR with PR #28 (c1ecaa87 on): with the release v1.0.5.5 the title is black on the Mopic display and
   `wait_for title` times out; until a release has it, run them with `-Dll` of such a build (blade18 keeps one in
-  `runs\dlls\uevr-c1ecaa87\`, gitignored) and put the release DLL back afterwards. One save,
+  `runs\dlls\uevr-c1ecaa87\`, gitignored) and put the release DLL back afterwards; for the same reason it is not in
+  run-matrix's default list (`-Games ...,StellarBlade -Dll ...`). One save,
   `%LOCALAPPDATA%\SB\Saved\SaveGames\<sid64>\StellarBladeSave00.sav` (NG+ runs add 01, 02, ...); the game keeps
   `Backup\StellarBladeSave00_Old.sav`. Saves are tied to the Steam account: community saves go through
   `save_retarget` ("stellarblade"). `analysis\sbsave.py info` reads a save offline (map, camp, tracked quest, play

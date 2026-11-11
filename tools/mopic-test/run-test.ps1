@@ -1223,8 +1223,8 @@ if ($SaveFile -ne "") {
 # runs\save-retarget\ once, and that copy is what every run installs. The original stays as it is.
 $SaveRetarget = $null
 if ($SaveSource -and $Recipe -ne "" -and $recipeJson.save_retarget) {
-    $sid = (Get-SavePlaceholderValues (Find-SteamGameDir $SteamInstallDir)).sid64
     try {
+        $sid = (Get-SavePlaceholderValues (Find-SteamGameDir $SteamInstallDir)).sid64
         $SaveRetarget = Invoke-SaveRetarget ([string]$recipeJson.save_retarget) $SaveSource $SaveSourceHash $sid `
             (Join-Path $RunsRoot "save-retarget") $PilotPython (Join-Path $ScriptDir "analysis\sbsave.py")
     } catch { throw "Recipe $Recipe`: $_" }
