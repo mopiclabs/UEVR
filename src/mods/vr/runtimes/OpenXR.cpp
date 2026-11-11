@@ -4137,8 +4137,36 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
                 depth_layers[i].next = nullptr;
                 depth_layers[i].subImage.swapchain = depth_swapchain->handle;
 
-                depth_layers[i].subImage.imageRect.offset = {offset_x, offset_y};
-                depth_layers[i].subImage.imageRect.extent = {std::min<int>(get_width(), extent_x), std::min<int>(get_height(), extent_y)};
+                // The depth swapchain is a copy of the engine's SceneDepthZ, which is at the engine's internal
+                // (pre-upscale) resolution, not the eye texture's: Hogwarts with DLSS Performance gives 960x1080
+                // against 1920x2160 eyes, and the color rect then lies outside the depth image, so every
+                // xrEndFrame failed with XR_ERROR_SWAPCHAIN_RECT_INVALID. Map the view bounds onto the depth image
+                // itself: side by side when it holds both views (one stereo family), the whole image for each view
+                // when it holds one (the native stereo fix renders each eye as a family of its own into the same
+                // SceneDepthZ; both views then point at the eye that rendered last).
+                {
+                    const int32_t depth_w = depth_swapchain->width;
+                    const int32_t depth_h = depth_swapchain->height;
+                    const double eye_aspect = content_height > 0 ? (double)texture_area_width / (double)content_height : 1.0;
+                    const bool depth_pair = !is_afr && !has_native_stereo_array && depth_h > 0 &&
+                        (double)depth_w / (double)depth_h > 1.5 * eye_aspect;
+                    const int32_t area_w = depth_pair ? depth_w / 2 : depth_w;
+                    const int32_t base_x = (depth_pair && i != 0) ? area_w : 0;
+                    const int32_t d_x0 = base_x + (int32_t)(view_bounds[i][0] * area_w);
+                    const int32_t d_x1 = base_x + (int32_t)(view_bounds[i][1] * area_w);
+                    const int32_t d_y0 = (int32_t)(view_bounds[i][2] * depth_h);
+                    const int32_t d_y1 = (int32_t)(view_bounds[i][3] * depth_h);
+                    depth_layers[i].subImage.imageRect.offset = {d_x0, d_y0};
+                    depth_layers[i].subImage.imageRect.extent = {d_x1 - d_x0, d_y1 - d_y0};
+                    static int64_t s_logged_depth_dims[2]{};
+                    const int64_t dims = ((int64_t)depth_w << 32) | (uint32_t)depth_h;
+                    if (i < 2 && s_logged_depth_dims[i] != dims) {
+                        s_logged_depth_dims[i] = dims;
+                        spdlog::info("[OpenXR][depth] depth image {}x{} eye {}x{} -> {}, view {} rect {{{}, {}}} {}x{}",
+                            depth_w, depth_h, texture_area_width, content_height,
+                            depth_pair ? "side by side" : "one view per image", i, d_x0, d_y0, d_x1 - d_x0, d_y1 - d_y0);
+                    }
+                }
                 depth_layers[i].minDepth = 0.0f;
                 depth_layers[i].maxDepth = 1.0f;
                 auto wtm = VR::get()->get_world_to_meters();
