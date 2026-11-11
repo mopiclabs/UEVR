@@ -490,7 +490,7 @@ void AutoResController::check_sp_step(CVarManager& cvars, const Inputs& inputs) 
 }
 
 // VR_AutoResFrameBoundDetect, once a second (AutoResPolicy.hpp FrameBoundJudge). The engine's own fixed frame rate is
-// bound at once (static); otherwise the game time against the wall time over the last 5 s (dynamic).
+// bound at once (static); otherwise the game time against the wall time over the last 3 s (dynamic).
 void AutoResController::check_frame_bound(const Inputs& inputs) {
     if (!inputs.frame_bound_detect) {
         m_tick_samples.clear();
@@ -524,14 +524,17 @@ void AutoResController::check_frame_bound(const Inputs& inputs) {
     m_tick_samples.push_back(TickSample{.at = now, .delta_us = inputs.tick_delta_us, .real_us = inputs.tick_real_us,
         .frames = uevr::perf::new_frames(), .loading = inputs.loading});
 
-    while (m_tick_samples.size() > 6) {
+    // FRAME_BOUND_WINDOW_SECONDS between the first and the last sample.
+    constexpr size_t window_samples = ar::FRAME_BOUND_WINDOW_SECONDS + 1;
+
+    while (m_tick_samples.size() > window_samples) {
         m_tick_samples.pop_front();
     }
 
     m_time_ratio.reset();
     bool loading = false;
 
-    if (m_tick_samples.size() == 6) {
+    if (m_tick_samples.size() == window_samples) {
         const auto& first = m_tick_samples.front();
         const auto& last = m_tick_samples.back();
         const auto real_us = last.real_us - first.real_us;

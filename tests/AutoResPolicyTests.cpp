@@ -55,14 +55,13 @@ static void test_ladder() {
 static void test_frame_bound() {
     ar::FrameBoundJudge judge{};
     judge.update(0.5f, 30.0f, false);
-    judge.update(0.5f, 30.0f, false);
-    expect(judge.state == ar::FrameBound::unknown, "two slow seconds are not enough");
-    expect(judge.update(0.5f, 30.0f, false) && judge.state == ar::FrameBound::bound, "three slow seconds are bound");
+    expect(judge.state == ar::FrameBound::unknown, "one slow second is not enough");
+    expect(judge.update(0.5f, 30.0f, false) && judge.state == ar::FrameBound::bound, "two slow seconds are bound");
     expect(!judge.update(1.0f, 30.0f, false) && judge.state == ar::FrameBound::bound, "bound stays");
 
     ar::FrameBoundJudge real{};
     real.update(1.0f, 30.0f, false);
-    real.update(1.0f, 30.0f, false);
+    expect(real.state == ar::FrameBound::unknown, "one real-time second is not enough");
     expect(real.update(0.99f, 30.0f, false) && real.state == ar::FrameBound::not_bound, "real time at 30 fps is not bound");
 
     ar::FrameBoundJudge fast{};
@@ -75,9 +74,8 @@ static void test_frame_bound() {
     loading.update(0.5f, 30.0f, false);
     loading.update(0.5f, 30.0f, true);
     loading.update(0.5f, 30.0f, false);
-    loading.update(0.5f, 30.0f, false);
     expect(loading.state == ar::FrameBound::unknown, "a load in between starts the count over");
-    expect(loading.update(0.5f, 30.0f, false) && loading.state == ar::FrameBound::bound, "then three in a row");
+    expect(loading.update(0.5f, 30.0f, false) && loading.state == ar::FrameBound::bound, "then two in a row");
 
     ar::FrameBoundJudge slow{};
     for (int i = 0; i < 10; ++i) {
@@ -89,8 +87,28 @@ static void test_frame_bound() {
     between.update(0.5f, 40.0f, false);
     between.update(0.85f, 40.0f, false);
     between.update(0.5f, 40.0f, false);
-    between.update(0.5f, 40.0f, false);
     expect(between.state == ar::FrameBound::unknown, "a second between the thresholds breaks the run");
+
+    // A game whose time is its 60 frames reads r = fps / 60: at the judge's 55 fps that is 0.917, and at 54 fps 0.9,
+    // which 0.9 took for not bound (PR #29 review).
+    for (const float fps : {54.0f, 55.0f}) {
+        ar::FrameBoundJudge fixed60{};
+        for (int i = 0; i < 10; ++i) {
+            fixed60.update(fps / 60.0f, fps, false);
+        }
+        expect(fixed60.state == ar::FrameBound::unknown, "a fixed 60 game at 54-55 fps is never not bound");
+    }
+
+    ar::FrameBoundJudge near_real{};
+    near_real.update(0.95f, 40.0f, false);
+    expect(near_real.update(0.96f, 40.0f, false) && near_real.state == ar::FrameBound::not_bound,
+        "r 0.95 or more twice is not bound");
+
+    ar::FrameBoundJudge weak{};
+    for (int i = 0; i < 10; ++i) {
+        weak.update(0.93f, 50.0f, false);
+    }
+    expect(weak.state == ar::FrameBound::unknown, "a weak slowdown (3080L TEKKEN, r 0.92-0.97) stays unknown at 0.93");
 }
 
 static void test_edges() {
