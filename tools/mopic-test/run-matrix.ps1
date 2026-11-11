@@ -4,6 +4,8 @@
 #   ... -Games Tekken8Demo,Stray -NoInject -Runs 1           # baselines without UEVR
 #
 # Each game's runs use the recipe of the same name (recipes\<Game>.json). Keep the PC unlocked and unused meanwhile.
+# StellarBlade is not in the default list: its recipe needs a UEVR with #28 (no release has it yet) and can't run
+# -NoInject (no window_fit). Name it with -Games ...,StellarBlade together with -Dll of such a build.
 # The frame-rate columns are each run's perf headline (result.json "perf", README "Frame rate"): the VR frame rate
 # (new engine frames submitted per second) with UEVR, the game's Present rate without it; " FG" = frame generation on.
 

@@ -74,7 +74,7 @@ foreach ($f in @("run-test.ps1", "run-ladder.ps1", "run-matrix.ps1", "selftest\s
 Write-Host "== 2. run-test.ps1 functions (loaded from the script's AST)"
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Tools "run-test.ps1"), [ref]$null, [ref]$null)
 $wanted = @("Get-SteamLibraries", "Find-SteamAppId", "Find-SteamGameDir", "Get-SteamAccountId", "Get-SavePlaceholderValues",
-    "Expand-SavePlaceholders", "Resolve-SaveTarget", "Copy-FileRetry", "Install-SaveFile", "Save-SaveEvidence",
+    "Expand-SavePlaceholders", "Resolve-SaveTarget", "Copy-FileRetry", "Install-SaveFile", "Save-SaveEvidence", "Invoke-SaveRetarget",
     "ConvertTo-ArgvString", "ConvertFrom-RecipeVars", "ConvertTo-PilotVarArgs",
     "Read-Shared", "Get-ClockPair", "Copy-Shared", "Find-GameSettings", "Find-PresentMon", "Get-FrameGenModules", "Get-PowerContext",
     "Save-MonadoSlice",
@@ -1006,6 +1006,38 @@ $pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py -W error $binPy "selft
 $pyOut | Where-Object { $_ -like "FAIL*" -or $_ -like "Traceback*" -or $_ -match "Error" } | ForEach-Object { Write-Host "  $_" }
 $pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
 Check "binocular self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
+
+Write-Host "== 7e. Stellar Blade saves (analysis\sbsave.py) on synthetic saves, the harness's save_retarget"
+$sbPy = Join-Path $Tools "analysis\sbsave.py"
+& { $ErrorActionPreference = "Continue"; & $Py -W error -m py_compile $sbPy 2>&1 | ForEach-Object { Write-Host "      $_" } }
+Check "py_compile sbsave.py (warnings as errors)" ($LASTEXITCODE -eq 0)
+$sbWork = Join-Path $Work "sbsave"
+# the own / community copies when this PC has them (gitignored): read and round-tripped, never written
+$pyOut = @(& { $ErrorActionPreference = "Continue"; & $Py -W error -I $sbPy "selftest" "--work" $sbWork (Join-Path $Tools "runs\save-sets\stellarblade\**\*.sav") 2>&1 | ForEach-Object { "$_" } })
+$pyOut | Where-Object { $_ -notlike "ok *" } | ForEach-Object { Write-Host "  $_" }
+$pyOk = @($pyOut | Where-Object { $_ -like "ok *" }).Count
+Check "sbsave self-test ($pyOk checks passed)" ($LASTEXITCODE -eq 0 -and $pyOk -gt 0)
+$synth = Join-Path $sbWork "synthetic.sav"
+if (Test-Path -LiteralPath $synth) {
+    $synthHash = Get-Hash $synth
+    $rtDir = Join-Path $Work "save-retarget"
+    $rt = Invoke-SaveRetarget "stellarblade" $synth $synthHash "76561199750818073" $rtDir $Py $sbPy
+    $rtInfo = (& $Py -I $sbPy info $rt.path --json | Out-String) | ConvertFrom-Json
+    Check "retarget: copy named <sha>-<sid64>-<name> in the folder" ($rt.path -eq (Join-Path $rtDir ("{0}-76561199750818073-synthetic.sav" -f $synthHash.Substring(0, 12)))) $rt.path
+    Check "retarget: the copy reads back with the new owner, CRC valid" ($rtInfo[0].steam_id -eq "76561199750818073" -and $rtInfo[0].crc_ok -eq $true) ($rtInfo | ConvertTo-Json -Compress)
+    Check "retarget: sha256 of the copy, original recorded" ($rt.sha256 -eq (Get-Hash $rt.path) -and $rt.original -eq $synth -and $rt.original_sha256 -eq $synthHash -and $rt.steam_id -eq "76561199750818073")
+    Check "retarget: the source unchanged" ((Get-Hash $synth) -eq $synthHash)
+    $rt2 = Invoke-SaveRetarget "stellarblade" $synth $synthHash "76561199750818073" $rtDir $Py $sbPy
+    Check "retarget again: same file, same bytes" ($rt2.path -eq $rt.path -and $rt2.sha256 -eq $rt.sha256 -and @(Get-ChildItem -LiteralPath $rtDir -File).Count -eq 1)
+    $rtJson = $rt | ConvertTo-Json -Depth 3 | ConvertFrom-Json
+    Check "retarget info survives ConvertTo-Json (result.json save.retarget)" ($rtJson.kind -eq "stellarblade" -and $rtJson.tool -like "*old_steam_id*76561190000000001*")
+    Throws "retarget: unknown kind" { Invoke-SaveRetarget "wukong" $synth $synthHash "1" $rtDir $Py $sbPy } "*unknown save_retarget 'wukong'*"
+    Throws "retarget: no Steam user" { Invoke-SaveRetarget "stellarblade" $synth $synthHash "" $rtDir $Py $sbPy } "*no Steam user found*"
+    $damaged = Join-Path $sbWork "damaged.sav"
+    Throws "retarget: a damaged save stops the run" { Invoke-SaveRetarget "stellarblade" $damaged (Get-Hash $damaged) "1" $rtDir $Py $sbPy } "*save_retarget failed*CRC mismatch*"
+} else {
+    Check "sbsave self-test left synthetic.sav" $false $synth
+}
 
 Write-Host "== 8. the real save folder"
 Check "real Wukong save folder unchanged by the self-test" ((Get-Listing $RealSaveDir) -join "`n" -eq ($realBefore -join "`n"))

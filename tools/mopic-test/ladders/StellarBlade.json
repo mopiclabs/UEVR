@@ -1,0 +1,58 @@
+{
+  "draft": true,
+  "game": "StellarBlade",
+  "recipe": "StellarBlade-save",
+  "source": {
+    "own": "runs\\save-sets\\stellarblade\\own\\ (gitignored): copies of mopic_demo1's (76561199750818073) StellarBladeSave00.sav from %LOCALAPPDATA%\\SB\\Saved\\SaveGames\\<sid64>\\, named <nn>-<map>-<where>.sav.",
+    "community": "runs\\community-saves\\StellarBlade\\ (gitignored): the Nexus archives as downloaded (DOWNLOADS.md there lists them; Nexus refuses scripted downloads, so the user saves them by hand), extracted\\<mod id>\\ their contents (data files only: an archive with an executable is refused), catalog.json the decoded state of every save (analysis\\sbsave.py info). runs\\save-sets\\stellarblade\\community\\<rung>.sav is the community file byte for byte: the recipe's save_retarget writes this PC's SteamID64 into a copy under runs\\save-retarget\\ at run time."
+  },
+  "target": {
+    "save_dir": "%LOCALAPPDATA%\\SB\\Saved\\SaveGames\\76561199750818073",
+    "file": "StellarBladeSave00.sav (the first slot; New Game+ adds StellarBladeSave01.sav and so on)",
+    "backup": "runs\\save-backups\\20261111-before-stellarblade\\SaveGames (the whole folder before any ladder run, 2026-11-11 03:30)"
+  },
+  "install": [
+    "run-test.ps1 -SaveFile retargets the rung (save_retarget: OnlineAccountID = the logged-in account, its two sizes and the CRC; the game refuses a save whose owner is another account) and copies it over StellarBladeSave00.sav, stamped with the current time; the file before goes to <run>\\save-before\\, the game's copy after to <run>\\save-after\\. StellarBladeSetting.sav (graphics, controls) is never replaced: a community archive's Setting file is not used.",
+    "Steam Cloud is on (steam_autocloud.vdf). The harness holds Steam offline during runs; at the next online start Steam uploads the last rung's slot. This ladder was set up on blade18 (game installed 2026-11-10); before another PC that plays Stellar Blade on mopic_demo1 runs it, expect Steam to offer a cloud conflict for the slot (keep the local file).",
+    "Achievements: a NG+ or 100 % save can unlock achievements on mopic_demo1 when loaded (aram accepted that on 2026-11-11). They sync when Steam goes online again."
+  ],
+  "notes": [
+    "DRAFT until the community rungs are in: no community save is downloaded yet, only the own rung exists. 2026-11-11 13:27 on blade18 (UEVR c1ecaa87 via -Dll): own-01-beach PASS, all 10 screens, 56.1 fps over 112 s of play (runs\\ladder-20261111-132641-StellarBlade.md).",
+    "Run it with -Dll of a UEVR that has PR #28 (c1ecaa87 on; blade18: runs\\dlls\\uevr-c1ecaa87\\UEVRBackend.dll) until a release has it: with the release v1.0.5.5 the game's UI never reaches the Mopic display and every rung fails at the title. Put the release DLL back afterwards.",
+    "The save says where the player is: DataMap_FString MapName (G03 = the prologue beach), CampAlias (the last camp), DataMap_int32 PlayTime (s), NewGamePlusPlayCount, GameDifficulty, TrackingQuestAliases (the tracked story quest). sbsave.py info prints them; each rung copies them.",
+    "The recipe loads the first card of 불러오기 and does not check it is the rung's save. That holds while StellarBladeSave00.sav is the only slot (blade18, 2026-11-11). If a PC has more slots (an NG+ play-through adds StellarBladeSave01.sav and so on), check before a run which card comes first: the game may sort by the date inside the save, not by the file time the harness sets. Otherwise a run can load another slot and still PASS.",
+    "pending_community lists the Nexus saves to add, in story order, with the place their pages give. Saves made at a camp load at that camp (safe, no enemy in view); a save 'right before a boss' may load inside a fight or a cut scene, where the recipe's movement keys do little and the pause menu may still work (cut scenes: Esc skips or pauses)."
+  ],
+  "pending_community": [
+    {"nexus": 1886, "where": "Great Desert, before the Democrawler boss", "tier": 1},
+    {"nexus": 795, "where": "before entering Eidos 9, side quests 100 %", "tier": 2},
+    {"nexus": 1024, "where": "before Abyss Levoire, collectibles done", "tier": 1},
+    {"nexus": 1057, "where": "right after Abyss Levoire, collectibles done", "tier": 2},
+    {"nexus": 270, "where": "before the final boss, minimal (point of no return)", "tier": 2},
+    {"nexus": 381, "where": "before the final boss, 99 %", "tier": 1},
+    {"nexus": 3170, "where": "before the final choice, Nest cave", "tier": 2},
+    {"nexus": 1141, "where": "before the Making New Memories ending, perfect save", "tier": 3},
+    {"nexus": 277, "where": "last boss scene, all skins", "tier": 3},
+    {"nexus": 1523, "where": "after the true ending", "tier": 2},
+    {"nexus": 383, "where": "NG+ hard, nothing unlocked", "tier": 1},
+    {"nexus": 831, "where": "NG+4, start of Eidos 7 (unlocks achievements)", "tier": 2},
+    {"nexus": 304, "where": "NG+, all outfits and gear", "tier": 3},
+    {"nexus": 3418, "where": "NG+3, 100 %", "tier": 2},
+    {"nexus": 3246, "where": "Everything save, needs the Complete Edition (optional)", "tier": 3}
+  ],
+  "rungs": [
+    {
+      "name": "own-01-beach",
+      "save": "runs\\save-sets\\stellarblade\\own\\own-01-g03-beach-after-intro.sav",
+      "tier": 1,
+      "sha256": "FCF419E0219348E6427AAD3775F8B7B76ED107A124346FB93E3448753804B8E5",
+      "size": 622958,
+      "map": "G03",
+      "tracking_quest": "Quest_Epic_01",
+      "played": "0:07:24",
+      "ng_plus": 0,
+      "source": "mopic_demo1 (76561199750818073)\\StellarBladeSave00.sav, 2026-11-10 21:19 (the first play-through on blade18)",
+      "note": "Prologue: the beach (G03) after the opening, about 7 minutes in. The game's own autosave."
+    }
+  ]
+}

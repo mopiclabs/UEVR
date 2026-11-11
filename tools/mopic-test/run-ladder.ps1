@@ -31,6 +31,8 @@ param(
     [string]$EngineDir = "",
     [string]$Label = "ladder",
     [switch]$Binocular,                            # compare both eyes every 3 s (run-test.ps1 -EyeSampler, binocular.py); monado-service in MOPIC_MODE=sbs
+    [string]$EyeSamplerArgs = "--full-every 3",    # with -Binocular: the eyesampler.py sample arguments (e.g. add "--burst-every 15")
+    [string]$Dll = "",                             # run-test.ps1 -Dll: deploy this UEVRBackend.dll for every rung
     [string[]]$StopOn = @("HARNESS_ERROR", "NO_VR"),   # stop the ladder after a rung with one of these verdicts
     [switch]$DryRun,                               # print what would run, run nothing
     [switch]$SteamOnline,                          # keep Steam online (default: offline for the whole ladder, back online after)
@@ -263,7 +265,8 @@ foreach ($rung in $selected) {
     $harnessArgs += @("-Runs", "$Runs", "-Label", $rung.label)
     if ($rung.vars -ne "") { $harnessArgs += @("-RecipeVars", $rung.vars) }
     if ($EngineDir -ne "") { $harnessArgs += @("-EngineDir", $EngineDir) }
-    if ($Binocular) { $harnessArgs += @("-EyeSampler", "-EyeSamplerArgs", "--full-every 3") }
+    if ($Binocular) { $harnessArgs += @("-EyeSampler", "-EyeSamplerArgs", $EyeSamplerArgs) }
+    if ($Dll -ne "") { $harnessArgs += @("-Dll", $Dll) }
     if ($SteamOnline) { $harnessArgs += "-SteamOnline" }
     Write-Host "=== [$rungNo/$($selected.Count)] $($rung.name) (tier $($rung.tier)) <- $(if ($rung.save -ne '') { $rung.save } else { "(no save: the game's own progress)" })" -ForegroundColor Cyan
     if ($DryRun) {

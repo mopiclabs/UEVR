@@ -46,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File tools\mopic-test\run-test.ps1 -Game <pr
 
 | Option | |
 | --- | --- |
-| `-Game` | `Tekken8Demo`, `Expedition33`, `Wukong`, `Hogwarts`, `Stray`, `Hozy`, `ACC`, `SonicDemo`, or `Custom -ProcessName <exe> -SteamInstallDir <dir>` |
+| `-Game` | `Tekken8Demo`, `Expedition33`, `Wukong`, `Hogwarts`, `Stray`, `Hozy`, `ACC`, `SonicDemo`, `DeadAsDisco`, `StellarBlade`, or `Custom -ProcessName <exe> -SteamInstallDir <dir>` |
 | `-Dll <path>` | deploy this UEVRBackend.dll (+pdb) to the Mopic Hub engine folder first (it stays deployed) |
 | `-Recipe <name>` | drive the game with `recipes\<name>.json`: gameplay, then quit through the menu (implies `-WaitForExit`, default `-Seconds 900`) |
 | `-NoInject` | the game without UEVR (baseline); with `-Recipe` the pilot reads the desktop window |
@@ -320,6 +320,10 @@ come from one submitted frame, so they normally change in the same refresh. `ana
 - `save_default`: the `-SaveFile` (relative to this folder) for runs that give none, for a recipe that only works
   from one save (`Wukong-shrine`: the post-game save at the Zodiac Village shrine; `Wukong-still`: ladder rung
   1.0). Without it a run loads whatever an earlier run left in the slot. `-NoSave` skips it.
+- `save_retarget`: `"stellarblade"`: the game only loads a save whose owner is the logged-in Steam account, so
+  before the first run the harness writes the `-SaveFile` / `save_default` with this PC's `{sid64}`
+  (`analysis\sbsave.py retarget`: the save's `OnlineAccountID`, the two sizes around it and its CRC) to
+  `runs\save-retarget\<sha>-<sid64>-<name>` and installs that copy; result.json `save.retarget` names the original.
 - `vars`: `{"play_s": 120, "boss": null}`, the names the steps may use as `${name}`, with their defaults (`null`:
   no default, it must be given). `--var name=value` (`-RecipeVars`) sets one; the value is read as JSON when it
   parses (`180`, `[110, 305]`, `true`, `["hud", "loading"]`), else as text. A step string that is only `${name}`
@@ -346,6 +350,7 @@ showing right now.
 | `{"expect_exit": 60}` | wait for the process to end; still running afterwards = `EXIT_HANG` |
 | `{"shot": "name"}` / `{"note": "..."}` | save a screenshot / comment |
 | `{"fail": "why", "if": "x"}` | end the recipe as `MENU_FAIL` with this message when checkpoint x shows (a screen the route can't get past, e.g. locked content), instead of timing out later |
+| `{"dismiss_dialog": "System Error", "timeout": 120}` | press OK on the game's own message box whose title contains the text, the way a player clicks it away (WM_COMMAND from its OK button, with the button's own control id: a system-error box's lone OK is IDCANCEL), and wait until it is gone. pilot.log gets each box's message (the same title also comes with other errors, such as a missing DLL). `timeout` defaults to 30 s; `"optional": true` (default) goes on when none showed within it, `false` fails the run |
 | `"measure": true` / `"<label>"` / `false` on a step | its frame rate is measured (see "Frame rate"): `play` and `play_until` are, as `gameplay`, unless `false`; `true` = `gameplay` |
 
 Checkpoints compare a region of the live screenshot with the saved crop (grayscale, shifts up to `margin` px,
@@ -473,3 +478,20 @@ can be stale. Check the top system function before concluding a thread is blocke
   active the desktop window shows the 3D scene behind the menus (without it, black), so the checkpoints sit on opaque
   UI; the gameplay HUD pulses with the beat and loses hearts, so the RESULT screen after Esc is the gameplay proof.
   To look at each eye, restart monado-service with `MOPIC_MODE=sbs` (the display then shows left | right).
+- Stellar Blade (UE 4.26, D3D12, Steam app 3489700; `-Game StellarBlade`): keyboard menus, Space confirm, Esc back,
+  Q/E switch the pause menu's tabs. Without the PlayStation PC SDK Runtime (Steam's first-start install script needs
+  admin; an unanswered UAC prompt makes Steam wait 2 min and retry at every start) the game shows "The PlayStation(R)
+  PC SDK Runtime cannot start" and its main thread waits on that box: recipes start with `dismiss_dialog`. Route:
+  title (no press-any-key screen) > 불러오기 > Space loads the first card at once > play > Esc (pause, 장비 tab) > E
+  to 설정 > 나가기 (last item; the list doesn't wrap) > 게임을 종료하고 나가기 > Space (예). Never 새로운 게임. The
+  recipes need UEVR with PR #28 (c1ecaa87 on): with the release v1.0.5.5 the title is black on the Mopic display and
+  `wait_for title` times out; until a release has it, run them with `-Dll` of such a build (blade18 keeps one in
+  `runs\dlls\uevr-c1ecaa87\`, gitignored) and put the release DLL back afterwards; for the same reason it is not in
+  run-matrix's default list (`-Games ...,StellarBlade -Dll ...`). One save,
+  `%LOCALAPPDATA%\SB\Saved\SaveGames\<sid64>\StellarBladeSave00.sav` (NG+ runs add 01, 02, ...); the game keeps
+  `Backup\StellarBladeSave00_Old.sav`. Saves are tied to the Steam account: community saves go through
+  `save_retarget` ("stellarblade"). `analysis\sbsave.py info` reads a save offline (map, camp, tracked quest, play
+  time, NG+ count, difficulty); `sbsave.py selftest` (in selftest.ps1, section 7e) checks reading and retargeting on
+  synthetic saves and round-trips the own / community copies this PC has. On the 16:9 Mopic window the game lays its
+  UI out 16:10 (its 화면 > HUD 영역 비율 setting from the laptop panel) with black pillar bars in the UI layer. No
+  `window_fit` yet, so `-NoInject` baselines can't follow the recipe.
