@@ -225,18 +225,24 @@ inline std::optional<Step> next_up(const State& state, const Available& availabl
 
 // Frame-bound games (design v1 §3-2, Appendix B): a game whose time runs with its frames plays in slow motion below its
 // frame rate (TEKKEN 8 at 30 fps took 183 s for a 137 s fight, 2026-11-05), so it needs 60 whatever the objective. The
-// judgement, once a second, takes r = the engine ticks' DeltaSeconds / the wall time between them over the last 5 s and
+// judgement, once a second, takes r = the engine ticks' DeltaSeconds / the wall time between them over the last 3 s and
 // that window's VR frame rate. A game on real time has r about 1 at any frame rate. It judges only at 22-55 VR fps
 // outside loads: above 55 a frame-bound game runs at about real time too, and below 22 UE's smoothing floor could hold
-// the game time back. r < 0.8 for 3 judged seconds in a row is bound, r >= 0.9 for 3 is not bound; bound stays for the
-// session.
+// the game time back. r < 0.8 for 2 judged seconds in a row is bound, r >= 0.95 for 2 is not bound; bound stays for the
+// session (design 2026-11-06: a 3 s window, 2 in a row).
+//
+// Not bound needs r >= 0.95, above what a game whose time is its frames reads anywhere the judge looks: at 55 fps of 60
+// its r is 0.917 (with 0.9 a fixed 60 game at 54-55 fps read as not bound). Games on real time read 0.99-1.00 (E5).
+// The hint does not change with it: GPU BOOST is bound, anything else is SUSTAINED_HIGH.
 enum class FrameBound : uint8_t { unknown, not_bound, bound };
 
 inline constexpr float FRAME_BOUND_RATIO = 0.8f;
-inline constexpr float NOT_BOUND_RATIO = 0.9f;
-inline constexpr int FRAME_BOUND_SECONDS = 3;
+inline constexpr float NOT_BOUND_RATIO = 0.95f;
+inline constexpr int FRAME_BOUND_SECONDS = 2;
+inline constexpr int FRAME_BOUND_WINDOW_SECONDS = 3;
 inline constexpr float FRAME_BOUND_MIN_FPS = 22.0f;
 inline constexpr float FRAME_BOUND_MAX_FPS = 55.0f;
+static_assert(FRAME_BOUND_MAX_FPS / 60.0f < NOT_BOUND_RATIO, "a 60 fps frame-bound game must never read as not bound");
 
 struct FrameBoundJudge {
     FrameBound state{FrameBound::unknown};

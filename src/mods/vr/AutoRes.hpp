@@ -151,7 +151,7 @@ private:
 
     bool m_frame_generation_hinted{false};
 
-    // VR_AutoResFrameBoundDetect: a second's sums, the last 6 for a 5 s window, and the judgement.
+    // VR_AutoResFrameBoundDetect: a second's sums, the last 4 for a 3 s window, and the judgement.
     struct TickSample {
         clock::time_point at{};
         uint64_t delta_us{}, real_us{}, frames{};
