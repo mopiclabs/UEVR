@@ -8,7 +8,7 @@
 # (new engine frames submitted per second) with UEVR, the game's Present rate without it; " FG" = frame generation on.
 
 param(
-    [string[]]$Games = @("Tekken8Demo", "Expedition33", "SonicDemo", "Hozy", "Stray", "Hogwarts", "Wukong", "ACC", "DeadAsDisco"),
+    [string[]]$Games = @("Tekken8Demo", "Expedition33", "SonicDemo", "Hozy", "Stray", "Hogwarts", "Wukong", "ACC", "DeadAsDisco", "StellarBlade"),
     [int]$Runs = 3,
     [string]$Dll = "",
     [string]$EngineDir = "",

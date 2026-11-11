@@ -67,7 +67,7 @@
 # its focus during the run. Any running UEVRInjector.exe and the game itself are closed at the start and end of
 # every run. -Dll leaves the given DLL deployed in the engine folder.
 param(
-    [ValidateSet("Tekken8Demo", "Expedition33", "Wukong", "Hogwarts", "Stray", "Hozy", "ACC", "SonicDemo", "DeadAsDisco", "Custom")]
+    [ValidateSet("Tekken8Demo", "Expedition33", "Wukong", "Hogwarts", "Stray", "Hozy", "ACC", "SonicDemo", "DeadAsDisco", "StellarBlade", "Custom")]
     [string]$Game = "Tekken8Demo",
     [string]$ProcessName = "",        # Custom: process name without .exe
     [string]$SteamInstallDir = "",    # Custom: steamapps\common\<this>, used to find the app id
@@ -118,6 +118,7 @@ $Presets = @{
     Hozy         = @{ Process = "CozyGame-Win64-Shipping"; InstallDir = "Hozy"; SettingsDir = "CozyGame" }
     ACC          = @{ Process = "AC2-Win64-Shipping";      InstallDir = "Assetto Corsa Competizione"; SettingsDir = "AC2" }
     SonicDemo    = @{ Process = "SonicRacingCrossWorldsSteam"; InstallDir = "SonicRacingCrossWorldsDemo"; SettingsDir = "UNION" }
+    StellarBlade = @{ Process = "SB-Win64-Shipping";       InstallDir = "StellarBlade"; SettingsDir = "SB" }
 }
 
 $SettingsDir = ""
@@ -334,6 +335,21 @@ function Copy-FileRetry([string]$from, [string]$to, [int]$seconds) {
         try { Copy-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop; return }
         catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Seconds 2 }
     }
+}
+
+# A recipe's "save_retarget": the save rewritten for the logged-in Steam account ($sid64) into $outDir, named
+# <sha256 prefix>-<sid64>-<name> (the same source and account give the same file again). The source stays as it is.
+# Returns what result.json records as save.retarget, plus the copy's path and sha256.
+function Invoke-SaveRetarget([string]$kind, [string]$source, [string]$sourceHash, [string]$sid64, [string]$outDir,
+    [string]$python, [string]$tool) {
+    if ($kind -ne "stellarblade") { throw "unknown save_retarget '$kind' (known: stellarblade)" }
+    if (-not $sid64) { throw "save_retarget needs the logged-in Steam user's SteamID64 (no Steam user found)" }
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    $out = Join-Path $outDir ("{0}-{1}-{2}" -f $sourceHash.Substring(0, 12), $sid64, (Split-Path -Leaf $source))
+    $log = @(& { $ErrorActionPreference = "Continue"; & $python -I $tool retarget $source $out --steamid $sid64 2>&1 | ForEach-Object { "$_" } })
+    if ($LASTEXITCODE -ne 0) { throw "save_retarget failed for $source`: $($log -join ' ')" }
+    return [ordered]@{ kind = $kind; original = $source; original_sha256 = $sourceHash; steam_id = $sid64; path = $out
+        sha256 = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash; tool = ($log -join " ") }
 }
 
 # Puts the run's save in place: the file already there is kept in <runDir>\save-before\, the save is copied over it
@@ -1202,6 +1218,21 @@ if ($SaveFile -ne "") {
     throw "-SaveAs and -SaveSlot need -SaveFile"
 }
 
+# A recipe's "save_retarget": "stellarblade": the game only loads a save made by the logged-in Steam account, so the
+# save is rewritten to this PC's {sid64} (analysis\sbsave.py retarget: OnlineAccountID, its sizes, the CRC) into
+# runs\save-retarget\ once, and that copy is what every run installs. The original stays as it is.
+$SaveRetarget = $null
+if ($SaveSource -and $Recipe -ne "" -and $recipeJson.save_retarget) {
+    $sid = (Get-SavePlaceholderValues (Find-SteamGameDir $SteamInstallDir)).sid64
+    try {
+        $SaveRetarget = Invoke-SaveRetarget ([string]$recipeJson.save_retarget) $SaveSource $SaveSourceHash $sid `
+            (Join-Path $RunsRoot "save-retarget") $PilotPython (Join-Path $ScriptDir "analysis\sbsave.py")
+    } catch { throw "Recipe $Recipe`: $_" }
+    $SaveSource = $SaveRetarget.path
+    $SaveSourceHash = $SaveRetarget.sha256
+    Write-Host "Save: retargeted to SteamID64 $sid -> $SaveSource"
+}
+
 # The game's settings files for each run: the recipe's "game_ini", then -GameIni (the later of two values for one key
 # wins), each file resolved and checked here, before any run
 $GameIniEntries = @()
@@ -1339,6 +1370,7 @@ for ($run = 1; $run -le $Runs; $run++) {
     if ($SaveSource) {
         try {
             $saveInfo = Install-SaveFile $SaveSource $SaveSourceHash $SaveTarget $runDir
+            if ($SaveRetarget) { $saveInfo.retarget = $SaveRetarget }
             Write-Host "Save installed: $SaveSource -> $SaveTarget"
         } catch {
             $saveError = "could not install the save: $($_.Exception.Message)"

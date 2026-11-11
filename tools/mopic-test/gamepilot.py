@@ -98,6 +98,56 @@ def find_window(proc):
     return found[0][1]
 
 
+def dialog_windows(proc, title_part):
+    """Visible standard dialog boxes (class #32770) of the process whose title contains `title_part`."""
+    found = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(hwnd, _):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        if cls.value != "#32770":
+            return True
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        name = process_name(pid.value)
+        if not name or name.lower() != proc.lower():
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        if title_part.lower() in buf.value.lower():
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(cb, 0)
+    return found
+
+
+def dialog_ok_button(box):
+    """(control id, hwnd) of the box's OK button: the Button labelled OK / 확인, else its only / first Button; None
+    when it has none. A system-error box's lone OK is IDCANCEL (2), not IDOK, so the id is read, not assumed."""
+    buttons = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(hwnd, _):
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        if cls.value == "Button" and user32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetWindowTextW(hwnd, buf, 64)
+            buttons.append((buf.value.replace("&", "").strip().lower(), user32.GetDlgCtrlID(hwnd), hwnd))
+        return True
+
+    user32.EnumChildWindows(box, cb, 0)
+    for text, cid, hwnd in buttons:
+        if text in ("ok", "확인"):
+            return cid, hwnd
+    return (buttons[0][1], buttons[0][2]) if buttons else None
+
+
 class PROCESSENTRY32W(ctypes.Structure):
     _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
                 ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wt.DWORD), ("cntThreads", wt.DWORD),
@@ -1254,8 +1304,38 @@ class Pilot:
             img, _ = self.grab()
             self.save_shot("FAILED-fail", img)
             raise Failed("blocked", step["fail"])
+        elif "dismiss_dialog" in step:
+            self.dismiss_dialog(step["dismiss_dialog"], step.get("timeout", 30), step.get("optional", True))
         else:
             raise Failed("recipe", f"unknown step {step}")
+
+    def dismiss_dialog(self, title, timeout, optional):
+        """Press OK on the game's own message box whose title contains `title` (a player clicks it away): Stellar
+        Blade's "The PlayStation(R) PC SDK Runtime cannot start" box stops its main thread until it is answered.
+        Waits up to `timeout` s for it; when none comes, an optional step goes on, otherwise the run fails."""
+        end = time.time() + timeout
+        pressed = 0
+        while True:
+            boxes = dialog_windows(self.proc, title)
+            for hwnd in boxes:
+                # WM_COMMAND BN_CLICKED from its OK button to the box: its own OK handling, no focus or mouse needed
+                ok = dialog_ok_button(hwnd)
+                cid, button = ok if ok else (1, 0)  # no button found: IDOK
+                user32.PostMessageW(wt.HWND(hwnd), 0x0111, wt.WPARAM(cid & 0xFFFF), wt.LPARAM(button))
+                if pressed == 0:
+                    self.log(f"  '{title}' box: pressing control {cid}")
+                pressed += 1
+            if boxes:
+                self.sleep(1.0)
+                if not dialog_windows(self.proc, title):
+                    self.log(f"  dismissed {pressed} '{title}' box(es)")
+                    return
+            if time.time() >= end:
+                if pressed == 0 and optional:
+                    self.log(f"  no '{title}' box within {timeout} s")
+                    return
+                raise Failed("checkpoint", f"'{title}' box {'did not go away' if pressed else 'never showed'} within {timeout} s")
+            self.sleep(0.5)
 
     def run(self, first=1, last=None):
         steps = self.recipe["steps"]
