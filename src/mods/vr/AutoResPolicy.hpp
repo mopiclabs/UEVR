@@ -12,11 +12,12 @@
 #include <optional>
 
 namespace uevr::autores {
-// The eye size ladder, relative to the runtime's recommended eye size (Base). Down-steps are uniform. On Mopic's 3D
-// display up-steps only widen the eye: the weave samples the width, so the extra width is sharper text for fewer pixels
-// than a uniform step, and a taller eye than 2160 crashed Hogwarts Legacy there; with its 1920x2160 eye these are design
-// v1's levels, Min 1280x1440, Saver 1600x1800, Base 1920x2160, Sharp 2880x2160, Max 3840x2160. On other displays the
-// up-steps are uniform with about the same pixel counts (1.5x and 2x).
+// The eye size ladder. On Mopic's 3D display it is design v1's table of sizes, whatever the runtime recommends: Min
+// 1280x1440, Saver 1600x1800, Base 1920x2160, Sharp 2880x2160, Max 3840x2160 (up-steps only widen the eye: the weave
+// samples the width, so the extra width is sharper text for fewer pixels than a uniform step, and a taller eye than 2160
+// crashed Hogwarts Legacy there). Sizes relative to the recommended one took a session that started at Min to
+// 1920x1440, 2560x1440 and 3200x1800 (2026-11-04). Elsewhere the ladder is relative to the runtime's recommended eye size
+// (Base): down-steps uniform, up-steps uniform with about the same pixel counts (1.5x and 2x).
 struct Level {
     const char* name;
     uint32_t width_num, width_den;
@@ -42,25 +43,27 @@ struct Size {
     constexpr bool operator==(const Size&) const = default;
 };
 
-// A level's eye size for a Base size, in even pixels. widen: Mopic's display (up-steps widen only).
-constexpr Size level_size(int level, Size base, bool widen = true) {
+// Mopic's ladder (design v1 §1-3), Min to Max.
+inline constexpr std::array<Size, 5> MOPIC_SIZES{{{1280, 1440}, {1600, 1800}, {1920, 2160}, {2880, 2160}, {3840, 2160}}};
+
+// A level's eye size, in even pixels. mopic: Mopic's display, the fixed table; otherwise relative to a Base size.
+constexpr Size level_size(int level, Size base, bool mopic = true) {
     const auto& l = LEVELS[level];
 
-    if (!widen) {
-        return Size{(uint32_t)((uint64_t)base.width * l.uniform_num / l.uniform_den) & ~1u,
-            (uint32_t)((uint64_t)base.height * l.uniform_num / l.uniform_den) & ~1u};
+    if (mopic) {
+        return MOPIC_SIZES[level];
     }
 
-    return Size{(uint32_t)((uint64_t)base.width * l.width_num / l.width_den) & ~1u,
-        (uint32_t)((uint64_t)base.height * l.height_num / l.height_den) & ~1u};
+    return Size{(uint32_t)((uint64_t)base.width * l.uniform_num / l.uniform_den) & ~1u,
+        (uint32_t)((uint64_t)base.height * l.uniform_num / l.uniform_den) & ~1u};
 }
 
 // The highest level that fits the runtime's maxImageRect (at least Min).
-constexpr int highest_level_within(Size base, Size max, bool widen = true) {
+constexpr int highest_level_within(Size base, Size max, bool mopic = true) {
     int highest = MIN_LEVEL;
 
     for (int i = MIN_LEVEL; i <= MAX_LEVEL; ++i) {
-        const auto size = level_size(i, base, widen);
+        const auto size = level_size(i, base, mopic);
 
         if (size.width <= max.width && size.height <= max.height) {
             highest = i;
@@ -71,13 +74,13 @@ constexpr int highest_level_within(Size base, Size max, bool widen = true) {
 }
 
 // The level with the pixel count closest to an eye size (by ratio, so 1.5x above and 1.5x below are as far).
-constexpr int nearest_level(Size size, Size base, bool widen = true) {
+constexpr int nearest_level(Size size, Size base, bool mopic = true) {
     const auto pixels = (uint64_t)size.width * size.height;
     int best = BASE_LEVEL;
     uint64_t best_num = 0, best_den = 1; // the best ratio max(a, b) / min(a, b) so far, as a fraction
 
     for (int i = MIN_LEVEL; i <= MAX_LEVEL; ++i) {
-        const auto level = level_size(i, base, widen);
+        const auto level = level_size(i, base, mopic);
         const auto level_pixels = (uint64_t)level.width * level.height;
         const auto num = pixels > level_pixels ? pixels : level_pixels;
         const auto den = pixels > level_pixels ? level_pixels : pixels;
@@ -219,6 +222,54 @@ inline std::optional<Step> next_up(const State& state, const Available& availabl
 
     return std::nullopt;
 }
+
+// Frame-bound games (design v1 §3-2, Appendix B): a game whose time runs with its frames plays in slow motion below its
+// frame rate (TEKKEN 8 at 30 fps took 183 s for a 137 s fight, 2026-11-05), so it needs 60 whatever the objective. The
+// judgement, once a second, takes r = the engine ticks' DeltaSeconds / the wall time between them over the last 5 s and
+// that window's VR frame rate. A game on real time has r about 1 at any frame rate. It judges only at 22-55 VR fps
+// outside loads: above 55 a frame-bound game runs at about real time too, and below 22 UE's smoothing floor could hold
+// the game time back. r < 0.8 for 3 judged seconds in a row is bound, r >= 0.9 for 3 is not bound; bound stays for the
+// session.
+enum class FrameBound : uint8_t { unknown, not_bound, bound };
+
+inline constexpr float FRAME_BOUND_RATIO = 0.8f;
+inline constexpr float NOT_BOUND_RATIO = 0.9f;
+inline constexpr int FRAME_BOUND_SECONDS = 3;
+inline constexpr float FRAME_BOUND_MIN_FPS = 22.0f;
+inline constexpr float FRAME_BOUND_MAX_FPS = 55.0f;
+
+struct FrameBoundJudge {
+    FrameBound state{FrameBound::unknown};
+    int low_seconds{0};  // judged seconds in a row under FRAME_BOUND_RATIO
+    int high_seconds{0}; // and at NOT_BOUND_RATIO or more
+
+    // One second's window; true when the state changed.
+    bool update(std::optional<float> ratio, float fps, bool loading) {
+        if (state == FrameBound::bound) {
+            return false;
+        }
+
+        if (!ratio || loading || fps < FRAME_BOUND_MIN_FPS || fps > FRAME_BOUND_MAX_FPS) {
+            low_seconds = high_seconds = 0;
+            return false;
+        }
+
+        low_seconds = *ratio < FRAME_BOUND_RATIO ? low_seconds + 1 : 0;
+        high_seconds = *ratio >= NOT_BOUND_RATIO ? high_seconds + 1 : 0;
+
+        if (low_seconds >= FRAME_BOUND_SECONDS) {
+            state = FrameBound::bound;
+            return true;
+        }
+
+        if (high_seconds >= FRAME_BOUND_SECONDS && state != FrameBound::not_bound) {
+            state = FrameBound::not_bound;
+            return true;
+        }
+
+        return false;
+    }
+};
 
 inline void apply(State& state, const Step& step) {
     switch (step.actuator) {

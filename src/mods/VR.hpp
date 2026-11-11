@@ -1598,13 +1598,16 @@ private:
     // the new size (0 = off); the right eye of its first frames at the new size comes out black.
     const ModInt32::Ptr m_autores_source_hold_ms{ ModInt32::create(generate_name("AutoResSourceHoldMs"), 150, true) };
     // A live resolution change that the eye swapchain already fits keeps the swapchain: the eye pair goes to its top left
-    // and the projection views cover just that, so the runtime creates and imports nothing mid-session.
-    const ModToggle::Ptr m_autores_keep_swapchains{ ModToggle::create(generate_name("AutoResKeepSwapchains"), false, true) };
+    // and the projection views cover just that, so the runtime creates and imports nothing mid-session. On by default
+    // (2026-11-10, with VR_AutoRes: the combination measured in the auto-resolution campaigns).
+    const ModToggle::Ptr m_autores_keep_swapchains{ ModToggle::create(generate_name("AutoResKeepSwapchains"), true, true) };
     // Automatic resolution (AutoRes.hpp): request XR_EXT_performance_settings and answer the runtime's GPU / CPU edges
     // with one step each: r.ScreenPercentage (not under DLSS), the DLSS quality where the game has a DLSS plugin, then the
-    // eye size from a ladder around the recommended size (kept swapchain). Off by default; without a runtime that
-    // implements the extension nothing moves.
-    const ModToggle::Ptr m_autores{ ModToggle::create(generate_name("AutoRes"), false, true) };
+    // eye size from a ladder around the recommended size (kept swapchain). On by default since 2026-11-10, to go with
+    // the Mopic runtime's auto-resolution (on by default too): without it the runtime still picks the start size by the
+    // GPU, and an 8 GB laptop stays at its lowest level all session. Nothing moves without a session that has the
+    // extension (an older runtime, another runtime).
+    const ModToggle::Ptr m_autores{ ModToggle::create(generate_name("AutoRes"), true, true) };
     // Automatic level steps rebuild live also on the engine paths the version policy keeps the slider from: UE 5.0-5.2 and
     // versions UEVR can't read (TEKKEN 8 demo, Black Myth: Wukong and the Sonic Racing: CrossWorlds demo took 149 forced
     // live rebuilds without a fault on 2026-10-25). Not UE4 before 4.27, and never Stalker 2, whose live rebuild is
@@ -1618,6 +1621,12 @@ private:
     // The synthetic edges start this long after automatic resolution starts (a test recipe still in the menus then would
     // lose its clicks to the steps).
     const ModInt32::Ptr m_autores_toggle_delay_seconds{ ModInt32::create(generate_name("AutoResToggleDelaySeconds"), 60, true) };
+    // With VR_AutoRes: find out whether the game's time runs with its frames (it would play in slow motion at 30 fps,
+    // TEKKEN 8) and hint the runtime once a second, GPU BOOST when it does and SUSTAINED_HIGH while it doesn't (AutoRes.hpp).
+    // Off by default: a session that sends these GPU hints lets the Mopic runtime use its objective (A) (a clean 30 at a
+    // higher level), and the shipped default is (B), 60 first (design v1, 2026-11-10: (A)'s half cadence can hold a
+    // session on a mixed 33-35 fps). Without the hints the runtime runs every game at (B); no GPU hint goes out at all.
+    const ModToggle::Ptr m_autores_frame_bound_detect{ ModToggle::create(generate_name("AutoResFrameBoundDetect"), false, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -1771,8 +1780,9 @@ private:
     const ModToggle::Ptr m_ghosting_fix_bootstrap_view_states{ ModToggle::create(generate_name("GhostingFixBootstrapViewStates"), false) };
     // Version of the Mopic config defaults this config.txt has been migrated to (see Mods::reload_config).
     // Mods.cpp's MOPIC_CONFIG_VERSION: a reset config holds every current default, and a lower version would run the
-    // migrations on it again (migration 3 would take an N of 30 chosen after the reset back to 15).
-    const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 3, true) };
+    // migrations on it again (migration 3 would take an N of 30 chosen after the reset back to 15; migration 4 would turn
+    // VR_AutoRes back on after the user turned it off).
+    const ModInt32::Ptr m_mopic_config_version{ ModInt32::create("Mopic_ConfigVersion", 4, true) };
     const ModToggle::Ptr m_mopic_force_windowed_fullscreen{ ModToggle::create(generate_name("MopicForceWindowedFullscreen"), true) };
     const ModToggle::Ptr m_native_stereo_fix{ ModToggle::create(generate_name("NativeStereoFix"), true) };
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
@@ -1994,6 +2004,7 @@ public:
             *m_autores_level_interval_seconds,
             *m_autores_toggle_seconds,
             *m_autores_toggle_delay_seconds,
+            *m_autores_frame_bound_detect,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,
@@ -2262,6 +2273,11 @@ private:
     uint32_t m_autores_engine_frames{0};
     int m_autores_last_frame_count{-1};
     bool m_autores_frame_generation{false};
+    // VR_AutoResFrameBoundDetect: the game thread's tick sums and the engine's frame rate settings (read once there).
+    uevr::autores::TickClock m_autores_tick_clock{};
+    uevr::autores::EngineFrameRate m_autores_engine_frame_rate{};
+    bool m_autores_engine_frame_rate_read{false}; // the game thread's only
+    std::atomic<bool> m_autores_engine_frame_rate_ready{false};
     int m_left_eye_frame_count{0};
     int m_right_eye_frame_count{0};
 
