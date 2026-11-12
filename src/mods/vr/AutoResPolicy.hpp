@@ -443,6 +443,46 @@ struct InternalRecovery {
     }
 };
 
+// VR_AutoResOutputAnchor decides after the loading (design v1 §7-57), not in the menus the session starts in: a menu's
+// GPU memory says nothing about the level's (Hogwarts and Wukong on 8 GB are 103-110 % in game). Once a second: a load
+// (an engine stall) seen after the first 15 s, then 30 s without one; GPU memory is the most it reached in those 30 s.
+// A session with no load by 3 minutes decides then, on the most since its last load.
+struct AnchorGate {
+    static constexpr int IGNORE_LOADS_SECONDS = 15; // the session's own start-up stalls
+    static constexpr int MIN_SECONDS = 40;
+    static constexpr int CALM_SECONDS = 30;
+    static constexpr int NO_LOAD_SECONDS = 180;
+
+    int seconds{0};
+    bool load_seen{false};
+    int calm{0};
+    std::optional<float> vram_max{};
+
+    // True when the decision is due (and stays true until the caller decides).
+    bool tick(bool loading, std::optional<float> vram_percent) {
+        ++seconds;
+
+        if (loading) {
+            load_seen = load_seen || seconds > IGNORE_LOADS_SECONDS;
+            calm = 0;
+            vram_max.reset();
+            return false;
+        }
+
+        ++calm;
+
+        if (vram_percent) {
+            vram_max = vram_max ? (std::max)(*vram_max, *vram_percent) : *vram_percent;
+        }
+
+        if (seconds < MIN_SECONDS || !vram_max) {
+            return false;
+        }
+
+        return (load_seen && calm >= CALM_SECONDS) || seconds >= NO_LOAD_SECONDS;
+    }
+};
+
 inline void apply(State& state, const Step& step) {
     switch (step.actuator) {
     case Actuator::sp:

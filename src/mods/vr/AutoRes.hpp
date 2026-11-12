@@ -173,6 +173,9 @@ private:
     bool m_anchor_decided{false};
     bool m_anchor_raised{false};
     int m_anchor_from{uevr::autores::MIN_LEVEL};
+    // When it is decided: after the loading, on the GPU memory of the 30 s after it.
+    uevr::autores::AnchorGate m_anchor_gate{};
+    bool m_anchor_due{false};
     // VR_AutoResInternalRecover, and the step up it took (undone when IMPAIRED follows).
     uevr::autores::InternalRecovery m_recovery{};
     std::optional<uevr::autores::Step> m_recovery_step{};

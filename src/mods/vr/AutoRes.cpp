@@ -227,6 +227,8 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_anchor_decided = false;
     m_anchor_raised = false;
     m_anchor_from = m_state.start_level;
+    m_anchor_gate = ar::AnchorGate{};
+    m_anchor_due = false;
     m_recovery = ar::InternalRecovery{};
     m_recovery_step.reset();
     m_test_level_done = false;
@@ -404,6 +406,7 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     m_vram_percent = query_vram_percent();
     const auto settling = m_last_level_change.time_since_epoch().count() != 0 && now - m_last_level_change < std::chrono::seconds{5};
     m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f && !settling && !inputs.loading ? m_vram_over_seconds + 1 : 0;
+    m_anchor_due = m_anchor_gate.tick(inputs.loading, m_vram_percent);
     publish();
 
     // The GPU time the step checks use, every 10 s, for reading a session back.
@@ -486,9 +489,9 @@ void AutoResController::set_internal(CVarManager& cvars, int upscaler, int sp) {
     publish();
 }
 
-// VR_AutoResOutputAnchor, decided once a session (design v1 §7-57): where the internal resolution can go deep (DLSS
-// with steps above its floor, or SP under a temporal upscaler), the session started below Base and the game's GPU
-// memory is under 70 % of the budget, the eye goes to Base (within the cap) and the internal resolution to its floor in
+// VR_AutoResOutputAnchor, decided once a session after the loading (AnchorGate, design v1 §7-57): where the internal
+// resolution can go deep (DLSS with steps above its floor, or SP under a temporal upscaler), the session started below
+// Base and the game's GPU memory stayed under 70 % of the budget for the 30 s after the load, the eye goes to Base (within the cap) and the internal resolution to its floor in
 // the same step: about the same cost, and a DLSS-upscaled Base looks better than a native Min. The only step that does
 // not wait for the runtime's NORMAL; after it Base is the anchor the steps up return to. The VRAM guard takes it back.
 void AutoResController::check_anchor(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs) {
@@ -498,12 +501,15 @@ void AutoResController::check_anchor(runtimes::OpenXR& openxr, CVarManager& cvar
 
     const auto report = cvars.get_autores_report();
 
-    // The probe's first answer (30 s at most) and a settled game first.
-    if (report.upscaler_kind == (int)ar::Upscaler::unknown || clock::now() - m_activated_at < std::chrono::seconds{40} || !m_vram_percent) {
+    // The probe's first answer (30 s at most) and the game past its loading (AnchorGate).
+    if (report.upscaler_kind == (int)ar::Upscaler::unknown || !m_anchor_due || !m_anchor_gate.vram_max) {
         return;
     }
 
     m_anchor_decided = true;
+    const auto vram = *m_anchor_gate.vram_max;
+    const auto after = m_anchor_gate.load_seen ? fmt::format("{} s after a load", m_anchor_gate.calm)
+                                               : fmt::format("no load in {} s", m_anchor_gate.seconds);
     const auto upscaler = m_available.upscaler && m_available.upscaler_steps > 0;
     const auto deep_sp = !m_available.upscaler && m_available.sp && m_available.sp_steps >= ar::SP_STEPS_TEMPORAL;
     const auto to = (std::min)(ar::BASE_LEVEL, m_state.level_cap);
@@ -512,11 +518,12 @@ void AutoResController::check_anchor(runtimes::OpenXR& openxr, CVarManager& cvar
         : to <= m_state.level ? "the cap is not above the eye"
         : m_state.level != m_state.start_level ? "the eye moved already"
         : !upscaler && !deep_sp ? "no deep internal resolution (no DLSS steps, no temporal upscaler)"
-        : *m_vram_percent >= 70.0f ? "GPU memory is 70 % of the budget or more"
+        : vram >= 70.0f ? "GPU memory reached 70 % of the budget or more"
         : nullptr;
 
     if (no != nullptr) {
-        SPDLOG_INFO("[autores] output anchor: stays at {} ({}; VRAM {:.0f} %)", ar::LEVELS[m_state.level].name, no, *m_vram_percent);
+        SPDLOG_INFO("[autores] output anchor: stays at {} ({}; VRAM up to {:.0f} %, {})", ar::LEVELS[m_state.level].name, no,
+            vram, after);
         return;
     }
 
@@ -530,10 +537,10 @@ void AutoResController::check_anchor(runtimes::OpenXR& openxr, CVarManager& cvar
     m_anchor_from = from;
     m_anchor_raised = true;
     m_state.start_level = to;
-    SPDLOG_INFO("[autores] output anchor: {} -> {} with the internal resolution at its floor ({}), VRAM {:.0f} %; {} is the "
-        "anchor now", ar::LEVELS[from].name, ar::LEVELS[to].name,
+    SPDLOG_INFO("[autores] output anchor: {} -> {} with the internal resolution at its floor ({}), VRAM up to {:.0f} %, {}; {} is "
+        "the anchor now", ar::LEVELS[from].name, ar::LEVELS[to].name,
         upscaler ? fmt::format("DLSS {} below the game's", m_state.upscaler) : fmt::format("SP {} %", ar::SP_PERCENT[m_state.sp]),
-        *m_vram_percent, ar::LEVELS[to].name);
+        vram, after, ar::LEVELS[to].name);
 }
 
 // VR_AutoResInternalRecover (AutoResPolicy.hpp InternalRecovery), once a second while settled.

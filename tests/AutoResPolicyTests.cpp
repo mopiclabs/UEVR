@@ -289,6 +289,53 @@ static void test_internal_recovery() {
     expect(doubling.block == 3600 && doubling.undos == 6, "5, 10, 20, 40 minutes, then an hour");
 }
 
+static void test_anchor_gate() {
+    // Hogwarts Legacy as the harness plays it: the title for 40 s at 45 % (a stall at start-up), the save's load at 41-50 s,
+    // then the castle at 95 %. The menu's 45 % must not decide it.
+    ar::AnchorGate hog{};
+    bool due = false;
+    for (int s = 1; s <= 60 && !due; ++s) {
+        const bool loading = s == 3 || (s >= 41 && s <= 50);
+        due = hog.tick(loading, s <= 40 ? 45.0f : 95.0f);
+        expect(!due || s > 50, "not in the title menu, not during the load");
+    }
+    expect(!due, "not before 30 s after the load");
+    for (int s = 61; s <= 80 && !due; ++s) {
+        due = hog.tick(false, 95.0f);
+        expect(!due || s == 80, "due 30 s after the load");
+    }
+    expect(due && hog.load_seen && hog.vram_max && *hog.vram_max == 95.0f, "decided on the castle's memory");
+
+    // A load starts the 30 s over and forgets the memory before it.
+    ar::AnchorGate again{};
+    for (int s = 1; s <= 70; ++s) {
+        again.tick(s == 20, s < 60 ? 80.0f : 50.0f);
+    }
+    expect(again.tick(true, 50.0f) == false && !again.vram_max, "a load: not due, memory forgotten");
+    for (int s = 0; s < 29; ++s) {
+        expect(!again.tick(false, 50.0f), "29 s after it");
+    }
+    expect(again.tick(false, 50.0f) && *again.vram_max == 50.0f, "30 s after it, on its own memory");
+
+    // Start-up stalls are not the load; a session without one decides at 3 minutes.
+    ar::AnchorGate none{};
+    bool none_due = false;
+    int at = 0;
+    for (int s = 1; s <= 200 && !none_due; ++s) {
+        none_due = none.tick(s <= 10 && s % 3 == 0, 40.0f);
+        at = s;
+    }
+    expect(none_due && at == 180 && !none.load_seen, "no load: due at 180 s");
+
+    // No GPU memory reading: never due.
+    ar::AnchorGate blind{};
+    bool blind_due = false;
+    for (int s = 1; s <= 300; ++s) {
+        blind_due = blind_due || blind.tick(s == 20, std::nullopt);
+    }
+    expect(!blind_due, "no memory reading: not due");
+}
+
 static void test_upscaler_probe() {
     using R = ar::ProbeReading;
 
@@ -345,6 +392,7 @@ int main() {
     test_step_effect();
     test_dlss_floor();
     test_internal_recovery();
+    test_anchor_gate();
 
     if (failures == 0) {
         std::printf("autores-policy-tests: all passed\n");
