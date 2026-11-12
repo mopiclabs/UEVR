@@ -159,12 +159,26 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
     const auto upscaler_target = m_autores_upscaler_target.load();
     const auto now = std::chrono::steady_clock::now();
 
+    // A new activation looks again from the start (the 2 s phase, nothing assumed from the last session).
+    const auto active_now = m_autores_active.load();
+
+    if (active_now && !m_autores_was_active) {
+        m_autores_probe = uevr::autores::UpscalerProbe{};
+        m_autores_probe_started = {};
+        m_autores_probe_next = {};
+        m_autores_upscaler_kind = (int)uevr::autores::Upscaler::unknown;
+    }
+
+    m_autores_was_active = active_now;
+
+    // A probe that threw is not tried again this run: the same faulting call would come back every few seconds.
     try {
-        if (m_autores_active) {
+        if (active_now && !m_autores_probe_failed) {
             probe_autores_upscaler(engine);
         }
     } catch (...) {
-        SPDLOG_WARN("[autores] looking for the game's upscaler threw; no upscaler steps, SP steps");
+        SPDLOG_WARN("[autores] looking for the game's upscaler threw; no upscaler steps, SP steps, not looked for again");
+        m_autores_probe_failed = true;
         m_autores_probe.kind = uevr::autores::Upscaler::none;
         m_autores_upscaler_kind = (int)uevr::autores::Upscaler::none;
         m_autores_upscaler_unavailable = true;
@@ -200,9 +214,19 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
     const auto kind = (uevr::autores::Upscaler)kind_now;
 
     try {
+        // A switch from one DLSS kind to the other (a game with both, read as one before a world answered the other)
+        // puts the other kind's step back first, so the two never stack.
         if (kind == uevr::autores::Upscaler::dlss_quality) {
+            if (m_autores_dlss_mode.written) {
+                put_back_dlss_mode(engine);
+            }
+
             process_autores_dlss_quality();
         } else if (kind == uevr::autores::Upscaler::dlss_mode) {
+            if (m_autores_dlss_quality.written) {
+                restore(m_autores_dlss_quality);
+            }
+
             process_autores_dlss_mode(engine);
         } else {
             restore_autores_upscalers(engine);
@@ -314,11 +338,12 @@ void CVarManager::process_autores_dlss_quality() {
         return;
     }
 
-    // Turned off since the probe found it: the probe makes it none after two reads, and SP takes over then.
+    // Turned off since the probe found it: the probe makes it none after two reads, and SP takes over then. The next
+    // read comes sooner, but still 2 s apart, so a DLSS off for a moment (a settings menu applying) is not none.
     if (const auto enabled = read(m_autores_dlss_enable); !enabled || *enabled < 0.5f) {
         restore(quality);
         m_autores_upscaler_applied = 0;
-        m_autores_probe_next = {};
+        probe_autores_upscaler_soon();
         return;
     }
 
@@ -410,8 +435,9 @@ bool call(sdk::UClass* library, sdk::UFunction* function, std::vector<uint8_t>& 
 // The UE5 DLSS plugin's Blueprint library (UDLSSLibrary).
 using AutoResDlssMode = CVarManager::AutoResDlssMode;
 
-// True when the library and its four functions are there. A miss walks every object, so it is looked for again only a
-// minute later (the plugin's native classes are registered at startup, long before the OpenXR session).
+// True when the library and its four functions are there. A miss walks every object on the game thread (a name that
+// isn't there is not cached), so it is looked for three times a minute apart and then no more: the plugin's native
+// classes are registered at startup, long before the OpenXR session, and the retries only cover a lookup made too early.
 bool find_dlss_library(AutoResDlssMode& dlss) {
     if (dlss.library != nullptr) {
         return true;
@@ -419,7 +445,7 @@ bool find_dlss_library(AutoResDlssMode& dlss) {
 
     const auto now = std::chrono::steady_clock::now();
 
-    if (dlss.incomplete || now < dlss.next_lookup) {
+    if (dlss.incomplete || dlss.lookups >= 3 || now < dlss.next_lookup) {
         return false;
     }
 
@@ -609,6 +635,8 @@ void CVarManager::probe_autores_upscaler(sdk::UGameEngine* engine) {
         return;
     }
 
+    m_autores_probe_last = now;
+
     if (m_autores_probe_started.time_since_epoch().count() == 0) {
         m_autores_probe_started = now;
     }
@@ -659,6 +687,12 @@ void CVarManager::probe_autores_upscaler(sdk::UGameEngine* engine) {
             kind == Upscaler::dlss_mode ? "UDLSSLibrary's DLSS mode" : "r.NGX.DLSS.Quality", seconds, m_autores_probe.tries, seen,
             before == Upscaler::none ? " (SP put back)" : "");
     }
+}
+
+// The other DLSS kind's next read: sooner after an off read, but not sooner than 2 s after the last one (the probe's two
+// off reads in a row must be two separate moments).
+void CVarManager::probe_autores_upscaler_soon() {
+    m_autores_probe_next = (std::min)(m_autores_probe_next, m_autores_probe_last + std::chrono::seconds{2});
 }
 
 // A DLSS mode or quality of ours put back, when DLSS no longer sets the input resolution.
@@ -804,6 +838,7 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
     auto& dlss = m_autores_dlss_mode;
 
     if (steps <= 0 || m_autores_upscaler_unavailable) {
+        // A mode that is no longer ours stays.
         m_autores_upscaler_applied = 0;
         put_back_dlss_mode(engine);
         return;
@@ -841,7 +876,7 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
         // Turned off since the probe found it: the probe makes it none after two reads, and SP takes over then.
         if (!rank_autores_dlss_modes(engine, dlss.written && dlss.base ? *dlss.base : *current)) {
             m_autores_upscaler_applied = 0;
-            m_autores_probe_next = {};
+            probe_autores_upscaler_soon();
             return;
         }
     }

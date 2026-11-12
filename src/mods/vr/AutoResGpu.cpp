@@ -25,7 +25,8 @@ struct Pdh {
     decltype(&PdhCloseQuery) close_query{};
 
     bool load() {
-        const auto module = LoadLibraryW(L"pdh.dll");
+        // From System32 only, never a pdh.dll in the game's folder.
+        const auto module = LoadLibraryExW(L"pdh.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 
         if (module == nullptr) {
             return false;

@@ -167,6 +167,10 @@ private:
     // Left out by the step check, for the session; CVarManager's report can take an actuator out (and back) any time.
     bool m_sp_left_out{false};
     bool m_upscaler_left_out{false};
+    // A step past the first that moved nothing: its actuator stops at the step before it, which worked, for the session
+    // (-1: no cap).
+    int m_sp_cap{-1};
+    int m_upscaler_cap{-1};
     uevr::autores::GpuBusySampler m_gpu{};
 
     // VR_AutoResOutputAnchor: decided once a session; raised from m_anchor_from to Base until the VRAM guard trips.

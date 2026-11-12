@@ -350,6 +350,7 @@ private:
     bool rank_autores_dlss_modes(sdk::UGameEngine* engine, uint8_t current);
     void check_autores_temporal_upscale();
     void log_autores_dynamic_resolution();
+    void probe_autores_upscaler_soon();
     void process_autores_sp();
     void process_autores_dlss_quality();
     void process_autores_dlss_mode(sdk::UGameEngine* engine);
@@ -362,9 +363,13 @@ private:
     int m_autores_floor_processed{0};
     int m_autores_temporal_seen{-1}; // -1 not read yet, 0 no, 1 a temporal upscaler
     bool m_autores_dynamic_resolution_logged{false};
+    // The probe's state is the game thread's (process_autores).
     uevr::autores::UpscalerProbe m_autores_probe{};
     std::chrono::steady_clock::time_point m_autores_probe_started{};
     std::chrono::steady_clock::time_point m_autores_probe_next{};
+    std::chrono::steady_clock::time_point m_autores_probe_last{};
+    bool m_autores_probe_failed{false};
+    bool m_autores_was_active{false};
     int m_autores_kind_processed{-1};
     std::atomic<int> m_autores_sp_applied{100};
     std::atomic<int> m_autores_upscaler_applied{0};
