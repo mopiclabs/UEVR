@@ -497,9 +497,11 @@ void AutoResController::sync_available(CVarManager& cvars) {
 
 // An SP or upscaler step down, against the 3 s before it (design v1 Appendix B, self-calibration): the GPU time per
 // frame 2-5 s after the step (AutoResPolicy.hpp judge_step) and the frame rate over the same window. A step that does
-// nothing worth keeping is put back and its actuator is left out for the session; so is one that leaves the game 10 %
-// slower (Dead as Disco ran heavier at a lower r.ScreenPercentage, 2026-10-15). A request still wanted then goes to the
-// next actuator. A window with a stall or a load in it is not judged.
+// nothing worth keeping is against; so is one that leaves the game 10 % slower (Dead as Disco ran heavier at a lower
+// r.ScreenPercentage, 2026-10-15). The first verdict against it only puts the step back: the request, if still wanted,
+// takes it again 5 s later from a fresh "before" (a scene change can read as the step's, StepStrikes). The second in a
+// row leaves the actuator out for the session, and a request still wanted goes to the next actuator. A window with a
+// stall or a load in it is not judged and counts neither way.
 void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     if (!m_step_check) {
         return;
@@ -543,11 +545,14 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     const auto effect = check.loading || !check.gpu_ms_before || !gpu_ms_after ? ar::StepEffect::unclear
         : ar::judge_step(*check.gpu_ms_before, *gpu_ms_after);
     const auto fmt_ms = [](const std::optional<float>& ms) { return ms ? fmt::format("{:.1f}", *ms) : std::string{"-"}; };
-    const auto out = slower || effect == ar::StepEffect::nothing;
+    const auto against = slower || effect == ar::StepEffect::nothing;
+    auto& strikes = check.actuator == ar::Actuator::sp ? m_sp_strikes : m_upscaler_strikes;
+    const auto out = !check.loading && strikes.verdict(against);
     // The steps before this one were kept (each was checked), so only this one goes back.
     const auto keep = check.to - 1;
-    const auto out_what = keep > 0 ? fmt::format("back to step {} and no further for the session", keep)
-                                   : std::string{"put back and left out for the session"};
+    const auto out_what = !out ? std::string{"put back, taken again if still wanted"}
+        : keep > 0 ? fmt::format("back to step {} and no further for the session", keep)
+                   : std::string{"put back and left out for the session"};
 
     SPDLOG_INFO("[autores] {} step {}: GPU {} -> {} ms per frame{}, {:.1f} -> {:.1f} fps{}: {}", name, check.to,
         fmt_ms(check.gpu_ms_before), fmt_ms(gpu_ms_after),
@@ -560,6 +565,23 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
 
     const auto actuator = check.actuator;
     m_step_check.reset();
+
+    if (against && !out) {
+        // Back to the step before; the request still wanted is asked again after the usual 5 s, so the next check's
+        // "before" is this state's.
+        auto& steps = actuator == ar::Actuator::sp ? m_state.sp : m_state.upscaler;
+        steps = keep;
+
+        if (actuator == ar::Actuator::sp) {
+            cvars.set_autores_sp(ar::SP_PERCENT[keep]);
+        } else {
+            cvars.set_autores_upscaler(keep);
+        }
+
+        m_last_action = now;
+        publish();
+        return;
+    }
 
     if (out) {
         if (keep > 0) {

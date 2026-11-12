@@ -348,6 +348,23 @@ inline StepEffect judge_step(float gpu_ms_before, float gpu_ms_after) {
     return drop >= STEP_WORKS_DROP ? StepEffect::works : drop < STEP_NOTHING_DROP ? StepEffect::nothing : StepEffect::unclear;
 }
 
+// One actuator's verdicts in a row. A verdict against a step can be the scene's and not the step's: Wukong's DLSS step
+// 0.7 s into play compared the scene before the play with the play and read +3 % GPU and 17 % fewer fps, while the same
+// step 6 s before the play read -7 % (3080L, 2026-11-13; no stall in either window). So the first verdict against it only
+// puts the step back, and the next request takes it again from a fresh "before"; two in a row leave the actuator out (or
+// stop it at the step before) for the session. A verdict for it starts the count over.
+struct StepStrikes {
+    static constexpr int OUT_AFTER = 2;
+
+    int count{0};
+
+    // True when the actuator goes out now.
+    bool verdict(bool against) {
+        count = against ? count + 1 : 0;
+        return count >= OUT_AFTER;
+    }
+};
+
 inline void apply(State& state, const Step& step) {
     switch (step.actuator) {
     case Actuator::sp:
