@@ -516,6 +516,10 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         return;
     }
 
+    // A level change in the 4 s before the step or since makes the GPU time another eye size's.
+    check.loading = check.loading ||
+        (m_last_level_change.time_since_epoch().count() != 0 && m_last_level_change > check.at - std::chrono::seconds{4});
+
     const auto fps_after = (float)(uevr::perf::new_frames() - check.window_frames) /
         std::chrono::duration<float>(now - check.window_start).count();
     const auto gpu_ms_after = m_gpu.gpu_ms_per_frame(check.window_start, now);
@@ -530,7 +534,7 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         fmt_ms(check.gpu_ms_before), fmt_ms(gpu_ms_after),
         check.gpu_ms_before && gpu_ms_after && *check.gpu_ms_before > 0.0f
             ? fmt::format(" ({:+.0f} %)", 100.0f * (*gpu_ms_after / *check.gpu_ms_before - 1.0f)) : std::string{},
-        check.fps_before, fps_after, check.loading ? " (a stall in between, not judged)" : "",
+        check.fps_before, fps_after, check.loading ? " (a stall or a level change in between, not judged)" : "",
         slower ? "slower, left out for the session"
         : effect == ar::StepEffect::nothing ? "no effect, put back and left out for the session"
         : effect == ar::StepEffect::works ? "works" : "kept");
