@@ -716,8 +716,11 @@ bool CVarManager::rank_autores_dlss_modes(sdk::UGameEngine* engine, uint8_t curr
     // The UE5 plugin renders DLSS's input at r.ScreenPercentage; the mode picks its preset (TEKKEN 8 Demo and E33 ran
     // mode 4, Quality, at the game's 58 %, and a mode alone moved nothing, 2026-11-13). The steps go below what the
     // input is now, each setting a mode and its optimal percentage together, as the plugin asks of games.
-    const auto game_sp = resolve(m_autores_dlss_sp) ? refresh_base(m_autores_dlss_sp) : std::nullopt;
-    const auto input = m_autores_dlss_sp.base && *m_autores_dlss_sp.base > 0.0f ? m_autores_dlss_sp.base
+    // An SP step of ours still in place (DLSS found after the SP steps began) is not the game's input: its base is.
+    const auto sp_ours = m_autores_sp.written && m_autores_sp.base;
+    const auto game_sp = sp_ours ? m_autores_sp.base : resolve(m_autores_dlss_sp) ? refresh_base(m_autores_dlss_sp) : std::nullopt;
+    const auto input = sp_ours ? m_autores_sp.base
+        : m_autores_dlss_sp.base && *m_autores_dlss_sp.base > 0.0f ? m_autores_dlss_sp.base
         : base_optimal ? std::optional{*base_optimal <= 1.0f ? *base_optimal * 100.0f : *base_optimal} : std::nullopt;
     dlss.lower = input ? uevr::autores::dlss_modes_below(by_pixels, *input, floor) : std::vector<uint8_t>{};
     dlss.lower_percent.clear();
