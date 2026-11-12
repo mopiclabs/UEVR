@@ -79,6 +79,11 @@ public:
         uint64_t tick_delta_us{0};      // TickClock's sums
         uint64_t tick_real_us{0};
         const uevr::autores::EngineFrameRate* engine_frame_rate{nullptr}; // once the game thread has read it
+        int upscaler_floor{0};          // VR_AutoResUpscalerFloor (uevr::autores::UpscalerFloor)
+        bool output_anchor{false};      // VR_AutoResOutputAnchor
+        bool internal_recover{false};   // VR_AutoResInternalRecover
+        int test_level{-1};             // VR_AutoResTestLevel: a LEVELS index, or -1
+        int test_internal{-1};          // VR_AutoResTestInternal: 0 the game's own, 1 the floor, 2 Ultra Performance, or -1
     };
 
     void on_present(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
@@ -97,6 +102,10 @@ private:
     void check_guards(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
     void sync_available(CVarManager& cvars);
     void check_step(CVarManager& cvars, const Inputs& inputs);
+    void check_anchor(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
+    void check_recovery(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
+    void apply_test_lock(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
+    void set_internal(CVarManager& cvars, int upscaler, int sp);
     void check_frame_bound(const Inputs& inputs);
     void send_hints(runtimes::OpenXR& openxr, const Inputs& inputs);
     std::optional<float> query_vram_percent();
@@ -159,6 +168,19 @@ private:
     bool m_sp_left_out{false};
     bool m_upscaler_left_out{false};
     uevr::autores::GpuBusySampler m_gpu{};
+
+    // VR_AutoResOutputAnchor: decided once a session; raised from m_anchor_from to Base until the VRAM guard trips.
+    bool m_anchor_decided{false};
+    bool m_anchor_raised{false};
+    int m_anchor_from{uevr::autores::MIN_LEVEL};
+    // VR_AutoResInternalRecover, and the step up it took (undone when IMPAIRED follows).
+    uevr::autores::InternalRecovery m_recovery{};
+    std::optional<uevr::autores::Step> m_recovery_step{};
+    // VR_AutoResTestLevel / VR_AutoResTestInternal: nothing else moves.
+    bool m_test{false};
+    bool m_test_level_done{false};
+    clock::time_point m_next_test{};
+    clock::time_point m_next_gpu_log{};
 
     bool m_frame_generation_hinted{false};
 
