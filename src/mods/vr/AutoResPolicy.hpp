@@ -479,7 +479,8 @@ struct AnchorGate {
             return false;
         }
 
-        return (load_seen && calm >= CALM_SECONDS) || seconds >= NO_LOAD_SECONDS;
+        // 3 minutes only when no load came at all: a load near then still gets its 30 s.
+        return load_seen ? calm >= CALM_SECONDS : seconds >= NO_LOAD_SECONDS;
     }
 };
 

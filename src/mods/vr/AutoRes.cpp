@@ -409,6 +409,12 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     const auto settling = m_last_level_change.time_since_epoch().count() != 0 && now - m_last_level_change < std::chrono::seconds{5};
     m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f && !settling && !inputs.loading ? m_vram_over_seconds + 1 : 0;
     m_anchor_due = m_anchor_gate.tick(inputs.loading, m_vram_percent);
+
+    // VR_AutoResInternalRecover counts calm seconds only while settled; a load starts the count over.
+    if (inputs.loading) {
+        m_recovery.calm = 0;
+    }
+
     publish();
 
     // The GPU time the step checks use, every 10 s, for reading a session back.
@@ -434,22 +440,29 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
 
     // Over the budget after VR_AutoResOutputAnchor raised the eye: back to where the session started, in one step, with
     // the internal resolution back at the game's own (the steps take it down again if needed), capped there, and no
-    // raise again this session.
+    // raise again this session. The steps up return to the start from then on. An eye the steps took down to the start
+    // or below already is left to the ordinary guard: this one never raises it.
     if (m_vram_over_seconds >= 3 && m_anchor_raised) {
-        const auto from = m_state.level;
+        m_anchor_raised = false;
+        m_state.start_level = m_anchor_from;
 
-        if (m_available.level && carry_out(openxr, cvars, ar::Step{ar::Actuator::level, from, m_anchor_from}, "VRAM guard")) {
-            m_state.start_level = m_anchor_from;
-            m_state.level_cap = (std::min)(m_state.level_cap, m_anchor_from);
-            set_internal(cvars, 0, 0);
-            SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget after the output anchor: back to {}, capped there, no anchor this "
-                "session", *m_vram_percent, ar::LEVELS[m_anchor_from].name);
+        if (m_state.level > m_anchor_from) {
+            const auto from = m_state.level;
+
+            if (m_available.level && carry_out(openxr, cvars, ar::Step{ar::Actuator::level, from, m_anchor_from}, "VRAM guard")) {
+                m_state.level_cap = (std::min)(m_state.level_cap, m_anchor_from);
+                set_internal(cvars, 0, 0);
+                SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget after the output anchor: back to {}, capped there, no anchor "
+                    "this session", *m_vram_percent, ar::LEVELS[m_anchor_from].name);
+            }
+
+            m_last_guard_step = now;
+            m_vram_over_seconds = 0;
+            return;
         }
 
-        m_anchor_raised = false;
-        m_last_guard_step = now;
-        m_vram_over_seconds = 0;
-        return;
+        SPDLOG_INFO("[autores] VRAM {:.0f} % of the budget after the output anchor, the eye at {} already: the anchor is "
+            "dropped, the VRAM guard goes on as usual", *m_vram_percent, ar::LEVELS[m_state.level].name);
     }
 
     // GPU memory over the DXGI budget for 3 s: one level down, and that level is the cap for the session. Only the eye
@@ -568,8 +581,11 @@ void AutoResController::check_recovery(runtimes::OpenXR& openxr, CVarManager& cv
         if (m_recovery_step) {
             const auto& up = *m_recovery_step;
             const auto current = up.actuator == ar::Actuator::upscaler ? m_state.upscaler : m_state.sp;
+            // An actuator gone since (DLSS found or turned off) is not stepped again: the state would keep a step that
+            // nothing applies.
+            const auto available = up.actuator == ar::Actuator::upscaler ? m_available.upscaler : m_available.sp;
 
-            if (current == up.to) {
+            if (available && current == up.to) {
                 carry_out(openxr, cvars, ar::Step{up.actuator, up.to, up.from}, "internal recovery undone: IMPAIRED within 30 s");
                 m_step_check.reset();
             }

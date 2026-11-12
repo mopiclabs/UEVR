@@ -327,6 +327,17 @@ static void test_anchor_gate() {
     }
     expect(none_due && at == 180 && !none.load_seen, "no load: due at 180 s");
 
+    // The title left alone for 3 minutes, then the save's load at 170-185 s: the 30 s after it still count, not the
+    // 3 minutes (review, 2026-11-13).
+    ar::AnchorGate late{};
+    int late_at = 0;
+    for (int s = 1; s <= 300 && late_at == 0; ++s) {
+        if (late.tick(s >= 170 && s <= 185, s < 170 ? 40.0f : 95.0f)) {
+            late_at = s;
+        }
+    }
+    expect(late_at == 215 && *late.vram_max == 95.0f, "a load at 170-185 s: due at 215 s on the level's memory");
+
     // No GPU memory reading: never due.
     ar::AnchorGate blind{};
     bool blind_due = false;

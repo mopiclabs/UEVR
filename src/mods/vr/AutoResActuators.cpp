@@ -123,9 +123,21 @@ void restore(AutoResCVar& c, bool ours_anyway = false) {
         return;
     }
 
+    // From the priority ours took, up as far as it takes: a call of ours may have set the value at a higher one since
+    // (SetDLSSMode writes r.ScreenPercentage itself, and a write of ours that found the value already there recorded the
+    // lowest priority), and a Set below it is ignored.
     const auto text = text_of(c, *base);
-    c.cvar->Set(text.c_str(), priority);
-    const auto now = read(c);
+    std::optional<float> now{};
+
+    for (auto p = priority != 0 ? priority : set_by_lowest; p <= set_by_console; p += set_by_step) {
+        c.cvar->Set(text.c_str(), p);
+        now = read(c);
+
+        if (now && std::abs(*now - *base) < 0.01f) {
+            break;
+        }
+    }
+
     SPDLOG_INFO("[autores] {} put back {} -> {}", utility::narrow(c.name), *written, now ? std::to_string(*now) : "?");
 }
 
@@ -914,8 +926,12 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
     }
 
     // The input follows r.ScreenPercentage: the mode's optimal percentage with it. A game that keeps its own value
-    // leaves the step without effect, which the controller's step check finds.
-    if (sp_before && std::abs(*sp_before - target_sp) >= 0.05f) {
+    // leaves the step without effect, which the controller's step check finds. Never above the game's own value: a
+    // player who lowered it while a step was held keeps theirs (the mode alone then moves nothing, and the check sees it).
+    if (sp_before && sp.base && !sp.written && target_sp > *sp.base + 0.05f) {
+        SPDLOG_INFO_EVERY_N_SEC(60, "[autores] r.ScreenPercentage {} is below DLSS mode {}'s {}: left as it is", *sp.base,
+            target, target_sp);
+    } else if (sp_before && std::abs(*sp_before - target_sp) >= 0.05f) {
         if (!write(sp, target_sp)) {
             SPDLOG_INFO("[autores] r.ScreenPercentage stays {} under DLSS mode {}", *sp_before, target);
         }
