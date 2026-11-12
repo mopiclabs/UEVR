@@ -346,6 +346,7 @@ private:
     void probe_autores_upscaler(sdk::UGameEngine* engine);
     uevr::autores::ProbeReading read_autores_upscaler(sdk::UGameEngine* engine, std::string& seen);
     void restore_autores_upscalers(sdk::UGameEngine* engine);
+    void put_back_dlss_mode(sdk::UGameEngine* engine);
     bool rank_autores_dlss_modes(sdk::UGameEngine* engine, uint8_t current);
     void check_autores_temporal_upscale();
     void log_autores_dynamic_resolution();

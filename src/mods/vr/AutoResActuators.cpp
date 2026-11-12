@@ -108,8 +108,8 @@ bool write(AutoResCVar& c, float value) {
 
 // Puts the game's own value back at the priority ours took; the next move reads the base again. Forgotten first, so a
 // Set that throws is not tried again every second. A value that is no longer ours was set by the game or the player
-// since, and stays.
-void restore(AutoResCVar& c) {
+// since, and stays, unless ours_anyway: a call of ours changed it (SetDLSSMode sets r.ScreenPercentage).
+void restore(AutoResCVar& c, bool ours_anyway = false) {
     const auto written = std::exchange(c.written, std::nullopt);
     const auto base = std::exchange(c.base, std::nullopt);
     const auto priority = std::exchange(c.priority, 0u);
@@ -118,7 +118,7 @@ void restore(AutoResCVar& c) {
         return;
     }
 
-    if (const auto current = read(c); current && std::abs(*current - *written) > 0.01f) {
+    if (const auto current = read(c); current && std::abs(*current - *written) > 0.01f && !ours_anyway) {
         SPDLOG_INFO("[autores] {} is {} now, not ours ({}): left as it is", utility::narrow(c.name), *current, *written);
         return;
     }
@@ -667,22 +667,31 @@ void CVarManager::restore_autores_upscalers(sdk::UGameEngine* engine) {
         restore(m_autores_dlss_quality);
     }
 
+    put_back_dlss_mode(engine);
+    m_autores_upscaler_applied = 0;
+    m_autores_upscaler_max_steps = -1;
+}
+
+// The game's DLSS mode and r.ScreenPercentage back, forgotten first (a call that throws is not tried again); a mode
+// that is no longer ours stays. SetDLSSMode sets r.ScreenPercentage to the mode's optimal one (putting TEKKEN 8 Demo
+// and E33 back to mode 4 left them at 66.7 %, the games had run 58 %, 2026-11-13), so after the mode the game's
+// percentage goes back too.
+void CVarManager::put_back_dlss_mode(sdk::UGameEngine* engine) {
     auto& dlss = m_autores_dlss_mode;
     const auto written = std::exchange(dlss.written, std::nullopt);
     const auto base = std::exchange(dlss.base, std::nullopt);
+    bool mode_back = false;
 
     if (written && base && dlss.library != nullptr) {
         if (const auto current = dlss_get_mode(dlss, engine); current != written) {
             SPDLOG_INFO("[autores] the DLSS mode is {} now, not ours ({}): left as it is", current ? (int)*current : -1, *written);
         } else {
-            const auto ok = dlss_set_mode(dlss, *base, engine);
-            SPDLOG_INFO("[autores] DLSS mode put back {} -> {} (ok={})", *written, *base, ok);
+            mode_back = dlss_set_mode(dlss, *base, engine);
+            SPDLOG_INFO("[autores] DLSS mode put back {} -> {} (ok={})", *written, *base, mode_back);
         }
     }
 
-    restore(m_autores_dlss_sp);
-    m_autores_upscaler_applied = 0;
-    m_autores_upscaler_max_steps = -1;
+    restore(m_autores_dlss_sp, mode_back);
 }
 
 // The game's DLSS mode and the supported modes that render fewer pixels than it, down to the floor
@@ -792,21 +801,8 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
     auto& dlss = m_autores_dlss_mode;
 
     if (steps <= 0 || m_autores_upscaler_unavailable) {
-        // Forgotten first (a call that throws is not tried again); a mode that is no longer ours stays.
-        const auto written = std::exchange(dlss.written, std::nullopt);
-        const auto base = std::exchange(dlss.base, std::nullopt);
         m_autores_upscaler_applied = 0;
-
-        if (written && base && dlss.library != nullptr) {
-            if (const auto current = dlss_get_mode(dlss, engine); current != written) {
-                SPDLOG_INFO("[autores] the DLSS mode is {} now, not ours ({}): left as it is", current ? (int)*current : -1, *written);
-            } else {
-                const auto ok = dlss_set_mode(dlss, *base, engine);
-                SPDLOG_INFO("[autores] DLSS mode put back {} -> {} (ok={})", *written, *base, ok);
-            }
-        }
-
-        restore(m_autores_dlss_sp);
+        put_back_dlss_mode(engine);
         return;
     }
 
@@ -852,14 +848,9 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
         m_autores_upscaler_applied = 0;
 
         if (dlss.written) {
-            const auto written = std::exchange(dlss.written, std::nullopt);
-
-            if (dlss.base && *current == *written) {
-                dlss_set_mode(dlss, *dlss.base, engine);
-            }
+            put_back_dlss_mode(engine);
         }
 
-        restore(m_autores_dlss_sp);
         return;
     }
 
