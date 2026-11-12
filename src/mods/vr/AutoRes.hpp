@@ -10,6 +10,7 @@
 #include <dxgi1_4.h>
 #include <wrl.h>
 
+#include "AutoResGpu.hpp"
 #include "AutoResPolicy.hpp"
 
 class CVarManager;
@@ -60,8 +61,10 @@ private:
 // VR_AutoRes: automatic resolution on the present thread. After each consume_events it takes the runtime's
 // XR_EXT_performance_settings edges, keeps the app's own guards and moves one actuator per edge (AutoResPolicy.hpp):
 // CVarManager's SP and upscaler steps on the game thread, the eye size through OpenXR's live rebuild. What the game
-// supports is found out as it runs: SP is left out under DLSS, when the game keeps putting its own value back or when
-// a step makes it slower; the upscaler step needs a DLSS plugin; the level needs a live rebuild.
+// supports is found out as it runs: SP is left out while DLSS sets the input resolution and when the game keeps
+// putting its own value back; the upscaler step needs a DLSS plugin with a mode that is on (found any time in the
+// session); an SP or upscaler step that leaves the GPU time per frame about the same, or makes the game slower, is put
+// back and its actuator left out for the session; the level needs a live rebuild.
 class AutoResController {
 public:
     struct Inputs {
@@ -92,7 +95,8 @@ private:
     bool carry_out(runtimes::OpenXR& openxr, CVarManager& cvars, const uevr::autores::Step& step, const char* why);
     void step_down_now(runtimes::OpenXR& openxr, CVarManager& cvars, int count, const char* why);
     void check_guards(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs);
-    void check_sp_step(CVarManager& cvars, const Inputs& inputs);
+    void sync_available(CVarManager& cvars);
+    void check_step(CVarManager& cvars, const Inputs& inputs);
     void check_frame_bound(const Inputs& inputs);
     void send_hints(runtimes::OpenXR& openxr, const Inputs& inputs);
     std::optional<float> query_vram_percent();
@@ -138,16 +142,23 @@ private:
     Microsoft::WRL::ComPtr<IDXGIAdapter3> m_adapter{};
     clock::time_point m_next_adapter_lookup{};
 
-    // An SP step down is checked against the frame rate before it: a game that gets slower leaves SP out.
-    struct SpCheck {
+    // An SP or upscaler step down is checked against the 3 s before it (check_step): the GPU time per frame 2-5 s
+    // after it (AutoResPolicy.hpp judge_step), and the frame rate (10 % slower leaves the actuator out).
+    struct StepCheck {
+        uevr::autores::Actuator actuator{};
+        int to{};          // the step it measures; any other step cancels it
         clock::time_point at{};
-        int sp{};          // the step it measures; any other step cancels it
         float fps_before{};
+        std::optional<float> gpu_ms_before{};
         clock::time_point window_start{};
         uint64_t window_frames{};
         bool loading{false};
     };
-    std::optional<SpCheck> m_sp_check{};
+    std::optional<StepCheck> m_step_check{};
+    // Left out by the step check, for the session; CVarManager's report can take an actuator out (and back) any time.
+    bool m_sp_left_out{false};
+    bool m_upscaler_left_out{false};
+    uevr::autores::GpuBusySampler m_gpu{};
 
     bool m_frame_generation_hinted{false};
 

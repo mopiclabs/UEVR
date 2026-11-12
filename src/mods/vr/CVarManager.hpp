@@ -15,6 +15,7 @@
 #include <sdk/CVar.hpp>
 
 #include "../../Mod.hpp"
+#include "AutoResPolicy.hpp"
 #include "CVarDiagnostics.hpp"
 #include "Stalker2NativePolicy.hpp"
 #include "SatisfactoryModular.hpp"
@@ -39,7 +40,8 @@ public:
 
     // Automatic resolution's game-thread actuators (VR_AutoRes; AutoResActuators.cpp). The present thread sets the
     // targets, the next engine ticks carry them out and report back.
-    // active: the controller runs, so the game's upscaler is looked for (once per session).
+    // active: the controller runs, so the game's upscaler is looked for (the whole session, AutoResPolicy.hpp
+    // UpscalerProbe).
     void set_autores_active(bool active) { m_autores_active.store(active); }
     void set_autores_sp(int percent) { m_autores_sp_target.store(percent); }
     void set_autores_upscaler(int steps) { m_autores_upscaler_target.store(steps); }
@@ -48,13 +50,17 @@ public:
         int sp_percent{100};    // of the game's own screen percentage
         int upscaler_steps{0};  // quality modes below the game's own
         int upscaler_max_steps{-1}; // how many the game's own mode leaves (-1: not known yet)
+        // Now, not for good: SP is out while DLSS sets the input resolution, the upscaler while none is found (yet).
         bool sp_unavailable{false};
         bool upscaler_unavailable{false};
+        int upscaler_kind{-1}; // uevr::autores::Upscaler
     };
 
     AutoResReport get_autores_report() const {
+        const auto kind = (uevr::autores::Upscaler)m_autores_upscaler_kind.load();
+        const auto dlss = kind == uevr::autores::Upscaler::dlss_mode || kind == uevr::autores::Upscaler::dlss_quality;
         return AutoResReport{m_autores_sp_applied.load(), m_autores_upscaler_applied.load(), m_autores_upscaler_max_steps.load(),
-            m_autores_sp_unavailable.load(), m_autores_upscaler_unavailable.load()};
+            m_autores_sp_unavailable.load() || dlss, m_autores_upscaler_unavailable.load() || !dlss, (int)kind};
     }
 
     // A cvar an actuator moves away from the game's own value and puts back.
@@ -80,6 +86,7 @@ public:
         void* get_supported{nullptr};
         bool incomplete{false};
         uint32_t lookups{0};
+        std::chrono::steady_clock::time_point next_lookup{}; // the class is looked for again a minute after a miss
         std::optional<uint8_t> base{};
         std::optional<uint8_t> written{};
         std::vector<uint8_t> lower{}; // modes rendering fewer pixels than base, highest first
@@ -331,18 +338,23 @@ private:
     // VR_AutoRes: see AutoResActuators.cpp.
     void process_autores(sdk::UGameEngine* engine);
     void probe_autores_upscaler(sdk::UGameEngine* engine);
+    uevr::autores::ProbeReading read_autores_upscaler(sdk::UGameEngine* engine, std::string& seen);
+    void restore_autores_upscalers(sdk::UGameEngine* engine);
     void process_autores_sp();
     void process_autores_dlss_quality();
     void process_autores_dlss_mode(sdk::UGameEngine* engine);
     std::atomic<bool> m_autores_active{false};
     std::atomic<int> m_autores_sp_target{100};
-    std::atomic<int> m_autores_upscaler_kind{-1}; // uevr::autores::Upscaler, found by probe_autores_upscaler
+    std::atomic<int> m_autores_upscaler_kind{-1}; // uevr::autores::Upscaler, m_autores_probe's kind
     std::atomic<int> m_autores_upscaler_target{0};
+    uevr::autores::UpscalerProbe m_autores_probe{};
+    std::chrono::steady_clock::time_point m_autores_probe_started{};
     std::chrono::steady_clock::time_point m_autores_probe_next{};
-    uint32_t m_autores_probe_attempts{0};
+    int m_autores_kind_processed{-1};
     std::atomic<int> m_autores_sp_applied{100};
     std::atomic<int> m_autores_upscaler_applied{0};
     std::atomic<int> m_autores_upscaler_max_steps{-1};
+    // For good: the actuator itself failed (cvar missing, the game keeps its own value, SetDLSSMode doesn't take).
     std::atomic<bool> m_autores_sp_unavailable{false};
     std::atomic<bool> m_autores_upscaler_unavailable{false};
     int m_autores_sp_processed{100};

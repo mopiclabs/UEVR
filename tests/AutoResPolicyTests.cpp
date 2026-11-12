@@ -192,12 +192,60 @@ static void test_limits() {
     expect(step(state, one_mode, ar::Request::down) && state.upscaler == 1 && state.level == 1, "then the level, no empty step");
 }
 
+static void test_upscaler_probe() {
+    using R = ar::ProbeReading;
+
+    // TEKKEN 8 Demo: its DLSS mode reads as off until the title, about 30 s in (2026-11-12).
+    ar::UpscalerProbe late{};
+    for (int i = 0; i < 14; ++i) {
+        expect(!late.update(R::off) && late.kind == ar::Upscaler::unknown, "nothing in the first 14 tries: unknown");
+    }
+    expect(late.update(R::off) && late.kind == ar::Upscaler::none, "the 15th try (30 s): none for now");
+    expect(!late.update(R::no_answer) && late.kind == ar::Upscaler::none, "a try with no answer changes nothing");
+    expect(late.update(R::dlss_mode) && late.kind == ar::Upscaler::dlss_mode, "DLSS found later takes over");
+    expect(late.dlss(), "found DLSS is DLSS");
+
+    // Found, then turned off by the player: two reads, not one, and not a try with no answer (a load).
+    ar::UpscalerProbe off{};
+    off.update(R::dlss_quality);
+    expect(off.kind == ar::Upscaler::dlss_quality, "the UE4 plugin's cvars");
+    expect(!off.update(R::off) && off.kind == ar::Upscaler::dlss_quality, "one off read is not enough");
+    expect(!off.update(R::no_answer) && off.kind == ar::Upscaler::dlss_quality, "a try with no answer breaks the run");
+    expect(!off.update(R::off) && off.kind == ar::Upscaler::dlss_quality, "the count starts over");
+    expect(off.update(R::off) && off.kind == ar::Upscaler::none, "two off reads in a row: none");
+    expect(off.update(R::dlss_quality) && off.kind == ar::Upscaler::dlss_quality, "and back on");
+
+    // A DLSS found at once (Black Myth: Wukong, about 12 s in) never passes through none.
+    ar::UpscalerProbe early{};
+    for (int i = 0; i < 5; ++i) {
+        early.update(R::no_answer);
+    }
+    expect(early.update(R::dlss_mode) && early.kind == ar::Upscaler::dlss_mode, "found on the 6th try");
+
+    expect(ar::UpscalerProbe::interval_seconds(0) == 2 && ar::UpscalerProbe::interval_seconds(119) == 2 &&
+        ar::UpscalerProbe::interval_seconds(120) == 10 && ar::UpscalerProbe::interval_seconds(3600) == 10,
+        "every 2 s for 2 minutes, then every 10 s");
+}
+
+static void test_step_effect() {
+    // design v1 Appendix A-3: one 0.7 step's GPU time.
+    expect(ar::judge_step(30.0f, 30.0f * 0.87f) == ar::StepEffect::works, "SP in TEKKEN (0.87) works");
+    expect(ar::judge_step(30.0f, 30.0f * 0.90f) == ar::StepEffect::works, "E33's DLSS mode (0.90) works");
+    expect(ar::judge_step(30.0f, 30.0f * 0.84f) == ar::StepEffect::works, "Hogwarts Legacy's DLSS quality (0.84) works");
+    expect(ar::judge_step(30.0f, 30.0f * 0.96f) == ar::StepEffect::nothing, "Wukong's DLSS mode (0.96) does nothing worth keeping");
+    expect(ar::judge_step(30.0f, 30.5f) == ar::StepEffect::nothing, "SP under DLSS, or slower: nothing");
+    expect(ar::judge_step(30.0f, 30.0f * 0.94f) == ar::StepEffect::unclear, "6 % less: kept, not judged either way");
+    expect(ar::judge_step(0.0f, 10.0f) == ar::StepEffect::unclear, "no GPU time before: not judged");
+}
+
 int main() {
     test_ladder();
     test_frame_bound();
     test_edges();
     test_order();
     test_limits();
+    test_upscaler_probe();
+    test_step_effect();
 
     if (failures == 0) {
         std::printf("autores-policy-tests: all passed\n");

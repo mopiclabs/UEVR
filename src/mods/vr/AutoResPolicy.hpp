@@ -277,6 +277,77 @@ struct FrameBoundJudge {
     }
 };
 
+// Which upscaler sets the game's input resolution, found while the session runs (CVarManager's probe). The probe tries
+// every 2 s for the first 2 minutes, then every 10 s, for the whole session. A game may make its DLSS mode readable only
+// at its title or main menu (TEKKEN 8 Demo, about 30 s after the start, 2026-11-12), so finding nothing in the first 15
+// tries (30 s) is "none for now": SP steps meanwhile, and DLSS found later takes over (SP put back). A DLSS that was found
+// and then reads as off twice in a row (the player turned it off) is none again. A try that gets no answer (the game is
+// loading, no world yet) changes nothing.
+enum class ProbeReading : uint8_t { no_answer, off, dlss_mode, dlss_quality };
+
+struct UpscalerProbe {
+    static constexpr int FAST_SECONDS = 120;
+    static constexpr int FAST_INTERVAL_SECONDS = 2;
+    static constexpr int SLOW_INTERVAL_SECONDS = 10;
+    static constexpr int PROVISIONAL_TRIES = 15;
+    static constexpr int OFF_READS = 2;
+
+    Upscaler kind{Upscaler::unknown};
+    int tries{0};
+    int off_reads{0};
+
+    static constexpr int interval_seconds(int seconds_since_start) {
+        return seconds_since_start < FAST_SECONDS ? FAST_INTERVAL_SECONDS : SLOW_INTERVAL_SECONDS;
+    }
+
+    // One try; true when kind changed.
+    bool update(ProbeReading reading) {
+        ++tries;
+        const auto before = kind;
+
+        if (reading == ProbeReading::dlss_mode || reading == ProbeReading::dlss_quality) {
+            kind = reading == ProbeReading::dlss_mode ? Upscaler::dlss_mode : Upscaler::dlss_quality;
+            off_reads = 0;
+        } else if (kind == Upscaler::unknown) {
+            if (tries >= PROVISIONAL_TRIES) {
+                kind = Upscaler::none;
+            }
+        } else if (kind == Upscaler::dlss_mode || kind == Upscaler::dlss_quality) {
+            off_reads = reading == ProbeReading::off ? off_reads + 1 : 0;
+
+            if (off_reads >= OFF_READS) {
+                kind = Upscaler::none;
+                off_reads = 0;
+            }
+        }
+
+        return kind != before;
+    }
+
+    bool dlss() const { return kind == Upscaler::dlss_mode || kind == Upscaler::dlss_quality; }
+};
+
+// The effect of an SP or upscaler step down (design v1 Appendix B, self-calibration): the game's GPU time per frame (its
+// GPU busy share times the frame interval) 2-5 s after the step against the 3 s before it. A step that takes 8 % or
+// more off works; under 5 % it does nothing worth keeping, so it is put back and that actuator is left out for the
+// session (a request still wanted goes to the next one); in between it stays. A 0.7 step measured 0.87 / 0.77 (SP,
+// TEKKEN, 4090L / 3080L), 0.90 (E33's DLSS mode), 0.84 / 0.71 (Hogwarts Legacy's DLSS quality) and 0.96 (Black Myth:
+// Wukong's DLSS mode, which barely changes its input resolution) of the GPU time (design v1 Appendix A-3): under 5 %
+// leaves Wukong's mode out and keeps the others with room for noise.
+inline constexpr float STEP_WORKS_DROP = 0.08f;
+inline constexpr float STEP_NOTHING_DROP = 0.05f;
+
+enum class StepEffect : uint8_t { works, unclear, nothing };
+
+inline StepEffect judge_step(float gpu_ms_before, float gpu_ms_after) {
+    if (!(gpu_ms_before > 0.0f) || !(gpu_ms_after >= 0.0f)) {
+        return StepEffect::unclear;
+    }
+
+    const auto drop = 1.0f - gpu_ms_after / gpu_ms_before;
+    return drop >= STEP_WORKS_DROP ? StepEffect::works : drop < STEP_NOTHING_DROP ? StepEffect::nothing : StepEffect::unclear;
+}
+
 inline void apply(State& state, const Step& step) {
     switch (step.actuator) {
     case Actuator::sp:
