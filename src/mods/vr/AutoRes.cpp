@@ -208,6 +208,8 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_available.upscaler = false;
     m_sp_left_out = false;
     m_upscaler_left_out = false;
+    m_sp_cap = -1;
+    m_upscaler_cap = -1;
     m_gpu.start();
 
     cvars.set_autores_sp(100);
@@ -476,6 +478,19 @@ void AutoResController::sync_available(CVarManager& cvars) {
         cvars.set_autores_upscaler(m_state.upscaler);
     }
 
+    // A step past the first that moved nothing: back to the one before it, and no further for the session.
+    if (m_available.sp && m_sp_cap >= 0 && m_sp_cap < m_available.sp_steps) {
+        m_available.sp_steps = m_sp_cap;
+        undone(m_state.sp, m_sp_cap);
+        cvars.set_autores_sp(ar::SP_PERCENT[m_state.sp]);
+    }
+
+    if (m_available.upscaler && m_upscaler_cap >= 0 && m_upscaler_cap < m_available.upscaler_steps) {
+        m_available.upscaler_steps = m_upscaler_cap;
+        undone(m_state.upscaler, m_upscaler_cap);
+        cvars.set_autores_upscaler(m_state.upscaler);
+    }
+
     m_sp_percent = report.sp_percent;
     m_upscaler_steps = report.upscaler_steps;
 }
@@ -529,22 +544,31 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         : ar::judge_step(*check.gpu_ms_before, *gpu_ms_after);
     const auto fmt_ms = [](const std::optional<float>& ms) { return ms ? fmt::format("{:.1f}", *ms) : std::string{"-"}; };
     const auto out = slower || effect == ar::StepEffect::nothing;
+    // The steps before this one were kept (each was checked), so only this one goes back.
+    const auto keep = check.to - 1;
+    const auto out_what = keep > 0 ? fmt::format("back to step {} and no further for the session", keep)
+                                   : std::string{"put back and left out for the session"};
 
     SPDLOG_INFO("[autores] {} step {}: GPU {} -> {} ms per frame{}, {:.1f} -> {:.1f} fps{}: {}", name, check.to,
         fmt_ms(check.gpu_ms_before), fmt_ms(gpu_ms_after),
         check.gpu_ms_before && gpu_ms_after && *check.gpu_ms_before > 0.0f
             ? fmt::format(" ({:+.0f} %)", 100.0f * (*gpu_ms_after / *check.gpu_ms_before - 1.0f)) : std::string{},
         check.fps_before, fps_after, check.loading ? " (a stall or a level change in between, not judged)" : "",
-        slower ? "slower, left out for the session"
-        : effect == ar::StepEffect::nothing ? "no effect, put back and left out for the session"
+        slower ? fmt::format("slower, {}", out_what)
+        : effect == ar::StepEffect::nothing ? fmt::format("no effect, {}", out_what)
         : effect == ar::StepEffect::works ? "works" : "kept");
 
     const auto actuator = check.actuator;
     m_step_check.reset();
 
     if (out) {
-        (actuator == ar::Actuator::sp ? m_sp_left_out : m_upscaler_left_out) = true;
-        sync_available(cvars); // undoes its steps and takes a request still wanted to the next actuator
+        if (keep > 0) {
+            (actuator == ar::Actuator::sp ? m_sp_cap : m_upscaler_cap) = keep;
+        } else {
+            (actuator == ar::Actuator::sp ? m_sp_left_out : m_upscaler_left_out) = true;
+        }
+
+        sync_available(cvars); // undoes the step and takes a request still wanted to the next actuator
     }
 }
 

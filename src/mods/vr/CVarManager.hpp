@@ -340,6 +340,8 @@ private:
     void probe_autores_upscaler(sdk::UGameEngine* engine);
     uevr::autores::ProbeReading read_autores_upscaler(sdk::UGameEngine* engine, std::string& seen);
     void restore_autores_upscalers(sdk::UGameEngine* engine);
+    void put_back_dlss_mode(sdk::UGameEngine* engine);
+    void probe_autores_upscaler_soon();
     void process_autores_sp();
     void process_autores_dlss_quality();
     void process_autores_dlss_mode(sdk::UGameEngine* engine);
@@ -347,9 +349,13 @@ private:
     std::atomic<int> m_autores_sp_target{100};
     std::atomic<int> m_autores_upscaler_kind{-1}; // uevr::autores::Upscaler, m_autores_probe's kind
     std::atomic<int> m_autores_upscaler_target{0};
+    // The probe's state is the game thread's (process_autores).
     uevr::autores::UpscalerProbe m_autores_probe{};
     std::chrono::steady_clock::time_point m_autores_probe_started{};
     std::chrono::steady_clock::time_point m_autores_probe_next{};
+    std::chrono::steady_clock::time_point m_autores_probe_last{};
+    bool m_autores_probe_failed{false};
+    bool m_autores_was_active{false};
     int m_autores_kind_processed{-1};
     std::atomic<int> m_autores_sp_applied{100};
     std::atomic<int> m_autores_upscaler_applied{0};
