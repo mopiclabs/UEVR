@@ -680,6 +680,7 @@ void CVarManager::restore_autores_upscalers(sdk::UGameEngine* engine) {
         }
     }
 
+    restore(m_autores_dlss_sp);
     m_autores_upscaler_applied = 0;
     m_autores_upscaler_max_steps = -1;
 }
@@ -702,17 +703,36 @@ bool CVarManager::rank_autores_dlss_modes(sdk::UGameEngine* engine, uint8_t curr
     const auto base_optimal = dlss_optimal(dlss, current, engine);
     dlss.base = current;
     dlss.ranked_floor = (int)floor;
-    dlss.lower = base_optimal ? uevr::autores::dlss_modes_below(by_pixels, *base_optimal, floor) : std::vector<uint8_t>{};
+
+    // The UE5 plugin renders DLSS's input at r.ScreenPercentage; the mode picks its preset (TEKKEN 8 Demo and E33 ran
+    // mode 4, Quality, at the game's 58 %, and a mode alone moved nothing, 2026-11-13). The steps go below what the
+    // input is now, each setting a mode and its optimal percentage together, as the plugin asks of games.
+    const auto game_sp = resolve(m_autores_dlss_sp) ? refresh_base(m_autores_dlss_sp) : std::nullopt;
+    const auto input = m_autores_dlss_sp.base && *m_autores_dlss_sp.base > 0.0f ? m_autores_dlss_sp.base
+        : base_optimal ? std::optional{*base_optimal <= 1.0f ? *base_optimal * 100.0f : *base_optimal} : std::nullopt;
+    dlss.lower = input ? uevr::autores::dlss_modes_below(by_pixels, *input, floor) : std::vector<uint8_t>{};
+    dlss.lower_percent.clear();
+
+    for (const auto mode : dlss.lower) {
+        for (const auto& [optimal, m] : by_pixels) {
+            if (m == mode) {
+                dlss.lower_percent.push_back(optimal <= 1.0f ? optimal * 100.0f : optimal);
+                break;
+            }
+        }
+    }
+
     m_autores_upscaler_max_steps = (int)dlss.lower.size();
 
     std::string lower{};
 
-    for (const auto mode : dlss.lower) {
-        lower += fmt::format(" {}", mode);
+    for (size_t i = 0; i < dlss.lower.size(); ++i) {
+        lower += fmt::format(" {} ({:.1f} %)", dlss.lower[i], dlss.lower_percent[i]);
     }
 
-    SPDLOG_INFO("[autores] DLSS mode {} (optimal {}); supported{}; down to the floor ({}):{}", current,
-        base_optimal ? fmt::format("{:.2f}", *base_optimal) : "none", ranked,
+    SPDLOG_INFO("[autores] DLSS mode {} (optimal {}), input r.ScreenPercentage {}; supported{}; down to the floor ({}):{}",
+        current, base_optimal ? fmt::format("{:.2f}", *base_optimal) : "none",
+        game_sp ? fmt::format("{}", *game_sp) : std::string{"-"}, ranked,
         floor == uevr::autores::UpscalerFloor::ultra_performance ? "Ultra Performance" : "Performance",
         lower.empty() ? std::string{" none"} : lower);
 
@@ -786,13 +806,14 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
             }
         }
 
+        restore(m_autores_dlss_sp);
         return;
     }
 
     const auto unavailable = [&](const char* why) {
         SPDLOG_WARN("[autores] no upscaler steps: {}", why);
         m_autores_upscaler_unavailable = true;
-        process_autores_dlss_mode(engine); // puts the game's mode back
+        process_autores_dlss_mode(engine); // puts the game's mode and r.ScreenPercentage back
     };
 
     if (dlss.library == nullptr) {
@@ -838,27 +859,42 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
             }
         }
 
+        restore(m_autores_dlss_sp);
         return;
     }
 
     const auto applied = (std::min)(steps, (int)dlss.lower.size());
     const auto target = dlss.lower[applied - 1];
+    const auto target_sp = std::round(dlss.lower_percent[applied - 1] * 10.0f) / 10.0f;
+    auto& sp = m_autores_dlss_sp;
+
+    if (sp.taken_back >= 3) {
+        unavailable("the game keeps putting its own r.ScreenPercentage back under DLSS");
+        return;
+    }
+
+    const auto sp_before = resolve(sp) ? refresh_base(sp) : std::nullopt;
 
     if (*current != target) {
-        // Black Myth: Wukong's mode barely moves its GPU time (design v1 Appendix A-3, 0.96): what the screen
-        // percentage does around the call says whether the mode reaches the renderer.
-        const auto sp_before = resolve(m_autores_sp) ? read(m_autores_sp) : std::nullopt;
-
         if (!dlss_set_mode(dlss, target, engine)) {
             unavailable("SetDLSSMode did not take");
             return;
         }
 
         dlss.written = target;
-        const auto sp_after = m_autores_sp.cvar != nullptr ? read(m_autores_sp) : std::nullopt;
-        SPDLOG_INFO("[autores] DLSS mode {} -> {} ({} below the game's {}); r.ScreenPercentage {} -> {}", *current, target, applied,
-            *dlss.base, sp_before ? fmt::format("{}", *sp_before) : std::string{"-"},
-            sp_after ? fmt::format("{}", *sp_after) : std::string{"-"});
+    }
+
+    // The input follows r.ScreenPercentage: the mode's optimal percentage with it. A game that keeps its own value
+    // leaves the step without effect, which the controller's step check finds.
+    if (sp_before && std::abs(*sp_before - target_sp) >= 0.05f) {
+        if (!write(sp, target_sp)) {
+            SPDLOG_INFO("[autores] r.ScreenPercentage stays {} under DLSS mode {}", *sp_before, target);
+        }
+
+        const auto sp_after = read(sp);
+        SPDLOG_INFO("[autores] DLSS mode {} -> {} ({} below the input), r.ScreenPercentage {} -> {} (game {})", *current, target,
+            applied, *sp_before, sp_after ? fmt::format("{}", *sp_after) : std::string{"?"},
+            sp.base ? fmt::format("{}", *sp.base) : std::string{"-"});
     }
 
     m_autores_upscaler_applied = applied;

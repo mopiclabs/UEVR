@@ -93,7 +93,8 @@ public:
         std::chrono::steady_clock::time_point next_lookup{}; // the class is looked for again a minute after a miss
         std::optional<uint8_t> base{};
         std::optional<uint8_t> written{};
-        std::vector<uint8_t> lower{}; // modes rendering fewer pixels than base down to the floor, highest first
+        std::vector<uint8_t> lower{}; // modes rendering fewer pixels than the input does now, down to the floor
+        std::vector<float> lower_percent{}; // their optimal screen percentages, set with them
         int ranked_floor{-1};         // the floor lower was ranked for
     };
 
@@ -377,6 +378,8 @@ private:
     AutoResCVar m_autores_resize_method{L"r.SceneRenderTargetResizeMethod", true};
     AutoResCVar m_autores_dlss_quality{L"r.NGX.DLSS.Quality", true};
     AutoResCVar m_autores_dlss_enable{L"r.NGX.DLSS.Enable", true};
+    // r.ScreenPercentage as the DLSS mode step sets it (its own base and priority, apart from the SP steps').
+    AutoResCVar m_autores_dlss_sp{L"r.ScreenPercentage"};
     AutoResCVar m_autores_aa_method{L"r.AntiAliasingMethod", true};
     AutoResCVar m_autores_taa_upsampling{L"r.TemporalAA.Upsampling", true};
     AutoResDlssMode m_autores_dlss_mode{};
