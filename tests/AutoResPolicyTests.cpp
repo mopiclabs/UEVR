@@ -393,6 +393,18 @@ static void test_step_effect() {
     expect(ar::judge_step(0.0f, 10.0f) == ar::StepEffect::unclear, "no GPU time before: not judged");
 }
 
+static void test_step_strikes() {
+    ar::StepStrikes s{};
+    expect(!s.verdict(true), "the first verdict against a step only puts it back");
+    expect(s.verdict(true), "the second in a row leaves the actuator out");
+
+    ar::StepStrikes t{};
+    expect(!t.verdict(true), "Wukong at the load->play cut: put back");
+    expect(!t.verdict(false), "taken again, -7 %: kept, the count starts over");
+    expect(!t.verdict(true), "a later verdict against the next step is a first again");
+    expect(t.verdict(true), "and its second leaves it out");
+}
+
 int main() {
     test_ladder();
     test_frame_bound();
@@ -404,6 +416,7 @@ int main() {
     test_dlss_floor();
     test_internal_recovery();
     test_anchor_gate();
+    test_step_strikes();
 
     if (failures == 0) {
         std::printf("autores-policy-tests: all passed\n");
