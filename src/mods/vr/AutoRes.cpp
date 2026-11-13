@@ -469,16 +469,21 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     // size changes the memory (SP renders into the same targets), so nothing else moves for it.
     // At the lowest level (or with no level steps) there is nothing to take, and that is not a guard step: it would hold
     // the checks below off for as long as the game stays over (Hogwarts and Wukong at Min on 8 GB are over all along).
-    if (m_vram_over_seconds >= 3 && m_available.level && m_state.level > ar::MIN_LEVEL) {
-        if (carry_out(openxr, cvars, ar::Step{ar::Actuator::level, m_state.level, m_state.level - 1}, "VRAM guard")) {
-            m_state.level_cap = (std::min)(m_state.level_cap, m_state.level);
-            SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget: capped at {} for this session", *m_vram_percent,
-                ar::LEVELS[m_state.level_cap].name);
+    if (m_vram_over_seconds >= 3) {
+        if (m_available.level && m_state.level > ar::MIN_LEVEL) {
+            if (carry_out(openxr, cvars, ar::Step{ar::Actuator::level, m_state.level, m_state.level - 1}, "VRAM guard")) {
+                m_state.level_cap = (std::min)(m_state.level_cap, m_state.level);
+                SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget: capped at {} for this session", *m_vram_percent,
+                    ar::LEVELS[m_state.level_cap].name);
+            }
+
+            m_last_guard_step = now;
+            m_vram_over_seconds = 0;
+            return;
         }
 
-        m_last_guard_step = now;
+        // Nothing to take: the count starts over (a later raise, the slider's too, gets its 3 s) and no guard step.
         m_vram_over_seconds = 0;
-        return;
     }
 
     // Collapse: under 10 VR fps for 3 s without a stall, while the runtime says the GPU is IMPAIRED (design v1: GPU
@@ -533,8 +538,11 @@ void AutoResController::check_anchor(runtimes::OpenXR& openxr, CVarManager& cvar
         : m_state.start_level >= ar::BASE_LEVEL ? "the session started at Base or above"
         : to <= m_state.level ? "the cap is not above the eye"
         : m_state.level != m_state.start_level ? "the eye moved already"
-        : !upscaler && !deep_sp ? (m_available.upscaler ? "no DLSS steps below the game's own (it is at the floor already)"
-                                  : m_available.sp ? "no deep internal resolution (SP steps without a temporal upscaler)"
+        : !upscaler && !deep_sp ? (m_available.upscaler ? (m_upscaler_cap >= 0 ? "the DLSS steps were stopped short by their check"
+                                                                            : "no DLSS steps below the game's own (it is at the floor already)")
+                                  : m_available.sp ? (m_sp_cap >= 0 ? "the SP steps were stopped short by their check"
+                                                                    : "no deep internal resolution (SP steps without a temporal upscaler)")
+                                  : m_sp_left_out || m_upscaler_left_out ? "the internal resolution steps were left out by their checks"
                                                    : "no internal resolution steps in this game")
         : vram >= 70.0f ? "GPU memory reached 70 % of the budget or more"
         : nullptr;
