@@ -171,9 +171,10 @@ private:
     // (-1: no cap).
     int m_sp_cap{-1};
     int m_upscaler_cap{-1};
-    // The verdicts against each in a row (AutoResPolicy.hpp StepStrikes).
+    // The verdicts against each in a row (AutoResPolicy.hpp StepStrikes), and when a step put back may be taken again.
     uevr::autores::StepStrikes m_sp_strikes{};
     uevr::autores::StepStrikes m_upscaler_strikes{};
+    clock::time_point m_retake_after{};
     uevr::autores::GpuBusySampler m_gpu{};
 
     // VR_AutoResOutputAnchor: decided once a session; raised from m_anchor_from to Base until the VRAM guard trips.

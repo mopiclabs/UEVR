@@ -487,17 +487,34 @@ struct AnchorGate {
 // One actuator's verdicts in a row. A verdict against a step can be the scene's and not the step's: Wukong's DLSS step
 // 0.7 s into play compared the scene before the play with the play and read +3 % GPU and 17 % fewer fps, while the same
 // step 6 s before the play read -7 % (3080L, 2026-11-13; no stall in either window). So the first verdict against it only
-// puts the step back, and the next request takes it again from a fresh "before"; two in a row leave the actuator out (or
-// stop it at the step before) for the session. A verdict for it starts the count over.
+// puts the step back, and the next request takes it again from a fresh "before" (not before RETAKE_SECONDS, so the
+// before-window and the fps window are the put-back state's); two in a row leave the actuator out (or stop it at the
+// step before) for the session. A verdict for it starts the count over, and so does the actuator going out. A first
+// verdict that no retake followed within FORGET_SECONDS (the GPU went NORMAL, the retake's window had a stall) is
+// forgotten: "in a row" is one episode, not two misreads minutes apart.
 struct StepStrikes {
     static constexpr int OUT_AFTER = 2;
+    static constexpr int RETAKE_SECONDS = 6;
+    static constexpr double FORGET_SECONDS = 60.0;
 
     int count{0};
+    double last{0.0};
 
     // True when the actuator goes out now.
-    bool verdict(bool against) {
+    bool verdict(bool against, double now_seconds) {
+        if (count > 0 && now_seconds - last > FORGET_SECONDS) {
+            count = 0;
+        }
+
         count = against ? count + 1 : 0;
-        return count >= OUT_AFTER;
+        last = now_seconds;
+
+        if (count >= OUT_AFTER) {
+            count = 0;
+            return true;
+        }
+
+        return false;
     }
 };
 
