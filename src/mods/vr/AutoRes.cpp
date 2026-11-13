@@ -549,8 +549,7 @@ void AutoResController::check_anchor(runtimes::OpenXR& openxr, CVarManager& cvar
         : m_state.start_level >= ar::BASE_LEVEL ? "the session started at Base or above"
         : to <= m_state.level ? "the cap is not above the eye"
         : m_state.level != m_state.start_level ? "the eye moved already"
-        : !upscaler && !deep_sp ? (m_available.upscaler ? (m_upscaler_cap >= 0 ? "the DLSS steps were stopped short by their check"
-                                                                            : "no DLSS steps below the game's own (it is at the floor already)")
+        : !upscaler && !deep_sp ? (m_available.upscaler ? "no DLSS steps below the game's own (it is at the floor already)"
                                   : m_available.sp ? (m_sp_cap >= 0 ? "the SP steps were stopped short by their check"
                                                                     : "no deep internal resolution (SP steps without a temporal upscaler)")
                                   : m_sp_left_out || m_upscaler_left_out ? "the internal resolution steps were left out by their checks"
