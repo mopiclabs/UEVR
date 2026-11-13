@@ -172,6 +172,14 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
                 SPDLOG_INFO("[autores] {}: waiting while the game is loading", m_pending_why);
                 m_waiting_logged = true;
             }
+        } else if (picked->actuator != ar::Actuator::level && picked->to > picked->from && now < m_retake_after) {
+            // A step put back by its first verdict is taken again only from RETAKE_SECONDS on: its check's "before"
+            // must be the put-back state's, not the struck step's (StepStrikes).
+            if (!m_waiting_logged) {
+                SPDLOG_INFO("[autores] {}: the step put back is taken again in {} s", m_pending_why,
+                    std::chrono::duration_cast<std::chrono::seconds>(m_retake_after - now).count() + 1);
+                m_waiting_logged = true;
+            }
         } else if (picked->actuator == ar::Actuator::level && m_last_level_change.time_since_epoch().count() != 0 &&
             level_wait.count() > 0) {
             if (!m_waiting_logged) {
@@ -210,6 +218,9 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_upscaler_left_out = false;
     m_sp_cap = -1;
     m_upscaler_cap = -1;
+    m_sp_strikes = {};
+    m_upscaler_strikes = {};
+    m_retake_after = {};
     m_gpu.start();
 
     cvars.set_autores_sp(100);
@@ -547,7 +558,7 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     const auto fmt_ms = [](const std::optional<float>& ms) { return ms ? fmt::format("{:.1f}", *ms) : std::string{"-"}; };
     const auto against = slower || effect == ar::StepEffect::nothing;
     auto& strikes = check.actuator == ar::Actuator::sp ? m_sp_strikes : m_upscaler_strikes;
-    const auto out = !check.loading && strikes.verdict(against);
+    const auto out = !check.loading && strikes.verdict(against, std::chrono::duration<double>(now.time_since_epoch()).count());
     // The steps before this one were kept (each was checked), so only this one goes back.
     const auto keep = check.to - 1;
     const auto out_what = !out ? std::string{"put back, taken again if still wanted"}
@@ -567,7 +578,7 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     m_step_check.reset();
 
     if (against && !out) {
-        // Back to the step before; the request still wanted is asked again after the usual 5 s, so the next check's
+        // Back to the step before; the request still wanted takes it again from RETAKE_SECONDS on, so the next check's
         // "before" is this state's.
         auto& steps = actuator == ar::Actuator::sp ? m_state.sp : m_state.upscaler;
         steps = keep;
@@ -579,6 +590,8 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         }
 
         m_last_action = now;
+        m_retake_after = now + std::chrono::seconds{ar::StepStrikes::RETAKE_SECONDS};
+        m_waiting_logged = false;
         publish();
         return;
     }

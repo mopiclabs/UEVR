@@ -240,14 +240,20 @@ static void test_step_effect() {
 
 static void test_step_strikes() {
     ar::StepStrikes s{};
-    expect(!s.verdict(true), "the first verdict against a step only puts it back");
-    expect(s.verdict(true), "the second in a row leaves the actuator out");
+    expect(!s.verdict(true, 100.0), "the first verdict against a step only puts it back");
+    expect(s.verdict(true, 112.0), "the second in a row (its retake) leaves the actuator out");
+    expect(s.count == 0, "the count starts over once the actuator goes out or is capped");
+    expect(!s.verdict(true, 400.0), "a capped actuator taken again later: one misread only puts it back");
 
     ar::StepStrikes t{};
-    expect(!t.verdict(true), "Wukong at the load->play cut: put back");
-    expect(!t.verdict(false), "taken again, -7 %: kept, the count starts over");
-    expect(!t.verdict(true), "a later verdict against the next step is a first again");
-    expect(t.verdict(true), "and its second leaves it out");
+    expect(!t.verdict(true, 10.0), "Wukong at the load->play cut: put back");
+    expect(!t.verdict(false, 22.0), "taken again, -7 %: kept, the count starts over");
+    expect(!t.verdict(true, 300.0), "a later verdict against the next step is a first again");
+    expect(t.verdict(true, 312.0), "and its retake's leaves it out");
+
+    ar::StepStrikes u{};
+    expect(!u.verdict(true, 10.0), "a misread, then the GPU went NORMAL: no retake");
+    expect(!u.verdict(true, 200.0), "minutes later another misread is a first again, not the second");
 }
 
 int main() {
