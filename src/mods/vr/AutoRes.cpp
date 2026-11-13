@@ -113,43 +113,7 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
             ar::LEVELS[m_state.start_level].name);
     }
 
-    // An actuator the game turned out not to support: its steps are undone in the state (the game thread puts the
-    // value back). A step down that moved nothing is taken again by the next actuator; a held step up is done already.
-    const auto report = cvars.get_autores_report();
-    const auto undone = [&](int& steps, int to) {
-        if (steps <= to) {
-            return;
-        }
-
-        steps = to;
-
-        if (m_state.gpu == ar::Notification::impaired) {
-            m_pending = ar::Request::down;
-            m_pending_why = "a step that moved nothing";
-        } else if (m_pending == ar::Request::up || m_pending == ar::Request::cpu_up) {
-            m_pending = ar::Request::none;
-        }
-    };
-
-    if (m_available.sp && report.sp_unavailable) {
-        m_available.sp = false;
-        m_sp_check.reset();
-        undone(m_state.sp, 0);
-    }
-
-    if (m_available.upscaler && report.upscaler_unavailable) {
-        m_available.upscaler = false;
-        undone(m_state.upscaler, 0);
-    }
-
-    // The game's own mode leaves fewer upscaler steps: a step past them moved nothing.
-    if (m_available.upscaler && report.upscaler_max_steps >= 0 && report.upscaler_max_steps < m_available.upscaler_steps) {
-        m_available.upscaler_steps = report.upscaler_max_steps;
-        undone(m_state.upscaler, m_available.upscaler_steps);
-    }
-
-    m_sp_percent = report.sp_percent;
-    m_upscaler_steps = report.upscaler_steps;
+    sync_available(cvars);
 
     for (const auto& event : openxr.take_perf_settings_events()) {
         take_edge(event.domain, event.subDomain, event.fromLevel, event.toLevel, "runtime");
@@ -178,9 +142,9 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
 
     // The extension reports changes only: while the last edge's state lasts, its request is asked again once the last
     // step had time to show (5 s down, 10 s up; a level step also waits for the level interval). A runtime that keeps
-    // sending edges resets the wait with each one. An SP step's frame-rate check (check_sp_step) ends first: it takes
-    // 5-6 s, and a step taken before would cancel it while the GPU stays IMPAIRED, the case it is there for.
-    if (m_pending == ar::Request::none && !m_sp_check && m_last_request != ar::Request::none &&
+    // sending edges resets the wait with each one. A step's check (check_step) ends first: it takes 6 s, and a step
+    // taken before would cancel it while the GPU stays IMPAIRED, the case it is there for.
+    if (m_pending == ar::Request::none && !m_step_check && m_last_request != ar::Request::none &&
         ar::still_wanted(m_state, m_last_request) && now - m_last_action >= settle_time(m_last_request)) {
         const auto again = m_last_request == ar::Request::down ? ar::next_down(m_state, m_available) : ar::next_up(m_state, m_available);
 
@@ -206,6 +170,14 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
         } else if (inputs.loading) {
             if (!m_waiting_logged) {
                 SPDLOG_INFO("[autores] {}: waiting while the game is loading", m_pending_why);
+                m_waiting_logged = true;
+            }
+        } else if (picked->actuator != ar::Actuator::level && picked->to > picked->from && now < m_retake_after) {
+            // A step put back by its first verdict is taken again only from RETAKE_SECONDS on: its check's "before"
+            // must be the put-back state's, not the struck step's (StepStrikes).
+            if (!m_waiting_logged) {
+                SPDLOG_INFO("[autores] {}: the step put back is taken again in {} s", m_pending_why,
+                    std::chrono::duration_cast<std::chrono::seconds>(m_retake_after - now).count() + 1);
                 m_waiting_logged = true;
             }
         } else if (picked->actuator == ar::Actuator::level && m_last_level_change.time_since_epoch().count() != 0 &&
@@ -240,6 +212,16 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     const auto max = ar::Size{(std::min)(view.maxImageRectWidth, 8192u), (std::min)(view.maxImageRectHeight, 16384u)};
     m_state.level_cap = ar::highest_level_within(m_base, max, m_widen);
     m_available = ar::Available{};
+    // The upscaler joins once CVarManager finds DLSS (sync_available).
+    m_available.upscaler = false;
+    m_sp_left_out = false;
+    m_upscaler_left_out = false;
+    m_sp_cap = -1;
+    m_upscaler_cap = -1;
+    m_sp_strikes = {};
+    m_upscaler_strikes = {};
+    m_retake_after = {};
+    m_gpu.start();
 
     cvars.set_autores_sp(100);
     cvars.set_autores_upscaler(0);
@@ -255,7 +237,7 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_toggle_down = true;
     m_fps_window_start = {};
     m_vram_over_seconds = 0;
-    m_sp_check.reset();
+    m_step_check.reset();
     // Frame-bound is found again in each session: the runtime keeps nothing between them either.
     m_tick_samples.clear();
     m_frame_bound = ar::FrameBoundJudge{};
@@ -290,7 +272,8 @@ void AutoResController::deactivate(runtimes::OpenXR& openxr, CVarManager& cvars)
 
     m_active = false;
     m_pending = ar::Request::none;
-    m_sp_check.reset();
+    m_step_check.reset();
+    m_gpu.stop();
     uevr::perf::set_autores(0, 100, 0, -2, -1);
     SPDLOG_INFO("[autores] off");
 }
@@ -322,17 +305,12 @@ void AutoResController::take_edge(uint32_t domain, uint32_t sub_domain, uint32_t
 bool AutoResController::carry_out(runtimes::OpenXR& openxr, CVarManager& cvars, const ar::Step& step, const char* why) {
     const auto now = clock::now();
 
-    // Any other step would mix into the SP check's frame rate.
-    m_sp_check.reset();
+    // Any other step would mix into the check's numbers.
+    m_step_check.reset();
 
     switch (step.actuator) {
     case ar::Actuator::sp:
         cvars.set_autores_sp(ar::SP_PERCENT[step.to]);
-
-        // A step down is checked against the frame rate before it (check_sp_step).
-        if (step.to > step.from && m_fps) {
-            m_sp_check = SpCheck{.at = now, .sp = step.to, .fps_before = *m_fps};
-        }
         break;
     case ar::Actuator::upscaler:
         cvars.set_autores_upscaler(step.to);
@@ -352,6 +330,12 @@ bool AutoResController::carry_out(runtimes::OpenXR& openxr, CVarManager& cvars, 
         m_last_level_change = now;
         break;
     }
+    }
+
+    // An SP or upscaler step down is checked against the 3 s before it (check_step).
+    if (step.actuator != ar::Actuator::level && step.to > step.from && m_fps) {
+        m_step_check = StepCheck{.actuator = step.actuator, .to = step.to, .at = now, .fps_before = *m_fps,
+            .gpu_ms_before = m_gpu.gpu_ms_per_frame(now - std::chrono::milliseconds{3500}, now)};
     }
 
     ar::apply(m_state, step);
@@ -399,7 +383,7 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
         m_fps_window_frames = frames;
     }
 
-    check_sp_step(cvars, inputs);
+    check_step(cvars, inputs);
 
     // Over the budget: UE fills its texture pools close to it (TEKKEN 8 demo ran at 96-98 % of it on 8 GB at 50 fps,
     // 2026-10-28), so only usage past it means the OS is already demoting memory.
@@ -443,20 +427,105 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     }
 }
 
-// An SP step down that leaves the game slower (Dead as Disco ran heavier at a lower r.ScreenPercentage, 2026-10-15):
-// the frame rate 2-5 s after the step against the 3 s before it. 10 % slower without a stall in between leaves SP out
-// for the session and puts it back; a request still wanted then goes to the next actuator.
-void AutoResController::check_sp_step(CVarManager& cvars, const Inputs& inputs) {
-    if (!m_sp_check) {
+// What can move now: CVarManager's report (SP is out while DLSS sets the input resolution, the upscaler while no DLSS is
+// found; either can come back) and the step check's verdicts (out for the session). An actuator that goes out has its
+// steps undone in the state and its target put back; a step down it held is taken again by the next actuator.
+void AutoResController::sync_available(CVarManager& cvars) {
+    const auto report = cvars.get_autores_report();
+    const auto undone = [&](int& steps, int to) {
+        if (steps <= to) {
+            return;
+        }
+
+        steps = to;
+
+        if (m_state.gpu == ar::Notification::impaired) {
+            m_pending = ar::Request::down;
+            m_pending_why = "a step that moved nothing";
+        } else if (m_pending == ar::Request::up || m_pending == ar::Request::cpu_up) {
+            m_pending = ar::Request::none;
+        }
+    };
+
+    const auto sp = !report.sp_unavailable && !m_sp_left_out;
+    const auto upscaler = !report.upscaler_unavailable && !m_upscaler_left_out;
+
+    if (sp != m_available.sp) {
+        m_available.sp = sp;
+
+        if (!sp) {
+            if (m_step_check && m_step_check->actuator == ar::Actuator::sp) {
+                m_step_check.reset();
+            }
+
+            undone(m_state.sp, 0);
+            cvars.set_autores_sp(ar::SP_PERCENT[0]);
+        }
+
+        SPDLOG_INFO("[autores] SP steps {}", sp ? "on" : m_sp_left_out ? "off for the session" : "off (DLSS sets the input resolution)");
+    }
+
+    if (upscaler != m_available.upscaler) {
+        m_available.upscaler = upscaler;
+
+        if (!upscaler) {
+            if (m_step_check && m_step_check->actuator == ar::Actuator::upscaler) {
+                m_step_check.reset();
+            }
+
+            undone(m_state.upscaler, 0);
+            cvars.set_autores_upscaler(0);
+        } else {
+            m_available.upscaler_steps = ar::UPSCALER_STEPS;
+        }
+
+        SPDLOG_INFO("[autores] upscaler steps {}", upscaler ? "on" : m_upscaler_left_out ? "off for the session" : "off (no DLSS sets the input resolution)");
+    }
+
+    // The game's own mode leaves fewer upscaler steps: a step past them moved nothing.
+    if (m_available.upscaler && report.upscaler_max_steps >= 0 && report.upscaler_max_steps < m_available.upscaler_steps) {
+        m_available.upscaler_steps = report.upscaler_max_steps;
+        undone(m_state.upscaler, m_available.upscaler_steps);
+        cvars.set_autores_upscaler(m_state.upscaler);
+    }
+
+    // A step past the first that moved nothing: back to the one before it, and no further for the session.
+    if (m_available.sp && m_sp_cap >= 0 && m_sp_cap < m_available.sp_steps) {
+        m_available.sp_steps = m_sp_cap;
+        undone(m_state.sp, m_sp_cap);
+        cvars.set_autores_sp(ar::SP_PERCENT[m_state.sp]);
+    }
+
+    if (m_available.upscaler && m_upscaler_cap >= 0 && m_upscaler_cap < m_available.upscaler_steps) {
+        m_available.upscaler_steps = m_upscaler_cap;
+        undone(m_state.upscaler, m_upscaler_cap);
+        cvars.set_autores_upscaler(m_state.upscaler);
+    }
+
+    m_sp_percent = report.sp_percent;
+    m_upscaler_steps = report.upscaler_steps;
+}
+
+// An SP or upscaler step down, against the 3 s before it (design v1 Appendix B, self-calibration): the GPU time per
+// frame 2-5 s after the step (AutoResPolicy.hpp judge_step) and the frame rate over the same window. A step that does
+// nothing worth keeping is against; so is one that leaves the game 10 % slower (Dead as Disco ran heavier at a lower
+// r.ScreenPercentage, 2026-10-15). The first verdict against it only puts the step back: the request, if still wanted,
+// takes it again 5 s later from a fresh "before" (a scene change can read as the step's, StepStrikes). The second in a
+// row leaves the actuator out for the session, and a request still wanted goes to the next actuator. A window with a
+// stall or a load in it is not judged and counts neither way.
+void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
+    if (!m_step_check) {
         return;
     }
 
-    auto& check = *m_sp_check;
+    auto& check = *m_step_check;
     const auto now = clock::now();
     check.loading = check.loading || inputs.loading;
 
-    if (m_state.sp != check.sp) {
-        m_sp_check.reset();
+    const auto current = check.actuator == ar::Actuator::sp ? m_state.sp : m_state.upscaler;
+
+    if (current != check.to) {
+        m_step_check.reset();
         return;
     }
 
@@ -470,22 +539,71 @@ void AutoResController::check_sp_step(CVarManager& cvars, const Inputs& inputs) 
         return;
     }
 
-    if (now - check.window_start < std::chrono::seconds{3}) {
+    // From 2 s after the step, 3 s or more: the GPU sampler takes a second at a time, so the window waits for its third.
+    if (now - check.window_start < std::chrono::seconds{4}) {
         return;
     }
 
+    // A level change in the 4 s before the step or since makes the GPU time another eye size's.
+    check.loading = check.loading ||
+        (m_last_level_change.time_since_epoch().count() != 0 && m_last_level_change > check.at - std::chrono::seconds{4});
+
     const auto fps_after = (float)(uevr::perf::new_frames() - check.window_frames) /
         std::chrono::duration<float>(now - check.window_start).count();
+    const auto gpu_ms_after = m_gpu.gpu_ms_per_frame(check.window_start, now);
+    const auto name = check.actuator == ar::Actuator::sp ? "SP" : "upscaler";
     const auto slower = !check.loading && fps_after < 0.9f * check.fps_before;
-    SPDLOG_INFO("[autores] SP step: {:.1f} fps before, {:.1f} after{}", check.fps_before, fps_after,
-        check.loading ? " (a stall in between, not judged)" : slower ? ": slower, SP is left out" : "");
-    m_sp_check.reset();
+    const auto effect = check.loading || !check.gpu_ms_before || !gpu_ms_after ? ar::StepEffect::unclear
+        : ar::judge_step(*check.gpu_ms_before, *gpu_ms_after);
+    const auto fmt_ms = [](const std::optional<float>& ms) { return ms ? fmt::format("{:.1f}", *ms) : std::string{"-"}; };
+    const auto against = slower || effect == ar::StepEffect::nothing;
+    auto& strikes = check.actuator == ar::Actuator::sp ? m_sp_strikes : m_upscaler_strikes;
+    const auto out = !check.loading && strikes.verdict(against, std::chrono::duration<double>(now.time_since_epoch()).count());
+    // The steps before this one were kept (each was checked), so only this one goes back.
+    const auto keep = check.to - 1;
+    const auto out_what = !out ? std::string{"put back, taken again if still wanted"}
+        : keep > 0 ? fmt::format("back to step {} and no further for the session", keep)
+                   : std::string{"put back and left out for the session"};
 
-    if (slower) {
-        m_available.sp = false;
-        m_state.sp = 0;
-        cvars.set_autores_sp(100);
-        m_pending = m_state.gpu == ar::Notification::impaired ? ar::Request::down : m_pending;
+    SPDLOG_INFO("[autores] {} step {}: GPU {} -> {} ms per frame{}, {:.1f} -> {:.1f} fps{}: {}", name, check.to,
+        fmt_ms(check.gpu_ms_before), fmt_ms(gpu_ms_after),
+        check.gpu_ms_before && gpu_ms_after && *check.gpu_ms_before > 0.0f
+            ? fmt::format(" ({:+.0f} %)", 100.0f * (*gpu_ms_after / *check.gpu_ms_before - 1.0f)) : std::string{},
+        check.fps_before, fps_after, check.loading ? " (a stall or a level change in between, not judged)" : "",
+        slower ? fmt::format("slower, {}", out_what)
+        : effect == ar::StepEffect::nothing ? fmt::format("no effect, {}", out_what)
+        : effect == ar::StepEffect::works ? "works" : "kept");
+
+    const auto actuator = check.actuator;
+    m_step_check.reset();
+
+    if (against && !out) {
+        // Back to the step before; the request still wanted takes it again from RETAKE_SECONDS on, so the next check's
+        // "before" is this state's.
+        auto& steps = actuator == ar::Actuator::sp ? m_state.sp : m_state.upscaler;
+        steps = keep;
+
+        if (actuator == ar::Actuator::sp) {
+            cvars.set_autores_sp(ar::SP_PERCENT[keep]);
+        } else {
+            cvars.set_autores_upscaler(keep);
+        }
+
+        m_last_action = now;
+        m_retake_after = now + std::chrono::seconds{ar::StepStrikes::RETAKE_SECONDS};
+        m_waiting_logged = false;
+        publish();
+        return;
+    }
+
+    if (out) {
+        if (keep > 0) {
+            (actuator == ar::Actuator::sp ? m_sp_cap : m_upscaler_cap) = keep;
+        } else {
+            (actuator == ar::Actuator::sp ? m_sp_left_out : m_upscaler_left_out) = true;
+        }
+
+        sync_available(cvars); // undoes the step and takes a request still wanted to the next actuator
     }
 }
 

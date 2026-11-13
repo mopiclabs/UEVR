@@ -158,21 +158,39 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
     const auto sp_target = m_autores_sp_target.load();
     const auto upscaler_target = m_autores_upscaler_target.load();
     const auto now = std::chrono::steady_clock::now();
-    const auto changed = sp_target != m_autores_sp_processed || upscaler_target != m_autores_upscaler_processed;
+
+    // A new activation looks again from the start (the 2 s phase, nothing assumed from the last session).
+    const auto active_now = m_autores_active.load();
+
+    if (active_now && !m_autores_was_active) {
+        m_autores_probe = uevr::autores::UpscalerProbe{};
+        m_autores_probe_started = {};
+        m_autores_probe_next = {};
+        m_autores_upscaler_kind = (int)uevr::autores::Upscaler::unknown;
+    }
+
+    m_autores_was_active = active_now;
+
+    // A probe that threw is not tried again this run: the same faulting call would come back every few seconds.
+    try {
+        if (active_now && !m_autores_probe_failed) {
+            probe_autores_upscaler(engine);
+        }
+    } catch (...) {
+        SPDLOG_WARN("[autores] looking for the game's upscaler threw; no upscaler steps, SP steps, not looked for again");
+        m_autores_probe_failed = true;
+        m_autores_probe.kind = uevr::autores::Upscaler::none;
+        m_autores_upscaler_kind = (int)uevr::autores::Upscaler::none;
+        m_autores_upscaler_unavailable = true;
+    }
+
+    const auto kind_now = m_autores_upscaler_kind.load();
+    const auto changed = sp_target != m_autores_sp_processed || upscaler_target != m_autores_upscaler_processed ||
+        kind_now != m_autores_kind_processed;
     // Moved away from the game's values, or asked to: checked once a second, which also retries a cvar that isn't there
     // yet until it is found or given up on.
     const auto active = sp_target < 100 || upscaler_target > 0 || m_autores_sp.written.has_value() ||
         m_autores_dlss_quality.written.has_value() || m_autores_dlss_mode.written.has_value();
-
-    try {
-        if (m_autores_active) {
-            probe_autores_upscaler(engine);
-        }
-    } catch (...) {
-        SPDLOG_WARN("[autores] looking for the game's upscaler threw; no upscaler steps");
-        m_autores_upscaler_kind = (int)uevr::autores::Upscaler::none;
-        m_autores_upscaler_unavailable = true;
-    }
 
     if (!changed && (!active || now < m_autores_next_check)) {
         return;
@@ -181,6 +199,7 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
     m_autores_next_check = now + std::chrono::seconds{1};
     m_autores_sp_processed = sp_target;
     m_autores_upscaler_processed = upscaler_target;
+    m_autores_kind_processed = kind_now;
 
     try {
         process_autores_sp();
@@ -189,14 +208,26 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
         m_autores_sp_unavailable = true;
     }
 
-    // Steps asked for before the probe has an answer wait for it.
-    const auto kind = (uevr::autores::Upscaler)m_autores_upscaler_kind.load();
+    // The upscaler that sets the input resolution now; a mode or quality ours from before it changed is put back.
+    const auto kind = (uevr::autores::Upscaler)kind_now;
 
     try {
+        // A switch from one DLSS kind to the other (a game with both, read as one before a world answered the other)
+        // puts the other kind's step back first, so the two never stack.
         if (kind == uevr::autores::Upscaler::dlss_quality) {
+            if (m_autores_dlss_mode.written) {
+                put_back_dlss_mode(engine);
+            }
+
             process_autores_dlss_quality();
         } else if (kind == uevr::autores::Upscaler::dlss_mode) {
+            if (m_autores_dlss_quality.written) {
+                restore(m_autores_dlss_quality);
+            }
+
             process_autores_dlss_mode(engine);
+        } else {
+            restore_autores_upscalers(engine);
         }
     } catch (...) {
         SPDLOG_WARN("[autores] the DLSS actuator threw; no upscaler steps");
@@ -209,8 +240,11 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
 void CVarManager::process_autores_sp() {
     const auto target = m_autores_sp_target.load();
     auto& sp = m_autores_sp;
+    const auto kind = (uevr::autores::Upscaler)m_autores_upscaler_kind.load();
+    // Under DLSS r.ScreenPercentage does nothing (Black Myth: Wukong, Hogwarts Legacy, 2026-10-24).
+    const auto under_dlss = kind == uevr::autores::Upscaler::dlss_mode || kind == uevr::autores::Upscaler::dlss_quality;
 
-    if (target >= 100 || m_autores_sp_unavailable) {
+    if (target >= 100 || m_autores_sp_unavailable || under_dlss) {
         if (sp.written) {
             restore(sp);
             restore(m_autores_resize_method);
@@ -302,8 +336,12 @@ void CVarManager::process_autores_dlss_quality() {
         return;
     }
 
+    // Turned off since the probe found it: the probe makes it none after two reads, and SP takes over then. The next
+    // read comes sooner, but still 2 s apart, so a DLSS off for a moment (a settings menu applying) is not none.
     if (const auto enabled = read(m_autores_dlss_enable); !enabled || *enabled < 0.5f) {
-        unavailable("DLSS is off (r.NGX.DLSS.Enable)");
+        restore(quality);
+        m_autores_upscaler_applied = 0;
+        probe_autores_upscaler_soon();
         return;
     }
 
@@ -392,18 +430,22 @@ bool call(sdk::UClass* library, sdk::UFunction* function, std::vector<uint8_t>& 
 // The UE5 DLSS plugin's Blueprint library (UDLSSLibrary).
 using AutoResDlssMode = CVarManager::AutoResDlssMode;
 
-// One lookup per session: true when the library and its four functions are there. A miss walks every object, and the
-// plugin's native classes are registered at startup, long before the OpenXR session.
+// True when the library and its four functions are there. A miss walks every object on the game thread (a name that
+// isn't there is not cached), so it is looked for three times a minute apart and then no more: the plugin's native
+// classes are registered at startup, long before the OpenXR session, and the retries only cover a lookup made too early.
 bool find_dlss_library(AutoResDlssMode& dlss) {
     if (dlss.library != nullptr) {
         return true;
     }
 
-    if (dlss.incomplete || dlss.lookups > 0) {
+    const auto now = std::chrono::steady_clock::now();
+
+    if (dlss.incomplete || dlss.lookups >= 3 || now < dlss.next_lookup) {
         return false;
     }
 
     ++dlss.lookups;
+    dlss.next_lookup = now + std::chrono::minutes{1};
 
     const auto found = sdk::find_uobject<sdk::UClass>(L"Class /Script/DLSSBlueprint.DLSSLibrary");
 
@@ -453,8 +495,23 @@ bool dlss_set_mode(const AutoResDlssMode& dlss, uint8_t mode, sdk::UGameEngine* 
     return call((sdk::UClass*)dlss.library, function, parms, engine) && dlss_get_mode(dlss, engine) == mode;
 }
 
+// GetDLSSModeInformation for a mode at 3840x2160: whether the call was made, bIsSupported and OptimalScreenPercentage.
+struct DlssModeInfo {
+    bool called{false};
+    bool supported{false};
+    float optimal{};
+};
+
+DlssModeInfo dlss_info(const AutoResDlssMode& dlss, uint8_t mode, sdk::UGameEngine* engine);
+
 // A mode's optimal screen percentage at 3840x2160; none when the mode is off or unsupported.
 std::optional<float> dlss_optimal(const AutoResDlssMode& dlss, uint8_t mode, sdk::UGameEngine* engine) {
+    const auto info = dlss_info(dlss, mode, engine);
+    return info.called && info.supported && std::isfinite(info.optimal) && info.optimal > 0.0f ? std::optional{info.optimal}
+                                                                                              : std::nullopt;
+}
+
+DlssModeInfo dlss_info(const AutoResDlssMode& dlss, uint8_t mode, sdk::UGameEngine* engine) {
     const auto function = (sdk::UFunction*)dlss.get_info;
     const auto mode_offset = param_offset(function, L"DLSSMode");
     const auto resolution_offset = param_offset(function, L"ScreenResolution");
@@ -463,7 +520,7 @@ std::optional<float> dlss_optimal(const AutoResDlssMode& dlss, uint8_t mode, sdk
 
     if (!fits(function, mode_offset, 1) || !fits(function, resolution_offset, 8) || !fits(function, supported_offset, 1) ||
         !fits(function, optimal_offset, 4)) {
-        return std::nullopt;
+        return {};
     }
 
     std::vector<uint8_t> parms(function->get_parms_size());
@@ -479,12 +536,12 @@ std::optional<float> dlss_optimal(const AutoResDlssMode& dlss, uint8_t mode, sdk
     }
 
     if (!call((sdk::UClass*)dlss.library, function, parms, engine)) {
-        return std::nullopt;
+        return {};
     }
 
-    float optimal{};
-    std::memcpy(&optimal, parms.data() + *optimal_offset, sizeof(optimal));
-    return parms[*supported_offset] != 0 && std::isfinite(optimal) && optimal > 0.0f ? std::optional{optimal} : std::nullopt;
+    DlssModeInfo info{.called = true, .supported = parms[*supported_offset] != 0};
+    std::memcpy(&info.optimal, parms.data() + *optimal_offset, sizeof(info.optimal));
+    return info;
 }
 
 // GetSupportedDLSSModes: a TArray<UDLSSMode> (data, count, capacity). The engine allocated it; the few bytes are left
@@ -511,15 +568,61 @@ std::vector<uint8_t> dlss_supported(const AutoResDlssMode& dlss, sdk::UGameEngin
 }
 }
 
-// Which upscaler sets the game's input resolution, found once per session: the UE5 DLSS plugin with a mode that is on,
-// else the UE4 plugin's cvars with DLSS on, else none (after 30 s). Under DLSS r.ScreenPercentage does nothing (Black
-// Myth: Wukong, Hogwarts Legacy, 2026-10-24), so SP is left out there.
+// What sets the game's input resolution right now: the UE5 DLSS plugin with a mode that is on, else the UE4 plugin's
+// cvars with DLSS on. off: one of them answered and DLSS is off (or neither plugin is in the game); no_answer: nothing
+// could be read (a call needs the world, a cvar is not registered yet). seen says what was read, for the log.
+uevr::autores::ProbeReading CVarManager::read_autores_upscaler(sdk::UGameEngine* engine, std::string& seen) {
+    using uevr::autores::ProbeReading;
+    auto& dlss = m_autores_dlss_mode;
+    bool answered = false;
+
+    if (find_dlss_library(dlss)) {
+        if (const auto mode = dlss_get_mode(dlss, engine)) {
+            const auto info = dlss_info(dlss, *mode, engine);
+            seen = fmt::format("UDLSSLibrary: GetDLSSMode {}, GetDLSSModeInformation {}", *mode,
+                info.called ? fmt::format("supported={} optimal={:.3f}", info.supported, info.optimal) : std::string{"no answer"});
+
+            if (info.called && info.supported && std::isfinite(info.optimal) && info.optimal > 0.0f) {
+                return ProbeReading::dlss_mode;
+            }
+
+            answered = info.called;
+        } else {
+            seen = "UDLSSLibrary: GetDLSSMode no answer";
+        }
+    } else {
+        seen = dlss.incomplete ? "UDLSSLibrary lacks a function" : "no UDLSSLibrary";
+    }
+
+    const auto quality = resolve(m_autores_dlss_quality) ? read(m_autores_dlss_quality) : std::nullopt;
+    const auto enable = resolve(m_autores_dlss_enable) ? read(m_autores_dlss_enable) : std::nullopt;
+    seen += fmt::format("; r.NGX.DLSS.Enable {}, r.NGX.DLSS.Quality {}",
+        m_autores_dlss_enable.cvar == nullptr ? std::string{"not found"} : enable ? fmt::format("{}", *enable) : std::string{"?"},
+        m_autores_dlss_quality.cvar == nullptr ? std::string{"not found"} : quality ? fmt::format("{}", *quality) : std::string{"?"});
+
+    if (quality && enable) {
+        if (*enable >= 0.5f) {
+            return ProbeReading::dlss_quality;
+        }
+
+        answered = true;
+    }
+
+    // Neither plugin in the game (each looked for at least once): a plain answer.
+    if (dlss.library == nullptr && dlss.lookups > 0 && m_autores_dlss_enable.cvar == nullptr && m_autores_dlss_enable.lookups > 0) {
+        answered = true;
+    }
+
+    return answered ? ProbeReading::off : ProbeReading::no_answer;
+}
+
+// Which upscaler sets the game's input resolution, looked for the whole session (AutoResPolicy.hpp UpscalerProbe): every
+// 2 s for 2 minutes, then every 10 s. Nothing in 30 s is none for now (SP steps); DLSS found later takes over, and a
+// DLSS turned off goes back to SP. Under DLSS r.ScreenPercentage does nothing (Black Myth: Wukong, Hogwarts Legacy,
+// 2026-10-24), so SP is left out while it sets the input resolution.
 void CVarManager::probe_autores_upscaler(sdk::UGameEngine* engine) {
     using uevr::autores::Upscaler;
-
-    if (m_autores_upscaler_kind != (int)Upscaler::unknown) {
-        return;
-    }
+    using uevr::autores::UpscalerProbe;
 
     const auto now = std::chrono::steady_clock::now();
 
@@ -527,40 +630,70 @@ void CVarManager::probe_autores_upscaler(sdk::UGameEngine* engine) {
         return;
     }
 
-    m_autores_probe_next = now + std::chrono::seconds{2};
-    ++m_autores_probe_attempts;
-    auto kind = Upscaler::unknown;
+    m_autores_probe_last = now;
 
-    if (find_dlss_library(m_autores_dlss_mode)) {
-        if (const auto mode = dlss_get_mode(m_autores_dlss_mode, engine); mode && dlss_optimal(m_autores_dlss_mode, *mode, engine)) {
-            kind = Upscaler::dlss_mode;
-        }
+    if (m_autores_probe_started.time_since_epoch().count() == 0) {
+        m_autores_probe_started = now;
     }
 
-    if (kind == Upscaler::unknown && resolve(m_autores_dlss_quality) && resolve(m_autores_dlss_enable)) {
-        if (const auto enabled = read(m_autores_dlss_enable); enabled && *enabled >= 0.5f) {
-            kind = Upscaler::dlss_quality;
-        }
-    }
+    const auto seconds = (int)std::chrono::duration_cast<std::chrono::seconds>(now - m_autores_probe_started).count();
+    m_autores_probe_next = now + std::chrono::seconds{UpscalerProbe::interval_seconds(seconds)};
 
-    if (kind == Upscaler::unknown && m_autores_probe_attempts < 15) {
+    std::string seen{};
+    const auto reading = read_autores_upscaler(engine, seen);
+    const auto before = m_autores_probe.kind;
+
+    if (!m_autores_probe.update(reading)) {
         return;
     }
 
-    if (kind == Upscaler::unknown) {
-        kind = Upscaler::none;
-    }
-
+    const auto kind = m_autores_probe.kind;
     m_autores_upscaler_kind = (int)kind;
 
-    if (kind == Upscaler::none) {
-        SPDLOG_INFO("[autores] no DLSS sets the input resolution: SP steps, no upscaler steps");
-        m_autores_upscaler_unavailable = true;
+    if (kind == Upscaler::none && before == Upscaler::unknown) {
+        SPDLOG_INFO("[autores] no DLSS sets the input resolution after {} tries in {} s ({}): SP steps for now, still looking",
+            m_autores_probe.tries, seconds, seen);
+    } else if (kind == Upscaler::none) {
+        SPDLOG_INFO("[autores] DLSS is off now at +{} s ({}): upscaler steps put back, SP steps", seconds, seen);
+        m_autores_upscaler_unavailable = false; // a DLSS turned on again starts over
     } else {
-        SPDLOG_INFO("[autores] {} sets the input resolution: upscaler steps, no SP steps",
-            kind == Upscaler::dlss_mode ? "UDLSSLibrary's DLSS mode" : "r.NGX.DLSS.Quality");
-        m_autores_sp_unavailable = true;
+        SPDLOG_INFO("[autores] {} sets the input resolution, found at +{} s on try {} ({}): upscaler steps, no SP steps{}",
+            kind == Upscaler::dlss_mode ? "UDLSSLibrary's DLSS mode" : "r.NGX.DLSS.Quality", seconds, m_autores_probe.tries, seen,
+            before == Upscaler::none ? " (SP put back)" : "");
     }
+}
+
+// The other DLSS kind's next read: sooner after an off read, but not sooner than 2 s after the last one (the probe's two
+// off reads in a row must be two separate moments).
+void CVarManager::probe_autores_upscaler_soon() {
+    m_autores_probe_next = (std::min)(m_autores_probe_next, m_autores_probe_last + std::chrono::seconds{2});
+}
+
+// The game's DLSS mode back, if the mode is still ours (forgotten first: a call that throws is not tried again).
+void CVarManager::put_back_dlss_mode(sdk::UGameEngine* engine) {
+    auto& dlss = m_autores_dlss_mode;
+    const auto written = std::exchange(dlss.written, std::nullopt);
+    const auto base = std::exchange(dlss.base, std::nullopt);
+
+    if (written && base && dlss.library != nullptr) {
+        if (const auto current = dlss_get_mode(dlss, engine); current != written) {
+            SPDLOG_INFO("[autores] the DLSS mode is {} now, not ours ({}): left as it is", current ? (int)*current : -1, *written);
+        } else {
+            const auto ok = dlss_set_mode(dlss, *base, engine);
+            SPDLOG_INFO("[autores] DLSS mode put back {} -> {} (ok={})", *written, *base, ok);
+        }
+    }
+}
+
+// A DLSS mode or quality of ours put back, when DLSS no longer sets the input resolution.
+void CVarManager::restore_autores_upscalers(sdk::UGameEngine* engine) {
+    if (m_autores_dlss_quality.written) {
+        restore(m_autores_dlss_quality);
+    }
+
+    put_back_dlss_mode(engine);
+    m_autores_upscaler_applied = 0;
+    m_autores_upscaler_max_steps = -1;
 }
 
 // The UE5 DLSS plugin (Black Myth: Wukong): its input resolution follows the DLSS mode. The modes are ranked by
@@ -571,20 +704,9 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
     auto& dlss = m_autores_dlss_mode;
 
     if (steps <= 0 || m_autores_upscaler_unavailable) {
-        // Forgotten first (a call that throws is not tried again); a mode that is no longer ours stays.
-        const auto written = std::exchange(dlss.written, std::nullopt);
-        const auto base = std::exchange(dlss.base, std::nullopt);
+        // A mode that is no longer ours stays.
         m_autores_upscaler_applied = 0;
-
-        if (written && base && dlss.library != nullptr) {
-            if (const auto current = dlss_get_mode(dlss, engine); current != written) {
-                SPDLOG_INFO("[autores] the DLSS mode is {} now, not ours ({}): left as it is", current ? (int)*current : -1, *written);
-            } else {
-                const auto ok = dlss_set_mode(dlss, *base, engine);
-                SPDLOG_INFO("[autores] DLSS mode put back {} -> {} (ok={})", *written, *base, ok);
-            }
-        }
-
+        put_back_dlss_mode(engine);
         return;
     }
 
@@ -601,8 +723,9 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
 
     const auto current = dlss_get_mode(dlss, engine);
 
+    // No answer for now (a load, no world yet): tried again in a second; a step that never lands is caught by the
+    // controller's step check.
     if (!current) {
-        unavailable("GetDLSSMode has no return value");
         return;
     }
 
@@ -645,9 +768,11 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
         SPDLOG_INFO("[autores] DLSS mode {} (optimal {}); supported{}; {} lower", *current,
             base_optimal ? fmt::format("{:.2f}", *base_optimal) : "none", ranked, dlss.lower.size());
 
+        // Turned off since the probe found it: the probe makes it none after two reads, and SP takes over then.
         if (!base_optimal) {
             dlss.base.reset();
-            unavailable("the game's DLSS mode is off or has no optimal screen percentage");
+            m_autores_upscaler_applied = 0;
+            probe_autores_upscaler_soon();
             return;
         }
     }
