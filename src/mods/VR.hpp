@@ -1627,6 +1627,20 @@ private:
     // higher level), and the shipped default is (B), 60 first (design v1, 2026-11-10: (A)'s half cadence can hold a
     // session on a mixed 33-35 fps). Without the hints the runtime runs every game at (B); no GPU hint goes out at all.
     const ModToggle::Ptr m_autores_frame_bound_detect{ ModToggle::create(generate_name("AutoResFrameBoundDetect"), false, true) };
+    // How far the internal resolution goes under DLSS before the eye size moves: 0 = Performance, 1 = Ultra Performance
+    // where the game supports it (design v1 §7-57).
+    const ModInt32::Ptr m_autores_upscaler_floor{ ModInt32::create(generate_name("AutoResUpscalerFloor"), 0, true) };
+    // Once a session, where the internal resolution can go deep (DLSS, or SP under a temporal upscaler), the session
+    // started below Base and the game's GPU memory is under 70 % of the budget: the eye goes to Base and the internal
+    // resolution to its floor (about the same cost). The VRAM guard takes it back for the session.
+    const ModToggle::Ptr m_autores_output_anchor{ ModToggle::create(generate_name("AutoResOutputAnchor"), false, true) };
+    // Takes the internal resolution one step back up after 60 s without IMPAIRED and the game's GPU under 70 % busy (the
+    // runtime's NORMAL comes only when a whole eye size fits); undone when IMPAIRED follows within 30 s.
+    const ModToggle::Ptr m_autores_internal_recover{ ModToggle::create(generate_name("AutoResInternalRecover"), false, true) };
+    // For measurements (-1 = off): hold the eye at this level (0 Min .. 4 Max) and/or the internal resolution at the
+    // game's own (0), its floor (1) or Ultra Performance (2); nothing else moves.
+    const ModInt32::Ptr m_autores_test_level{ ModInt32::create(generate_name("AutoResTestLevel"), -1, true) };
+    const ModInt32::Ptr m_autores_test_internal{ ModInt32::create(generate_name("AutoResTestInternal"), -1, true) };
     // End the OpenXR session once the game has destroyed its window and stopped presenting (Framework::end_vr_session_if_game_exited).
     const ModToggle::Ptr m_end_session_on_game_exit{ ModToggle::create(generate_name("EndSessionOnGameExit"), true, true) };
     const ModToggle::Ptr m_ktjl_openxr_factory_repair{ ModToggle::create(generate_name("KTJLOpenXRFactoryRepair"), false, true) };
@@ -2005,6 +2019,11 @@ public:
             *m_autores_toggle_seconds,
             *m_autores_toggle_delay_seconds,
             *m_autores_frame_bound_detect,
+            *m_autores_upscaler_floor,
+            *m_autores_output_anchor,
+            *m_autores_internal_recover,
+            *m_autores_test_level,
+            *m_autores_test_internal,
             *m_end_session_on_game_exit,
             *m_ktjl_openxr_factory_repair,
             *m_decoupled_pitch,

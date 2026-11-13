@@ -108,8 +108,8 @@ bool write(AutoResCVar& c, float value) {
 
 // Puts the game's own value back at the priority ours took; the next move reads the base again. Forgotten first, so a
 // Set that throws is not tried again every second. A value that is no longer ours was set by the game or the player
-// since, and stays.
-void restore(AutoResCVar& c) {
+// since, and stays, unless ours_anyway: a call of ours changed it (SetDLSSMode sets r.ScreenPercentage).
+void restore(AutoResCVar& c, bool ours_anyway = false) {
     const auto written = std::exchange(c.written, std::nullopt);
     const auto base = std::exchange(c.base, std::nullopt);
     const auto priority = std::exchange(c.priority, 0u);
@@ -118,14 +118,26 @@ void restore(AutoResCVar& c) {
         return;
     }
 
-    if (const auto current = read(c); current && std::abs(*current - *written) > 0.01f) {
+    if (const auto current = read(c); current && std::abs(*current - *written) > 0.01f && !ours_anyway) {
         SPDLOG_INFO("[autores] {} is {} now, not ours ({}): left as it is", utility::narrow(c.name), *current, *written);
         return;
     }
 
+    // From the priority ours took, up as far as it takes: a call of ours may have set the value at a higher one since
+    // (SetDLSSMode writes r.ScreenPercentage itself, and a write of ours that found the value already there recorded the
+    // lowest priority), and a Set below it is ignored.
     const auto text = text_of(c, *base);
-    c.cvar->Set(text.c_str(), priority);
-    const auto now = read(c);
+    std::optional<float> now{};
+
+    for (auto p = priority != 0 ? priority : set_by_lowest; p <= set_by_console; p += set_by_step) {
+        c.cvar->Set(text.c_str(), p);
+        now = read(c);
+
+        if (now && std::abs(*now - *base) < 0.01f) {
+            break;
+        }
+    }
+
     SPDLOG_INFO("[autores] {} put back {} -> {}", utility::narrow(c.name), *written, now ? std::to_string(*now) : "?");
 }
 
@@ -185,8 +197,9 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
     }
 
     const auto kind_now = m_autores_upscaler_kind.load();
+    const auto floor_now = m_autores_upscaler_floor.load();
     const auto changed = sp_target != m_autores_sp_processed || upscaler_target != m_autores_upscaler_processed ||
-        kind_now != m_autores_kind_processed;
+        kind_now != m_autores_kind_processed || floor_now != m_autores_floor_processed;
     // Moved away from the game's values, or asked to: checked once a second, which also retries a cvar that isn't there
     // yet until it is found or given up on.
     const auto active = sp_target < 100 || upscaler_target > 0 || m_autores_sp.written.has_value() ||
@@ -200,6 +213,7 @@ void CVarManager::process_autores(sdk::UGameEngine* engine) {
     m_autores_sp_processed = sp_target;
     m_autores_upscaler_processed = upscaler_target;
     m_autores_kind_processed = kind_now;
+    m_autores_floor_processed = floor_now;
 
     try {
         process_autores_sp();
@@ -352,12 +366,15 @@ void CVarManager::process_autores_dlss_quality() {
         return;
     }
 
-    m_autores_upscaler_max_steps = (std::max)(0, (int)std::lround(*quality.base) + 2);
-    const auto value = (std::max)(-2.0f, std::round(*quality.base) - (float)steps);
-    const auto applied = (int)std::lround(*quality.base - value);
+    const auto floor = (float)uevr::autores::dlss_quality_floor((uevr::autores::UpscalerFloor)m_autores_upscaler_floor.load());
+    m_autores_upscaler_max_steps = (std::max)(0, (int)std::lround(std::round(*quality.base) - floor));
+    const auto value = (std::max)(floor, std::round(*quality.base) - (float)steps);
+    const auto applied = (std::max)(0, (int)std::lround(*quality.base - value));
 
+    // The game's own quality is at the floor already (or below it): nothing to step, nothing of ours to keep.
     if (applied == 0) {
-        unavailable("the game already runs DLSS Ultra Performance");
+        restore(quality);
+        m_autores_upscaler_applied = 0;
         return;
     }
 
@@ -639,15 +656,36 @@ void CVarManager::probe_autores_upscaler(sdk::UGameEngine* engine) {
     const auto seconds = (int)std::chrono::duration_cast<std::chrono::seconds>(now - m_autores_probe_started).count();
     m_autores_probe_next = now + std::chrono::seconds{UpscalerProbe::interval_seconds(seconds)};
 
+    check_autores_temporal_upscale();
+
     std::string seen{};
     const auto reading = read_autores_upscaler(engine, seen);
     const auto before = m_autores_probe.kind;
+    const auto changed = m_autores_probe.update(reading);
 
-    if (!m_autores_probe.update(reading)) {
+    if (m_autores_probe.tries >= uevr::autores::UpscalerProbe::PROVISIONAL_TRIES && !m_autores_dynamic_resolution_logged) {
+        m_autores_dynamic_resolution_logged = true;
+        log_autores_dynamic_resolution();
+    }
+
+    if (!changed) {
         return;
     }
 
     const auto kind = m_autores_probe.kind;
+
+    // How many steps lie above the floor, known before the first step (VR_AutoResOutputAnchor and the step order need it).
+    if (kind == Upscaler::dlss_mode) {
+        if (const auto mode = dlss_get_mode(m_autores_dlss_mode, engine); mode && !m_autores_dlss_mode.written) {
+            rank_autores_dlss_modes(engine, *mode);
+        }
+    } else if (kind == Upscaler::dlss_quality) {
+        if (const auto base = read(m_autores_dlss_quality)) {
+            const auto floor = uevr::autores::dlss_quality_floor((uevr::autores::UpscalerFloor)m_autores_upscaler_floor.load());
+            m_autores_upscaler_max_steps = (std::max)(0, (int)std::lround(*base) - floor);
+        }
+    }
+
     m_autores_upscaler_kind = (int)kind;
 
     if (kind == Upscaler::none && before == Upscaler::unknown) {
@@ -669,22 +707,6 @@ void CVarManager::probe_autores_upscaler_soon() {
     m_autores_probe_next = (std::min)(m_autores_probe_next, m_autores_probe_last + std::chrono::seconds{2});
 }
 
-// The game's DLSS mode back, if the mode is still ours (forgotten first: a call that throws is not tried again).
-void CVarManager::put_back_dlss_mode(sdk::UGameEngine* engine) {
-    auto& dlss = m_autores_dlss_mode;
-    const auto written = std::exchange(dlss.written, std::nullopt);
-    const auto base = std::exchange(dlss.base, std::nullopt);
-
-    if (written && base && dlss.library != nullptr) {
-        if (const auto current = dlss_get_mode(dlss, engine); current != written) {
-            SPDLOG_INFO("[autores] the DLSS mode is {} now, not ours ({}): left as it is", current ? (int)*current : -1, *written);
-        } else {
-            const auto ok = dlss_set_mode(dlss, *base, engine);
-            SPDLOG_INFO("[autores] DLSS mode put back {} -> {} (ok={})", *written, *base, ok);
-        }
-    }
-}
-
 // A DLSS mode or quality of ours put back, when DLSS no longer sets the input resolution.
 void CVarManager::restore_autores_upscalers(sdk::UGameEngine* engine) {
     if (m_autores_dlss_quality.written) {
@@ -694,6 +716,130 @@ void CVarManager::restore_autores_upscalers(sdk::UGameEngine* engine) {
     put_back_dlss_mode(engine);
     m_autores_upscaler_applied = 0;
     m_autores_upscaler_max_steps = -1;
+}
+
+// The game's DLSS mode and r.ScreenPercentage back, forgotten first (a call that throws is not tried again); a mode
+// that is no longer ours stays. SetDLSSMode sets r.ScreenPercentage to the mode's optimal one (putting TEKKEN 8 Demo
+// and E33 back to mode 4 left them at 66.7 %, the games had run 58 %, 2026-11-13), so after the mode the game's
+// percentage goes back too.
+void CVarManager::put_back_dlss_mode(sdk::UGameEngine* engine) {
+    auto& dlss = m_autores_dlss_mode;
+    const auto written = std::exchange(dlss.written, std::nullopt);
+    const auto base = std::exchange(dlss.base, std::nullopt);
+    bool mode_back = false;
+
+    if (written && base && dlss.library != nullptr) {
+        if (const auto current = dlss_get_mode(dlss, engine); current != written) {
+            SPDLOG_INFO("[autores] the DLSS mode is {} now, not ours ({}): left as it is", current ? (int)*current : -1, *written);
+        } else {
+            mode_back = dlss_set_mode(dlss, *base, engine);
+            SPDLOG_INFO("[autores] DLSS mode put back {} -> {} (ok={})", *written, *base, mode_back);
+        }
+    }
+
+    restore(m_autores_dlss_sp, mode_back);
+}
+
+// The game's DLSS mode and the supported modes that render fewer pixels than it, down to the floor
+// (AutoResPolicy.hpp dlss_modes_below). False when the game's mode has no optimal percentage (DLSS off).
+bool CVarManager::rank_autores_dlss_modes(sdk::UGameEngine* engine, uint8_t current) {
+    auto& dlss = m_autores_dlss_mode;
+    const auto floor = (uevr::autores::UpscalerFloor)m_autores_upscaler_floor.load();
+    std::string ranked{};
+    std::vector<std::pair<float, uint8_t>> by_pixels{};
+
+    for (const auto mode : dlss_supported(dlss, engine)) {
+        if (const auto optimal = dlss_optimal(dlss, mode, engine)) {
+            by_pixels.emplace_back(*optimal, mode);
+            ranked += fmt::format(" {}:{:.0f}%", mode, *optimal * (*optimal <= 1.0f ? 100.0f : 1.0f));
+        }
+    }
+
+    const auto base_optimal = dlss_optimal(dlss, current, engine);
+    dlss.base = current;
+    dlss.ranked_floor = (int)floor;
+
+    // The UE5 plugin renders DLSS's input at r.ScreenPercentage; the mode picks its preset (TEKKEN 8 Demo and E33 ran
+    // mode 4, Quality, at the game's 58 %, and a mode alone moved nothing, 2026-11-13). The steps go below what the
+    // input is now, each setting a mode and its optimal percentage together, as the plugin asks of games.
+    // An SP step of ours still in place (DLSS found after the SP steps began) is not the game's input: its base is.
+    const auto sp_ours = m_autores_sp.written && m_autores_sp.base;
+    const auto game_sp = sp_ours ? m_autores_sp.base : resolve(m_autores_dlss_sp) ? refresh_base(m_autores_dlss_sp) : std::nullopt;
+    const auto input = sp_ours ? m_autores_sp.base
+        : m_autores_dlss_sp.base && *m_autores_dlss_sp.base > 0.0f ? m_autores_dlss_sp.base
+        : base_optimal ? std::optional{*base_optimal <= 1.0f ? *base_optimal * 100.0f : *base_optimal} : std::nullopt;
+    dlss.lower = input ? uevr::autores::dlss_modes_below(by_pixels, *input, floor) : std::vector<uint8_t>{};
+    dlss.lower_percent.clear();
+
+    for (const auto mode : dlss.lower) {
+        for (const auto& [optimal, m] : by_pixels) {
+            if (m == mode) {
+                dlss.lower_percent.push_back(optimal <= 1.0f ? optimal * 100.0f : optimal);
+                break;
+            }
+        }
+    }
+
+    m_autores_upscaler_max_steps = (int)dlss.lower.size();
+
+    std::string lower{};
+
+    for (size_t i = 0; i < dlss.lower.size(); ++i) {
+        lower += fmt::format(" {} ({:.1f} %)", dlss.lower[i], dlss.lower_percent[i]);
+    }
+
+    SPDLOG_INFO("[autores] DLSS mode {} (optimal {}), input r.ScreenPercentage {}; supported{}; down to the floor ({}):{}",
+        current, base_optimal ? fmt::format("{:.2f}", *base_optimal) : "none",
+        game_sp ? fmt::format("{}", *game_sp) : std::string{"-"}, ranked,
+        floor == uevr::autores::UpscalerFloor::ultra_performance ? "Ultra Performance" : "Performance",
+        lower.empty() ? std::string{" none"} : lower);
+
+    if (!base_optimal) {
+        dlss.base.reset();
+    }
+
+    return base_optimal.has_value();
+}
+
+// SP's floor: without a temporal upscaler the engine stretches the smaller image, so two steps (85 / 70 %); with one
+// (UE5 r.AntiAliasingMethod 4, TSR; 2, TAA, with r.TemporalAA.Upsampling; UE4 r.TemporalAA.Upsampling), four (to 50 %).
+void CVarManager::check_autores_temporal_upscale() {
+    const auto method = resolve(m_autores_aa_method) ? read(m_autores_aa_method) : std::nullopt;
+    const auto upsampling = resolve(m_autores_taa_upsampling) ? read(m_autores_taa_upsampling) : std::nullopt;
+    int temporal = -1;
+
+    if (method) {
+        temporal = std::lround(*method) == 4 || (std::lround(*method) == 2 && upsampling && *upsampling >= 0.5f) ? 1 : 0;
+    } else if (upsampling && m_autores_aa_method.lookups >= 2) {
+        temporal = *upsampling >= 0.5f ? 1 : 0;
+    } else if (m_autores_aa_method.lookups >= 2 && m_autores_taa_upsampling.lookups >= 2) {
+        temporal = 0;
+    }
+
+    if (temporal < 0 || temporal == m_autores_temporal_seen) {
+        return;
+    }
+
+    m_autores_temporal_seen = temporal;
+    m_autores_sp_max_steps = temporal == 1 ? uevr::autores::SP_STEPS_TEMPORAL : uevr::autores::SP_STEPS;
+    SPDLOG_INFO("[autores] {} (r.AntiAliasingMethod {}, r.TemporalAA.Upsampling {}): SP steps down to {} %",
+        temporal == 1 ? "temporal upscaling" : "no temporal upscaling",
+        method ? fmt::format("{}", *method) : std::string{"-"}, upsampling ? fmt::format("{}", *upsampling) : std::string{"-"},
+        uevr::autores::SP_PERCENT[temporal == 1 ? uevr::autores::SP_STEPS_TEMPORAL : uevr::autores::SP_STEPS]);
+}
+
+// Read only (design v1 §7-57, a later option): the engine's own dynamic resolution and the screen percentages.
+void CVarManager::log_autores_dynamic_resolution() {
+    std::string text{};
+
+    for (const auto name : {L"r.DynamicRes.OperationMode", L"r.DynamicRes.MinScreenPercentage", L"r.DynamicRes.MaxScreenPercentage",
+             L"r.DynamicRes.FrameTimeBudget", L"r.ScreenPercentage", L"r.SecondaryScreenPercentage.GameViewport"}) {
+        AutoResCVar c{name};
+        const auto value = resolve(c) ? read(c) : std::nullopt;
+        text += fmt::format(" {}={}", utility::narrow(name), c.cvar == nullptr ? std::string{"none"} : value ? fmt::format("{}", *value) : std::string{"?"});
+    }
+
+    SPDLOG_INFO("[autores] engine resolution cvars:{}", text);
 }
 
 // The UE5 DLSS plugin (Black Myth: Wukong): its input resolution follows the DLSS mode. The modes are ranked by
@@ -713,7 +859,7 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
     const auto unavailable = [&](const char* why) {
         SPDLOG_WARN("[autores] no upscaler steps: {}", why);
         m_autores_upscaler_unavailable = true;
-        process_autores_dlss_mode(engine); // puts the game's mode back
+        process_autores_dlss_mode(engine); // puts the game's mode and r.ScreenPercentage back
     };
 
     if (dlss.library == nullptr) {
@@ -734,56 +880,41 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
         dlss.written.reset();
     }
 
-    // The game's mode, and the supported modes that render fewer pixels than it.
-    if (!dlss.written && dlss.base != current) {
-        dlss.base = *current;
-        dlss.lower.clear();
+    // The game's mode, and the supported modes below it down to the floor; ranked again when the game's mode or the floor
+    // changed.
+    const auto floor = m_autores_upscaler_floor.load();
 
-        std::string ranked{};
-        std::vector<std::pair<float, uint8_t>> by_pixels{};
-
-        for (const auto mode : dlss_supported(dlss, engine)) {
-            if (const auto optimal = dlss_optimal(dlss, mode, engine)) {
-                by_pixels.emplace_back(*optimal, mode);
-                ranked += fmt::format(" {}:{:.0f}%", mode, *optimal * (*optimal <= 1.0f ? 100.0f : 1.0f));
-            }
-        }
-
-        const auto base_optimal = dlss_optimal(dlss, *current, engine);
-        // Fewer pixels first; Auto reports one of the fixed modes' percentages, so a tie keeps one mode, the higher
-        // value (Auto is 1, below the fixed modes, in every plugin version).
-        std::sort(by_pixels.begin(), by_pixels.end(),
-            [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second > b.second; });
-        float last_optimal = -1.0f;
-
-        for (const auto& [optimal, mode] : by_pixels) {
-            if (base_optimal && optimal < *base_optimal * 0.99f && std::abs(optimal - last_optimal) > 0.01f * optimal) {
-                dlss.lower.push_back(mode);
-                last_optimal = optimal;
-            }
-        }
-
-        m_autores_upscaler_max_steps = (int)dlss.lower.size();
-
-        SPDLOG_INFO("[autores] DLSS mode {} (optimal {}); supported{}; {} lower", *current,
-            base_optimal ? fmt::format("{:.2f}", *base_optimal) : "none", ranked, dlss.lower.size());
-
+    if ((!dlss.written && dlss.base != current) || dlss.ranked_floor != floor) {
         // Turned off since the probe found it: the probe makes it none after two reads, and SP takes over then.
-        if (!base_optimal) {
-            dlss.base.reset();
+        if (!rank_autores_dlss_modes(engine, dlss.written && dlss.base ? *dlss.base : *current)) {
             m_autores_upscaler_applied = 0;
             probe_autores_upscaler_soon();
             return;
         }
     }
 
+    // The game's own mode is at the floor already: nothing to step.
     if (dlss.lower.empty()) {
-        unavailable("no supported DLSS mode renders fewer pixels than the game's");
+        m_autores_upscaler_applied = 0;
+
+        if (dlss.written) {
+            put_back_dlss_mode(engine);
+        }
+
         return;
     }
 
     const auto applied = (std::min)(steps, (int)dlss.lower.size());
     const auto target = dlss.lower[applied - 1];
+    const auto target_sp = std::round(dlss.lower_percent[applied - 1] * 10.0f) / 10.0f;
+    auto& sp = m_autores_dlss_sp;
+
+    if (sp.taken_back >= 3) {
+        unavailable("the game keeps putting its own r.ScreenPercentage back under DLSS");
+        return;
+    }
+
+    const auto sp_before = resolve(sp) ? refresh_base(sp) : std::nullopt;
 
     if (*current != target) {
         if (!dlss_set_mode(dlss, target, engine)) {
@@ -792,7 +923,23 @@ void CVarManager::process_autores_dlss_mode(sdk::UGameEngine* engine) {
         }
 
         dlss.written = target;
-        SPDLOG_INFO("[autores] DLSS mode {} -> {} ({} below the game's {})", *current, target, applied, *dlss.base);
+    }
+
+    // The input follows r.ScreenPercentage: the mode's optimal percentage with it. A game that keeps its own value
+    // leaves the step without effect, which the controller's step check finds. Never above the game's own value: a
+    // player who lowered it while a step was held keeps theirs (the mode alone then moves nothing, and the check sees it).
+    if (sp_before && sp.base && !sp.written && target_sp > *sp.base + 0.05f) {
+        SPDLOG_INFO_EVERY_N_SEC(60, "[autores] r.ScreenPercentage {} is below DLSS mode {}'s {}: left as it is", *sp.base,
+            target, target_sp);
+    } else if (sp_before && std::abs(*sp_before - target_sp) >= 0.05f) {
+        if (!write(sp, target_sp)) {
+            SPDLOG_INFO("[autores] r.ScreenPercentage stays {} under DLSS mode {}", *sp_before, target);
+        }
+
+        const auto sp_after = read(sp);
+        SPDLOG_INFO("[autores] DLSS mode {} -> {} ({} below the input), r.ScreenPercentage {} -> {} (game {})", *current, target,
+            applied, *sp_before, sp_after ? fmt::format("{}", *sp_after) : std::string{"?"},
+            sp.base ? fmt::format("{}", *sp.base) : std::string{"-"});
     }
 
     m_autores_upscaler_applied = applied;

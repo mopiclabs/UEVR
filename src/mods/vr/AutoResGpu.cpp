@@ -198,6 +198,21 @@ void GpuBusySampler::run(std::stop_token stop) {
     pdh.close_query(query);
 }
 
+std::optional<float> GpuBusySampler::busy_percent(clock::time_point from, clock::time_point to) const {
+    std::scoped_lock _{m_mutex};
+    double sum = 0.0;
+    int used = 0;
+
+    for (const auto& sample : m_samples) {
+        if (sample.at > from && sample.at <= to) {
+            sum += sample.busy_pct;
+            ++used;
+        }
+    }
+
+    return used > 0 ? std::optional{(float)(sum / used)} : std::nullopt;
+}
+
 std::optional<float> GpuBusySampler::gpu_ms_per_frame(clock::time_point from, clock::time_point to) const {
     std::scoped_lock _{m_mutex};
     double busy_seconds = 0.0;

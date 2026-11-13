@@ -7,9 +7,13 @@
 // and Appendix B). This header is the decision part without UE or OpenXR, so tests/AutoResPolicyTests.cpp can drive
 // it; VR and CVarManager carry the steps out.
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace uevr::autores {
 // The eye size ladder. On Mopic's 3D display it is design v1's table of sizes, whatever the runtime recommends: Min
@@ -104,19 +108,59 @@ enum class Domain : uint32_t { cpu = 1, gpu = 2 };
 enum class SubDomain : uint32_t { compositing = 1, rendering = 2, thermal = 3 };
 enum class Notification : uint32_t { normal = 0, warning = 25, impaired = 75 };
 
-// The actuators, in the order a GPU IMPAIRED edge uses them (design v1, Appendix B): the game's screen percentage,
-// its upscaler's quality mode, then the eye size.
+// The actuators. A GPU IMPAIRED edge takes the game's internal resolution down first (its DLSS mode or quality where a
+// DLSS plugin sets the input resolution, else its screen percentage), to the floor, and only then the eye size (design
+// v1 §7-57, 2026-11-12: a lower DLSS mode looks better than a smaller output, the more so as DLSS gets better).
 enum class Actuator : uint8_t { sp, upscaler, level };
 
 // The upscaler that sets the game's input resolution, as CVarManager finds it: the UE5 DLSS plugin's
 // UDLSSLibrary::SetDLSSMode, or the UE4 plugin's r.NGX.DLSS.Quality.
 enum class Upscaler : int8_t { unknown = -1, none = 0, dlss_mode = 1, dlss_quality = 2 };
 
-// SP steps, in percent of the game's own value.
-inline constexpr std::array<int, 3> SP_PERCENT{100, 85, 70};
+// SP steps, in percent of the game's own value. Without a temporal upscaler (TSR, or TAA with upsampling) the engine
+// stretches the smaller image, so only the first two; with one, down to 50 %.
+inline constexpr std::array<int, 5> SP_PERCENT{100, 85, 70, 58, 50};
 inline constexpr int SP_STEPS = 2;
-// One, then two quality modes below the game's own.
+inline constexpr int SP_STEPS_TEMPORAL = 4;
+// Upscaler steps before the game's modes are ranked (CVarManager reports how many lie above the floor).
 inline constexpr int UPSCALER_STEPS = 2;
+
+// The internal resolution's floor under DLSS (VR_AutoResUpscalerFloor): Performance, or one more to Ultra Performance
+// where the game supports it. UE5's modes are ranked by GetDLSSModeInformation's optimal screen percentage (Performance
+// 50 %, Ultra Performance 33 %), so the floor is a percentage; UE4's r.NGX.DLSS.Quality is -1 / -2.
+enum class UpscalerFloor : int { performance = 0, ultra_performance = 1 };
+inline constexpr float DLSS_PERFORMANCE_FLOOR_PERCENT = 45.0f;
+
+inline constexpr int dlss_quality_floor(UpscalerFloor floor) {
+    return floor == UpscalerFloor::ultra_performance ? -2 : -1;
+}
+
+// The modes below the game's, highest first, down to the floor; one per distinct optimal percentage. by_pixels: the
+// supported modes as (optimal screen percentage, mode); base_percent: the game's mode's. A percentage of 1 or less is
+// a fraction.
+inline std::vector<uint8_t> dlss_modes_below(std::vector<std::pair<float, uint8_t>> by_pixels, float base_percent,
+    UpscalerFloor floor) {
+    const auto percent = [](float value) { return value <= 1.0f ? value * 100.0f : value; };
+    // Fewer pixels last; Auto reports one of the fixed modes' percentages, so a tie keeps one mode, the higher value
+    // (Auto is 1, below the fixed modes, in every plugin version).
+    std::sort(by_pixels.begin(), by_pixels.end(),
+        [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second > b.second; });
+    std::vector<uint8_t> lower{};
+    float last = -1.0f;
+    const auto base = percent(base_percent);
+
+    for (const auto& [optimal, mode] : by_pixels) {
+        const auto p = percent(optimal);
+
+        if (p < base * 0.99f && std::abs(p - last) > 0.01f * p &&
+            (floor == UpscalerFloor::ultra_performance || p >= DLSS_PERFORMANCE_FLOOR_PERCENT)) {
+            lower.push_back(mode);
+            last = p;
+        }
+    }
+
+    return lower;
+}
 
 // Where the actuators stand. sp and upscaler count steps below the game's own value; level is a LEVELS index.
 struct State {
@@ -179,19 +223,15 @@ inline bool still_wanted(const State& state, Request request) {
     }
 }
 
-// One step down. Pixels added above the start level go first, then SP, then the upscaler, then the level below the
-// start, so the steps up retrace them in reverse.
+// One step down: the internal resolution to its floor first (the DLSS mode where DLSS sets the input resolution, else
+// SP; one of them at a time), then the eye size, from whatever level it is at.
 inline std::optional<Step> next_down(const State& state, const Available& available) {
-    if (available.level && state.level > state.start_level) {
-        return Step{Actuator::level, state.level, state.level - 1};
-    }
-
-    if (available.sp && state.sp < available.sp_steps) {
-        return Step{Actuator::sp, state.sp, state.sp + 1};
-    }
-
     if (available.upscaler && state.upscaler < available.upscaler_steps) {
         return Step{Actuator::upscaler, state.upscaler, state.upscaler + 1};
+    }
+
+    if (!available.upscaler && available.sp && state.sp < available.sp_steps) {
+        return Step{Actuator::sp, state.sp, state.sp + 1};
     }
 
     if (available.level && state.level > MIN_LEVEL) {
@@ -201,8 +241,9 @@ inline std::optional<Step> next_down(const State& state, const Available& availa
     return std::nullopt;
 }
 
-// One step up: back to the start level, the upscaler and SP restored, then pixels above the start up to the cap.
-// SP and the upscaler are restored even when they are no longer available.
+// One step up: the eye size back to the anchor (start_level: where the session started, or Base after
+// VR_AutoResOutputAnchor), then the internal resolution back to the game's own, then pixels above the anchor up to the
+// cap. SP and the upscaler are restored even when they are no longer available.
 inline std::optional<Step> next_up(const State& state, const Available& available) {
     if (available.level && state.level < state.start_level && state.level < state.level_cap) {
         return Step{Actuator::level, state.level, state.level + 1};
@@ -347,6 +388,101 @@ inline StepEffect judge_step(float gpu_ms_before, float gpu_ms_after) {
     const auto drop = 1.0f - gpu_ms_after / gpu_ms_before;
     return drop >= STEP_WORKS_DROP ? StepEffect::works : drop < STEP_NOTHING_DROP ? StepEffect::nothing : StepEffect::unclear;
 }
+
+// VR_AutoResInternalRecover: the runtime's GPU NORMAL edge comes only when the next eye size fits, so on a device where
+// a level costs much (8 GB laptops) the internal resolution could stay at its floor with GPU room left. Once a second:
+// 60 s in a row not IMPAIRED with the game's GPU busy under 70 % takes the internal resolution one step up; an IMPAIRED
+// within 30 s of that puts it back and blocks the next one for 5 minutes, twice as long each time (up to an hour).
+struct InternalRecovery {
+    static constexpr int CALM_SECONDS = 60;
+    static constexpr float BUSY_LIMIT_PERCENT = 70.0f;
+    static constexpr int WATCH_SECONDS = 30;
+    static constexpr int FIRST_BLOCK_SECONDS = 300;
+    static constexpr int LONGEST_BLOCK_SECONDS = 3600;
+
+    enum class Act : uint8_t { none, step_up, undo };
+
+    int calm{0};
+    int watch{0};   // seconds left to watch a step up of ours
+    int blocked{0}; // seconds left before the next one
+    int block{FIRST_BLOCK_SECONDS};
+    int ups{0};
+    int undos{0};
+
+    Act tick(bool impaired, bool loading, std::optional<float> busy_percent, bool can_step_up) {
+        if (watch > 0) {
+            if (impaired) {
+                watch = 0;
+                calm = 0;
+                blocked = block;
+                block = (std::min)(block * 2, LONGEST_BLOCK_SECONDS);
+                ++undos;
+                return Act::undo;
+            }
+
+            --watch;
+        }
+
+        if (blocked > 0) {
+            --blocked;
+        }
+
+        if (impaired || loading || !busy_percent || *busy_percent >= BUSY_LIMIT_PERCENT) {
+            calm = 0;
+            return Act::none;
+        }
+
+        if (++calm >= CALM_SECONDS && blocked == 0 && watch == 0 && can_step_up) {
+            calm = 0;
+            watch = WATCH_SECONDS;
+            ++ups;
+            return Act::step_up;
+        }
+
+        return Act::none;
+    }
+};
+
+// VR_AutoResOutputAnchor decides after the loading (design v1 §7-57), not in the menus the session starts in: a menu's
+// GPU memory says nothing about the level's (Hogwarts and Wukong on 8 GB are 103-110 % in game). Once a second: a load
+// (an engine stall) seen after the first 15 s, then 30 s without one; GPU memory is the most it reached in those 30 s.
+// A session with no load by 3 minutes decides then, on the most since its last load.
+struct AnchorGate {
+    static constexpr int IGNORE_LOADS_SECONDS = 15; // the session's own start-up stalls
+    static constexpr int MIN_SECONDS = 40;
+    static constexpr int CALM_SECONDS = 30;
+    static constexpr int NO_LOAD_SECONDS = 180;
+
+    int seconds{0};
+    bool load_seen{false};
+    int calm{0};
+    std::optional<float> vram_max{};
+
+    // True when the decision is due (and stays true until the caller decides).
+    bool tick(bool loading, std::optional<float> vram_percent) {
+        ++seconds;
+
+        if (loading) {
+            load_seen = load_seen || seconds > IGNORE_LOADS_SECONDS;
+            calm = 0;
+            vram_max.reset();
+            return false;
+        }
+
+        ++calm;
+
+        if (vram_percent) {
+            vram_max = vram_max ? (std::max)(*vram_max, *vram_percent) : *vram_percent;
+        }
+
+        if (seconds < MIN_SECONDS || !vram_max) {
+            return false;
+        }
+
+        // 3 minutes only when no load came at all: a load near then still gets its 30 s.
+        return load_seen ? calm >= CALM_SECONDS : seconds >= NO_LOAD_SECONDS;
+    }
+};
 
 // One actuator's verdicts in a row. A verdict against a step can be the scene's and not the step's: Wukong's DLSS step
 // 0.7 s into play compared the scene before the play with the play and read +3 % GPU and 17 % fewer fps, while the same

@@ -134,32 +134,54 @@ static void test_edges() {
 }
 
 static void test_order() {
-    const ar::Available available{};
+    // A DLSS game (SP is out under DLSS): the internal resolution to its floor first, then the eye size.
+    const ar::Available dlss{.sp = false, .upscaler_steps = 3};
     ar::State state{};
     std::vector<ar::Actuator> downs;
 
-    while (const auto picked = ar::next_down(state, available)) {
+    while (const auto picked = ar::next_down(state, dlss)) {
         downs.push_back(picked->actuator);
         ar::apply(state, *picked);
     }
 
-    expect((downs == std::vector{ar::Actuator::sp, ar::Actuator::sp, ar::Actuator::upscaler, ar::Actuator::upscaler,
-        ar::Actuator::level, ar::Actuator::level}), "down: SP, the upscaler, then the level");
-    expect(state.sp == 2 && state.upscaler == 2 && state.level == ar::MIN_LEVEL, "the bottom is SP 70 %, two modes, Min");
+    expect((downs == std::vector{ar::Actuator::upscaler, ar::Actuator::upscaler, ar::Actuator::upscaler, ar::Actuator::level,
+        ar::Actuator::level}), "down: DLSS to its floor, then the level");
+    expect(state.upscaler == 3 && state.level == ar::MIN_LEVEL, "the bottom is the floor at Min");
 
     std::vector<ar::Actuator> ups;
-    while (const auto picked = ar::next_up(state, available)) {
+    while (const auto picked = ar::next_up(state, dlss)) {
         ups.push_back(picked->actuator);
         ar::apply(state, *picked);
     }
 
     expect((ups == std::vector{ar::Actuator::level, ar::Actuator::level, ar::Actuator::upscaler, ar::Actuator::upscaler,
-        ar::Actuator::sp, ar::Actuator::sp, ar::Actuator::level, ar::Actuator::level}),
-        "up: the same steps in reverse, then pixels above the start");
-    expect(state.level == ar::MAX_LEVEL && state.sp == 0 && state.upscaler == 0, "the top is Max with everything restored");
+        ar::Actuator::upscaler, ar::Actuator::level, ar::Actuator::level}),
+        "up: the level back to the anchor, the game's DLSS mode, then pixels above the anchor");
+    expect(state.level == ar::MAX_LEVEL && state.upscaler == 0, "the top is Max with the game's mode");
 
-    // From above the start, the extra pixels go first.
-    expect(step(state, available, ar::Request::down) && state.level == 3 && state.sp == 0, "down from Max drops a level first");
+    // From above the anchor the internal resolution still goes first.
+    expect(step(state, dlss, ar::Request::down) && state.level == ar::MAX_LEVEL && state.upscaler == 1,
+        "down from Max takes DLSS down first");
+
+    // No DLSS: SP, to 50 % under a temporal upscaler, else 70 %.
+    const ar::Available temporal{.sp_steps = ar::SP_STEPS_TEMPORAL, .upscaler = false};
+    state = ar::State{};
+    int sp_steps = 0;
+    while (step(state, temporal, ar::Request::down) && state.level == ar::BASE_LEVEL) {
+        ++sp_steps;
+    }
+    expect(sp_steps == 4 && ar::SP_PERCENT[state.sp] == 50 && state.level == 1, "SP to 50 %, then the level");
+
+    const ar::Available plain{.upscaler = false};
+    state = ar::State{};
+    step(state, plain, ar::Request::down);
+    step(state, plain, ar::Request::down);
+    expect(ar::SP_PERCENT[state.sp] == 70 && step(state, plain, ar::Request::down) && state.level == 1,
+        "without a temporal upscaler SP stops at 70 %");
+
+    // DLSS found: SP is not used even when it would still be available.
+    expect(ar::next_down(ar::State{.upscaler = 2}, ar::Available{.upscaler_steps = 2})->actuator == ar::Actuator::level,
+        "at the DLSS floor the level moves, not SP");
 }
 
 static void test_limits() {
@@ -184,12 +206,145 @@ static void test_limits() {
     state = ar::State{.level = ar::MIN_LEVEL, .start_level = ar::MIN_LEVEL};
     expect(!step(state, level_only, ar::Request::down), "not below Min");
 
-    // A game already one mode above the lowest: one upscaler step, then the level.
-    ar::Available one_mode{};
+    // A game already one mode above the floor: one upscaler step, then the level.
+    ar::Available one_mode{.sp = false};
     one_mode.upscaler_steps = 1;
-    state = ar::State{.sp = 2};
+    state = ar::State{};
     expect(step(state, one_mode, ar::Request::down) && state.upscaler == 1, "the reachable upscaler step");
     expect(step(state, one_mode, ar::Request::down) && state.upscaler == 1 && state.level == 1, "then the level, no empty step");
+
+    // At the floor already (the game runs DLSS Performance): straight to the level.
+    state = ar::State{};
+    expect(step(state, ar::Available{.sp = false, .upscaler_steps = 0}, ar::Request::down) && state.level == 1 && state.upscaler == 0,
+        "no room under DLSS: the level");
+}
+
+static void test_dlss_floor() {
+    // The UE5 plugin's modes as (optimal %, mode): DLAA 100, Ultra Quality 77, Quality 66.7, Balanced 58, Performance 50,
+    // Ultra Performance 33.3; Auto (1) reports Performance's.
+    const std::vector<std::pair<float, uint8_t>> modes{{100.0f, 2}, {77.0f, 3}, {66.7f, 4}, {58.0f, 5}, {50.0f, 6},
+        {33.3f, 7}, {50.0f, 1}};
+    expect((ar::dlss_modes_below(modes, 58.0f, ar::UpscalerFloor::performance) == std::vector<uint8_t>{6}),
+        "Balanced: one step to Performance");
+    expect((ar::dlss_modes_below(modes, 58.0f, ar::UpscalerFloor::ultra_performance) == std::vector<uint8_t>{6, 7}),
+        "Balanced with the Ultra Performance floor: two");
+    expect((ar::dlss_modes_below(modes, 100.0f, ar::UpscalerFloor::performance) == std::vector<uint8_t>{3, 4, 5, 6}),
+        "DLAA: four steps to Performance, no two-step limit");
+    expect(ar::dlss_modes_below(modes, 50.0f, ar::UpscalerFloor::performance).empty(), "Performance already: none");
+
+    // Fractions as some plugin versions report them.
+    const std::vector<std::pair<float, uint8_t>> fractions{{0.667f, 4}, {0.58f, 5}, {0.5f, 6}, {0.333f, 7}};
+    expect((ar::dlss_modes_below(fractions, 0.667f, ar::UpscalerFloor::performance) == std::vector<uint8_t>{5, 6}),
+        "fractions rank the same");
+
+    expect(ar::dlss_quality_floor(ar::UpscalerFloor::performance) == -1 &&
+        ar::dlss_quality_floor(ar::UpscalerFloor::ultra_performance) == -2, "UE4 quality floor: -1 / -2");
+}
+
+static void test_internal_recovery() {
+    ar::InternalRecovery r{};
+    using Act = ar::InternalRecovery::Act;
+
+    for (int i = 0; i < 59; ++i) {
+        expect(r.tick(false, false, 50.0f, true) == Act::none, "not before 60 calm seconds");
+    }
+    expect(r.tick(false, false, 50.0f, true) == Act::step_up, "60 calm seconds: one step up");
+
+    // IMPAIRED within 30 s: undone, and blocked for 5 minutes.
+    for (int i = 0; i < 10; ++i) {
+        r.tick(false, false, 50.0f, true);
+    }
+    expect(r.tick(true, false, 90.0f, true) == Act::undo && r.blocked == 300, "IMPAIRED within 30 s undoes it");
+    bool stepped = false;
+    for (int i = 0; i < 299; ++i) {
+        stepped = stepped || r.tick(false, false, 50.0f, true) == Act::step_up;
+    }
+    expect(!stepped, "blocked for 5 minutes");
+    for (int i = 0; i < 60 && !stepped; ++i) {
+        stepped = r.tick(false, false, 50.0f, true) == Act::step_up;
+    }
+    expect(stepped, "then again");
+    for (int i = 0; i < 31; ++i) {
+        r.tick(false, false, 50.0f, true);
+    }
+    expect(r.watch == 0 && !(r.tick(true, false, 90.0f, true) == Act::undo), "IMPAIRED after 30 s is not ours to undo");
+
+    // A busy GPU or a load resets the count; nothing below the game's own: no step.
+    ar::InternalRecovery busy{};
+    for (int i = 0; i < 120; ++i) {
+        expect(busy.tick(false, false, 75.0f, true) == Act::none, "GPU 70 % busy or more: no step");
+    }
+    ar::InternalRecovery top{};
+    for (int i = 0; i < 120; ++i) {
+        expect(top.tick(false, false, 40.0f, false) == Act::none, "nothing to take back up");
+    }
+
+    // The block doubles, up to an hour.
+    ar::InternalRecovery doubling{};
+    for (int round = 0; round < 6; ++round) {
+        while (doubling.tick(false, false, 40.0f, true) != Act::step_up) {
+        }
+        doubling.tick(true, false, 90.0f, true);
+    }
+    expect(doubling.block == 3600 && doubling.undos == 6, "5, 10, 20, 40 minutes, then an hour");
+}
+
+static void test_anchor_gate() {
+    // Hogwarts Legacy as the harness plays it: the title for 40 s at 45 % (a stall at start-up), the save's load at 41-50 s,
+    // then the castle at 95 %. The menu's 45 % must not decide it.
+    ar::AnchorGate hog{};
+    bool due = false;
+    for (int s = 1; s <= 60 && !due; ++s) {
+        const bool loading = s == 3 || (s >= 41 && s <= 50);
+        due = hog.tick(loading, s <= 40 ? 45.0f : 95.0f);
+        expect(!due || s > 50, "not in the title menu, not during the load");
+    }
+    expect(!due, "not before 30 s after the load");
+    for (int s = 61; s <= 80 && !due; ++s) {
+        due = hog.tick(false, 95.0f);
+        expect(!due || s == 80, "due 30 s after the load");
+    }
+    expect(due && hog.load_seen && hog.vram_max && *hog.vram_max == 95.0f, "decided on the castle's memory");
+
+    // A load starts the 30 s over and forgets the memory before it.
+    ar::AnchorGate again{};
+    for (int s = 1; s <= 70; ++s) {
+        again.tick(s == 20, s < 60 ? 80.0f : 50.0f);
+    }
+    expect(again.tick(true, 50.0f) == false && !again.vram_max, "a load: not due, memory forgotten");
+    for (int s = 0; s < 29; ++s) {
+        expect(!again.tick(false, 50.0f), "29 s after it");
+    }
+    expect(again.tick(false, 50.0f) && *again.vram_max == 50.0f, "30 s after it, on its own memory");
+
+    // Start-up stalls are not the load; a session without one decides at 3 minutes.
+    ar::AnchorGate none{};
+    bool none_due = false;
+    int at = 0;
+    for (int s = 1; s <= 200 && !none_due; ++s) {
+        none_due = none.tick(s <= 10 && s % 3 == 0, 40.0f);
+        at = s;
+    }
+    expect(none_due && at == 180 && !none.load_seen, "no load: due at 180 s");
+
+    // The title left alone for 3 minutes, then the save's load at 170-185 s: the 30 s after it still count, not the
+    // 3 minutes (review, 2026-11-13).
+    ar::AnchorGate late{};
+    int late_at = 0;
+    for (int s = 1; s <= 300 && late_at == 0; ++s) {
+        if (late.tick(s >= 170 && s <= 185, s < 170 ? 40.0f : 95.0f)) {
+            late_at = s;
+        }
+    }
+    expect(late_at == 215 && *late.vram_max == 95.0f, "a load at 170-185 s: due at 215 s on the level's memory");
+
+    // No GPU memory reading: never due.
+    ar::AnchorGate blind{};
+    bool blind_due = false;
+    for (int s = 1; s <= 300; ++s) {
+        blind_due = blind_due || blind.tick(s == 20, std::nullopt);
+    }
+    expect(!blind_due, "no memory reading: not due");
 }
 
 static void test_upscaler_probe() {
@@ -264,6 +419,9 @@ int main() {
     test_limits();
     test_upscaler_probe();
     test_step_effect();
+    test_dlss_floor();
+    test_internal_recovery();
+    test_anchor_gate();
     test_step_strikes();
 
     if (failures == 0) {

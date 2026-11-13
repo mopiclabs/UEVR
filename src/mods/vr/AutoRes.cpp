@@ -113,7 +113,22 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
             ar::LEVELS[m_state.start_level].name);
     }
 
+    // The test options lock the floor they ask for; otherwise VR_AutoResUpscalerFloor.
+    cvars.set_autores_upscaler_floor(inputs.test_internal == 2 ? (int)ar::UpscalerFloor::ultra_performance
+        : inputs.test_internal >= 0 ? (int)ar::UpscalerFloor::performance : inputs.upscaler_floor);
     sync_available(cvars);
+
+    // VR_AutoResTestLevel / VR_AutoResTestInternal (measurements): the asked level and internal step, and nothing else
+    // moves (no edges, no guards); the VRAM and GPU columns are still kept.
+    m_test = inputs.test_level >= 0 || inputs.test_internal >= 0;
+
+    if (m_test) {
+        (void)openxr.take_perf_settings_events();
+        apply_test_lock(openxr, cvars, inputs);
+        check_guards(openxr, cvars, inputs);
+        send_hints(openxr, inputs);
+        return;
+    }
 
     for (const auto& event : openxr.take_perf_settings_events()) {
         take_edge(event.domain, event.subDomain, event.fromLevel, event.toLevel, "runtime");
@@ -222,6 +237,16 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_upscaler_strikes = {};
     m_retake_after = {};
     m_gpu.start();
+    m_anchor_decided = false;
+    m_anchor_raised = false;
+    m_anchor_from = m_state.start_level;
+    m_anchor_gate = ar::AnchorGate{};
+    m_anchor_due = false;
+    m_recovery = ar::InternalRecovery{};
+    m_recovery_step.reset();
+    m_test_level_done = false;
+    m_next_test = {};
+    m_next_gpu_log = {};
 
     cvars.set_autores_sp(100);
     cvars.set_autores_upscaler(0);
@@ -394,28 +419,82 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     m_vram_percent = query_vram_percent();
     const auto settling = m_last_level_change.time_since_epoch().count() != 0 && now - m_last_level_change < std::chrono::seconds{5};
     m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f && !settling && !inputs.loading ? m_vram_over_seconds + 1 : 0;
+    m_anchor_due = m_anchor_gate.tick(inputs.loading, m_vram_percent);
+
+    // VR_AutoResInternalRecover counts calm seconds only while settled; a load starts the count over.
+    if (inputs.loading) {
+        m_recovery.calm = 0;
+    }
+
     publish();
+
+    // The GPU time the step checks use, every 10 s, for reading a session back.
+    if (now >= m_next_gpu_log) {
+        if (m_next_gpu_log.time_since_epoch().count() != 0) {
+            const auto ms = m_gpu.gpu_ms_per_frame(now - std::chrono::seconds{10}, now);
+            const auto busy = m_gpu.busy_percent(now - std::chrono::seconds{10}, now);
+            SPDLOG_INFO("[autores] gpu: {} ms per frame, busy {} %, VRAM {} % ({}{}{})", ms ? fmt::format("{:.1f}", *ms) : "-",
+                busy ? fmt::format("{:.0f}", *busy) : "-", m_vram_percent ? fmt::format("{:.0f}", *m_vram_percent) : "-",
+                ar::LEVELS[m_state.level].name, m_state.upscaler > 0 ? fmt::format(", DLSS -{}", m_state.upscaler) : "",
+                m_state.sp > 0 ? fmt::format(", SP {} %", ar::SP_PERCENT[m_state.sp]) : "");
+        }
+
+        m_next_gpu_log = now + std::chrono::seconds{10};
+    }
 
     const auto settled = !inputs.loading && now - m_activated_at > std::chrono::seconds{15} &&
         (m_last_guard_step.time_since_epoch().count() == 0 || now - m_last_guard_step > std::chrono::seconds{10});
 
-    if (!settled) {
+    if (!settled || m_test) {
         return;
+    }
+
+    // Over the budget after VR_AutoResOutputAnchor raised the eye: back to where the session started, in one step, with
+    // the internal resolution back at the game's own (the steps take it down again if needed), capped there, and no
+    // raise again this session. The steps up return to the start from then on. An eye the steps took down to the start
+    // or below already is left to the ordinary guard: this one never raises it.
+    if (m_vram_over_seconds >= 3 && m_anchor_raised) {
+        m_anchor_raised = false;
+        m_state.start_level = m_anchor_from;
+
+        if (m_state.level > m_anchor_from) {
+            const auto from = m_state.level;
+
+            if (m_available.level && carry_out(openxr, cvars, ar::Step{ar::Actuator::level, from, m_anchor_from}, "VRAM guard")) {
+                m_state.level_cap = (std::min)(m_state.level_cap, m_anchor_from);
+                set_internal(cvars, 0, 0);
+                SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget after the output anchor: back to {}, capped there, no anchor "
+                    "this session", *m_vram_percent, ar::LEVELS[m_anchor_from].name);
+            }
+
+            m_last_guard_step = now;
+            m_vram_over_seconds = 0;
+            return;
+        }
+
+        SPDLOG_INFO("[autores] VRAM {:.0f} % of the budget after the output anchor, the eye at {} already: the anchor is "
+            "dropped, the VRAM guard goes on as usual", *m_vram_percent, ar::LEVELS[m_state.level].name);
     }
 
     // GPU memory over the DXGI budget for 3 s: one level down, and that level is the cap for the session. Only the eye
     // size changes the memory (SP renders into the same targets), so nothing else moves for it.
+    // At the lowest level (or with no level steps) there is nothing to take, and that is not a guard step: it would hold
+    // the checks below off for as long as the game stays over (Hogwarts and Wukong at Min on 8 GB are over all along).
     if (m_vram_over_seconds >= 3) {
-        if (m_available.level && m_state.level > ar::MIN_LEVEL &&
-            carry_out(openxr, cvars, ar::Step{ar::Actuator::level, m_state.level, m_state.level - 1}, "VRAM guard")) {
-            m_state.level_cap = (std::min)(m_state.level_cap, m_state.level);
-            SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget: capped at {} for this session", *m_vram_percent,
-                ar::LEVELS[m_state.level_cap].name);
+        if (m_available.level && m_state.level > ar::MIN_LEVEL) {
+            if (carry_out(openxr, cvars, ar::Step{ar::Actuator::level, m_state.level, m_state.level - 1}, "VRAM guard")) {
+                m_state.level_cap = (std::min)(m_state.level_cap, m_state.level);
+                SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget: capped at {} for this session", *m_vram_percent,
+                    ar::LEVELS[m_state.level_cap].name);
+            }
+
+            m_last_guard_step = now;
+            m_vram_over_seconds = 0;
+            return;
         }
 
-        m_last_guard_step = now;
+        // Nothing to take: the count starts over (a later raise, the slider's too, gets its 3 s) and no guard step.
         m_vram_over_seconds = 0;
-        return;
     }
 
     // Collapse: under 10 VR fps for 3 s without a stall, while the runtime says the GPU is IMPAIRED (design v1: GPU
@@ -424,6 +503,158 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
         SPDLOG_WARN("[autores] {:.1f} fps over 3 s: two steps down", *m_fps);
         step_down_now(openxr, cvars, 2, "collapse guard");
         m_fps.reset();
+        return;
+    }
+
+    check_anchor(openxr, cvars, inputs);
+    check_recovery(openxr, cvars, inputs);
+}
+
+// The internal resolution set directly (the output anchor, the test lock, the VRAM guard's way back): steps below the
+// game's own for the upscaler and SP.
+void AutoResController::set_internal(CVarManager& cvars, int upscaler, int sp) {
+    m_step_check.reset();
+    m_state.upscaler = upscaler;
+    m_state.sp = sp;
+    cvars.set_autores_upscaler(upscaler);
+    cvars.set_autores_sp(ar::SP_PERCENT[(std::min)(sp, (int)ar::SP_PERCENT.size() - 1)]);
+    publish();
+}
+
+// VR_AutoResOutputAnchor, decided once a session after the loading (AnchorGate, design v1 §7-57): where the internal
+// resolution can go deep (DLSS with steps above its floor, or SP under a temporal upscaler), the session started below
+// Base and the game's GPU memory stayed under 70 % of the budget for the 30 s after the load, the eye goes to Base (within the cap) and the internal resolution to its floor in
+// the same step: about the same cost, and a DLSS-upscaled Base looks better than a native Min. The only step that does
+// not wait for the runtime's NORMAL; after it Base is the anchor the steps up return to. The VRAM guard takes it back.
+void AutoResController::check_anchor(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs) {
+    if (!inputs.output_anchor || m_anchor_decided) {
+        return;
+    }
+
+    const auto report = cvars.get_autores_report();
+
+    // The probe's first answer (30 s at most) and the game past its loading (AnchorGate).
+    if (report.upscaler_kind == (int)ar::Upscaler::unknown || !m_anchor_due || !m_anchor_gate.vram_max) {
+        return;
+    }
+
+    m_anchor_decided = true;
+    const auto vram = *m_anchor_gate.vram_max;
+    const auto after = m_anchor_gate.load_seen ? fmt::format("{} s after a load", m_anchor_gate.calm)
+                                               : fmt::format("no load in {} s", m_anchor_gate.seconds);
+    const auto upscaler = m_available.upscaler && m_available.upscaler_steps > 0;
+    const auto deep_sp = !m_available.upscaler && m_available.sp && m_available.sp_steps >= ar::SP_STEPS_TEMPORAL;
+    const auto to = (std::min)(ar::BASE_LEVEL, m_state.level_cap);
+    const char* no = !m_available.level ? "no level steps"
+        : m_state.start_level >= ar::BASE_LEVEL ? "the session started at Base or above"
+        : to <= m_state.level ? "the cap is not above the eye"
+        : m_state.level != m_state.start_level ? "the eye moved already"
+        : !upscaler && !deep_sp ? (m_available.upscaler ? "no DLSS steps below the game's own (it is at the floor already)"
+                                  : m_available.sp ? (m_sp_cap >= 0 ? "the SP steps were stopped short by their check"
+                                                                    : "no deep internal resolution (SP steps without a temporal upscaler)")
+                                  : m_sp_left_out || m_upscaler_left_out ? "the internal resolution steps were left out by their checks"
+                                                   : "no internal resolution steps in this game")
+        : vram >= 70.0f ? "GPU memory reached 70 % of the budget or more"
+        : nullptr;
+
+    if (no != nullptr) {
+        SPDLOG_INFO("[autores] output anchor: stays at {} ({}; VRAM up to {:.0f} %, {})", ar::LEVELS[m_state.level].name, no,
+            vram, after);
+        return;
+    }
+
+    const auto from = m_state.level;
+
+    if (!carry_out(openxr, cvars, ar::Step{ar::Actuator::level, from, to}, "output anchor")) {
+        return;
+    }
+
+    set_internal(cvars, upscaler ? m_available.upscaler_steps : 0, upscaler ? 0 : m_available.sp_steps);
+    m_anchor_from = from;
+    m_anchor_raised = true;
+    m_state.start_level = to;
+    SPDLOG_INFO("[autores] output anchor: {} -> {} with the internal resolution at its floor ({}), VRAM up to {:.0f} %, {}; {} is "
+        "the anchor now", ar::LEVELS[from].name, ar::LEVELS[to].name,
+        upscaler ? fmt::format("DLSS {} below the game's", m_state.upscaler) : fmt::format("SP {} %", ar::SP_PERCENT[m_state.sp]),
+        vram, after, ar::LEVELS[to].name);
+}
+
+// VR_AutoResInternalRecover (AutoResPolicy.hpp InternalRecovery), once a second while settled.
+void AutoResController::check_recovery(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs) {
+    if (!inputs.internal_recover) {
+        return;
+    }
+
+    const auto now = clock::now();
+    const auto busy = m_gpu.busy_percent(now - std::chrono::seconds{5}, now);
+    const auto below = m_state.upscaler > 0 || m_state.sp > 0;
+    const auto act = m_recovery.tick(m_state.gpu == ar::Notification::impaired, inputs.loading, busy,
+        below && m_pending == ar::Request::none && !m_step_check);
+
+    if (act == ar::InternalRecovery::Act::step_up) {
+        const auto step = m_state.upscaler > 0 ? ar::Step{ar::Actuator::upscaler, m_state.upscaler, m_state.upscaler - 1}
+                                               : ar::Step{ar::Actuator::sp, m_state.sp, m_state.sp - 1};
+
+        if (carry_out(openxr, cvars, step, "internal recovery: 60 s not IMPAIRED, GPU under 70 %")) {
+            m_recovery_step = step;
+        }
+    } else if (act == ar::InternalRecovery::Act::undo) {
+        if (m_recovery_step) {
+            const auto& up = *m_recovery_step;
+            const auto current = up.actuator == ar::Actuator::upscaler ? m_state.upscaler : m_state.sp;
+            // An actuator gone since (DLSS found or turned off) is not stepped again: the state would keep a step that
+            // nothing applies.
+            const auto available = up.actuator == ar::Actuator::upscaler ? m_available.upscaler : m_available.sp;
+
+            if (available && current == up.to) {
+                carry_out(openxr, cvars, ar::Step{up.actuator, up.to, up.from}, "internal recovery undone: IMPAIRED within 30 s");
+                m_step_check.reset();
+            }
+        }
+
+        m_recovery_step.reset();
+        SPDLOG_INFO("[autores] internal recovery: {} up, {} undone; the next waits {} s", m_recovery.ups, m_recovery.undos,
+            m_recovery.blocked);
+    }
+}
+
+// VR_AutoResTestLevel / VR_AutoResTestInternal, once a second: the level once the game is settled, the internal step
+// whenever the upscaler the game uses changes (the floor is locked to what the option asks for).
+void AutoResController::apply_test_lock(runtimes::OpenXR& openxr, CVarManager& cvars, const Inputs& inputs) {
+    const auto now = clock::now();
+
+    if (now < m_next_test) {
+        return;
+    }
+
+    m_next_test = now + std::chrono::seconds{1};
+
+    if (inputs.test_level >= 0 && !m_test_level_done && !inputs.loading && now - m_activated_at > std::chrono::seconds{5}) {
+        m_test_level_done = true;
+        const auto to = std::clamp(inputs.test_level, ar::MIN_LEVEL, ar::MAX_LEVEL);
+
+        if (to != m_state.level && m_available.level) {
+            carry_out(openxr, cvars, ar::Step{ar::Actuator::level, m_state.level, to}, "test level");
+        }
+    }
+
+    if (inputs.test_internal >= 0) {
+        int upscaler = 0, sp = 0;
+
+        if (inputs.test_internal > 0) {
+            if (m_available.upscaler) {
+                upscaler = (std::max)(m_available.upscaler_steps, 1);
+            } else if (m_available.sp) {
+                sp = m_available.sp_steps;
+            }
+        }
+
+        if (upscaler != m_state.upscaler || sp != m_state.sp) {
+            set_internal(cvars, upscaler, sp);
+            SPDLOG_INFO("[autores] test internal {}: {}", inputs.test_internal,
+                upscaler > 0 ? fmt::format("DLSS {} below the game's", upscaler)
+                : sp > 0 ? fmt::format("SP {} %", ar::SP_PERCENT[sp]) : std::string{"the game's own"});
+        }
     }
 }
 
@@ -462,7 +693,11 @@ void AutoResController::sync_available(CVarManager& cvars) {
             cvars.set_autores_sp(ar::SP_PERCENT[0]);
         }
 
-        SPDLOG_INFO("[autores] SP steps {}", sp ? "on" : m_sp_left_out ? "off for the session" : "off (DLSS sets the input resolution)");
+        const auto dlss = report.upscaler_kind == (int)ar::Upscaler::dlss_mode || report.upscaler_kind == (int)ar::Upscaler::dlss_quality;
+        SPDLOG_INFO("[autores] SP steps {}", sp ? "on"
+            : m_sp_left_out ? "off for the session"
+            : dlss ? "off (DLSS sets the input resolution)"
+                   : "off (r.ScreenPercentage can't be stepped in this game)");
     }
 
     if (upscaler != m_available.upscaler) {
@@ -482,11 +717,24 @@ void AutoResController::sync_available(CVarManager& cvars) {
         SPDLOG_INFO("[autores] upscaler steps {}", upscaler ? "on" : m_upscaler_left_out ? "off for the session" : "off (no DLSS sets the input resolution)");
     }
 
-    // The game's own mode leaves fewer upscaler steps: a step past them moved nothing.
-    if (m_available.upscaler && report.upscaler_max_steps >= 0 && report.upscaler_max_steps < m_available.upscaler_steps) {
+    // How far each can go: the game's own DLSS mode and the floor leave so many upscaler steps (more or fewer than the
+    // first guess); SP goes to 50 % under a temporal upscaler. A step past them moved nothing and is undone.
+    if (m_available.upscaler && report.upscaler_max_steps >= 0 && report.upscaler_max_steps != m_available.upscaler_steps) {
         m_available.upscaler_steps = report.upscaler_max_steps;
-        undone(m_state.upscaler, m_available.upscaler_steps);
-        cvars.set_autores_upscaler(m_state.upscaler);
+
+        if (m_state.upscaler > m_available.upscaler_steps) {
+            undone(m_state.upscaler, m_available.upscaler_steps);
+            cvars.set_autores_upscaler(m_state.upscaler);
+        }
+    }
+
+    if (report.sp_max_steps != m_available.sp_steps) {
+        m_available.sp_steps = report.sp_max_steps;
+
+        if (m_state.sp > m_available.sp_steps) {
+            undone(m_state.sp, m_available.sp_steps);
+            cvars.set_autores_sp(ar::SP_PERCENT[m_state.sp]);
+        }
     }
 
     // A step past the first that moved nothing: back to the one before it, and no further for the session.
@@ -511,8 +759,8 @@ void AutoResController::sync_available(CVarManager& cvars) {
 // nothing worth keeping is against; so is one that leaves the game 10 % slower (Dead as Disco ran heavier at a lower
 // r.ScreenPercentage, 2026-10-15). The first verdict against it only puts the step back: the request, if still wanted,
 // takes it again 5 s later from a fresh "before" (a scene change can read as the step's, StepStrikes). The second in a
-// row leaves the actuator out for the session, and a request still wanted goes to the next actuator. A window with a
-// stall or a load in it is not judged and counts neither way.
+// row stops the actuator at the step before it for the session, or leaves it out if it was the first, and a request
+// still wanted goes to the next actuator. A window with a stall or a load in it is not judged and counts neither way.
 void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     if (!m_step_check) {
         return;

@@ -8948,6 +8948,11 @@ void VR::update_autores() {
         .tick_delta_us = m_autores_tick_clock.delta_us(),
         .tick_real_us = m_autores_tick_clock.real_us(),
         .engine_frame_rate = m_autores_engine_frame_rate_ready.load(std::memory_order_acquire) ? &m_autores_engine_frame_rate : nullptr,
+        .upscaler_floor = std::clamp(m_autores_upscaler_floor->value(), 0, 1),
+        .output_anchor = m_autores_output_anchor->value(),
+        .internal_recover = m_autores_internal_recover->value(),
+        .test_level = m_autores_test_level->value(),
+        .test_internal = m_autores_test_internal->value(),
     });
 }
 
