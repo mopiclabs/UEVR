@@ -39,8 +39,6 @@ using namespace std::literals;
 std::unique_ptr<Framework> g_framework{};
 
 namespace {
-constexpr auto D3D12_INIT_RETRY_INITIAL_BACKOFF = 50ms;
-constexpr auto D3D12_INIT_RETRY_MAX_BACKOFF = 250ms;
 // With the game window gone, this long without a Present means the game is exiting (end_vr_session_if_game_exited).
 constexpr auto EXIT_SESSION_PRESENT_QUIET_TIME = 2500ms;
 // should_defer_vr_start_for_shader_compile: the game compiles while, over windows of SHADER_COMPILE_WINDOW, at least
@@ -866,32 +864,22 @@ void Framework::on_frame_d3d12() {
     //spdlog::debug("on_frame (D3D12)");
     
     if (!m_initialized) {
-        const auto now = std::chrono::steady_clock::now();
+        using uevr::initialization::Result;
+        const auto result = m_d3d12_init_retry.attempt(std::chrono::steady_clock::now(),
+            uevr::initialization::warming_up(m_first_initialize, m_frames_since_init),
+            [this]() { return initialize(); });
 
-        if (m_next_d3d12_init_attempt.time_since_epoch().count() != 0 && now < m_next_d3d12_init_attempt) {
-            return;
-        }
-
-        if (!initialize()) {
-            ++m_d3d12_init_failure_count;
-
-            const auto backoff_multiplier = 1u << std::min(m_d3d12_init_failure_count - 1, 2u);
-            const auto retry_backoff = std::min(
-                D3D12_INIT_RETRY_INITIAL_BACKOFF * backoff_multiplier,
-                D3D12_INIT_RETRY_MAX_BACKOFF
-            );
-
-            m_next_d3d12_init_attempt = now + retry_backoff;
+        if (result == Result::failed) {
             spdlog::warn(
                 "Failed to initialize Framework on DirectX 12; retrying in {} ms",
-                std::chrono::duration_cast<std::chrono::milliseconds>(retry_backoff).count()
+                m_d3d12_init_retry.retry_delay().count()
             );
+        }
+        if (result != Result::ready) {
             return;
         }
 
         spdlog::info("Framework initialized");
-        m_next_d3d12_init_attempt = {};
-        m_d3d12_init_failure_count = 0;
         // Until the next Present decides whether VR waits for a shader compile, the mods and their config aren't up
         // either (first_frame_initialize clears this when it doesn't wait or can't initialize).
         m_vr_start_deferred = m_first_frame_d3d_initialize;
@@ -914,8 +902,7 @@ void Framework::on_frame_d3d12() {
 
     if (device == nullptr) {
         spdlog::error("D3D12 Device was null when it shouldn't be, returning...");
-        m_next_d3d12_init_attempt = {};
-        m_d3d12_init_failure_count = 0;
+        m_d3d12_init_retry.reset();
         m_initialized = false;
         return;
     }
@@ -1108,8 +1095,7 @@ void Framework::on_reset(uint32_t w, uint32_t h) {
 
     m_has_frame = false;
     m_first_initialize = false;
-    m_next_d3d12_init_attempt = {};
-    m_d3d12_init_failure_count = 0;
+    m_d3d12_init_retry.reset();
     m_initialized = false;
 }
 
@@ -1920,7 +1906,7 @@ bool Framework::initialize() {
         m_first_initialize = false;
     }
 
-    if (m_frames_since_init < 60) {
+    if (m_frames_since_init < uevr::initialization::warmup_frames) {
         m_frames_since_init++;
         return false;
     }
