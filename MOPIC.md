@@ -356,6 +356,35 @@ injection; per title A B B A A B, so 3 runs of each build):
 - Hozy: no `[BufferedRT]` or `[Pre5.7][SlateUI]` line on either build; captures of the Mopic display show the 3D scene
   without the game's UI on both builds (Known gaps).
 
+Results on 2026-11-18 (stage 2 of the upstream sync: Mopic code moved out of upstream functions, branch
+`refactor/mopic-seams`, "Mopic code beside upstream's functions" above). A build of 0018230e (the six moves and the
+CI step) and one of d8c5a2cc (all of it) against a build of 195bf50a; same PC, `-EngineDir ...\1.0.5.1`, the Hub
+runtime 2.1.3, Steam offline except Wukong, injection at launch, builds alternating run by run:
+
+- Unit tests: `ctest` 37/37 on both trees (`diagnostic-safety-tests` counts the moved hold copies in the Mopic files).
+- Verdicts, 195bf50a / 0018230e, 3 runs each: TEKKEN 8 2 PASS + 1 EXIT_HANG (the TEKKEN exit hang in Known gaps:
+  the GameThread waits at exe+0x5e096a7, UEVR's threads sleep) / 3 PASS; E33 2 PASS + 1 MENU_FAIL (the pause-menu
+  checkpoint at 0.80) / 3 PASS; Stray, Dead as Disco (injected at launch) and Wukong 3 / 3 PASS. d8c5a2cc, 2 runs
+  against 2: Hozy 2 / 2, TEKKEN 8 2 / 2, E33 2 / 1 PASS + 1 MENU_FAIL (the same checkpoint, 0.78).
+- The log lines of the moved code came on the same runs and as often on both builds: `state=active`, the right-eye
+  reuse (E33 64 / 55 lines, TEKKEN 3 / 3), `[FrameGen]`, the Lumen origin hold, `[SkyCapture]`, the session end for
+  the game's exit, the duplicate-Present skip; no `Not active after 20 s`, no failed `xrEndFrame` or swapchain wait.
+- VR fps medians, 195bf50a / 0018230e: TEKKEN 59.92 / 59.88, E33 43.84 / 43.46, Stray 58.55 / 59.22, Dead as Disco
+  59.88 / 59.96, Wukong 38.09 / 39.43; UEVR work within 0.3 ms; the Native Stereo Fix fresh / reused / fallback
+  shares the same (reused: TEKKEN 0.12 / 0.14 %, E33 2.42 / 2.46 %). Hitches came on 4 of 12 refactor runs and 0
+  of 11 baseline runs in the first set (most on frames where `xrEndFrame` took 11-33 ms in the runtime), and on 1
+  baseline and 0 refactor runs in the second; the baseline runs have the same runtime spikes outside the measured
+  window.
+- Per eye (`MOPIC_MODE=sbs`, Wukong-shrine-still and TEKKEN 8, 2 runs each per build): no one-eye lag, missing or
+  black frame; left/right luma within 0.3 % except one baseline Wukong run (right eye 5.4 % darker, the shared-
+  exposure variation of the exposure row).
+- Live resolution changes, forced with `VR_AutoResToggleSeconds=4` and a 4 s level interval (the runtime has no
+  extension): with the Native Stereo Fix, Wukong (D3D12) `Resize hold start/end` 81 / 82 and 103 / 104 steps, Stray
+  (D3D11) 23 / 23 and 47 / 47, no black eye (SBS); without it, the source hold ("Render target took the new size;
+  left eye in both halves") on Stray 12 / 12 (24 / 24 steps) and TEKKEN 8 (D3D12) 46 / 44 (59 / 56 steps). Wukong
+  with the fix off crashed in Streamline's `sl.dll` right after VR started, on both builds. The D3D12 "no capture
+  after a resize" left-eye copy did not come up in any run (a hold covered every change).
+
 ## Known gaps
 
 - TEKKEN 8: an intermittent hang after quitting through the menu, separate from the exit fix above. 2 of 12 full
