@@ -104,6 +104,7 @@
 #include "SifuRendererEntry.hpp"
 #include "B1RendererEntry.hpp"
 #include "B1RendererFallback.hpp"
+#include "SlateViewportOffset.hpp"
 #include "SatisfactoryRuntime.hpp"
 #include "SifuMeshCommands.hpp"
 #include "DuneFrameHandoff.hpp"
@@ -39496,7 +39497,11 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
     } else if (!supports_ue55_dedicated_ui_target_for_current_game()) {
         const auto window = (uintptr_t)ue55_inputs.window;
 
-        static std::optional<size_t> viewport_offset = [&]() -> std::optional<size_t> {
+        // Mopic: a search that found nothing is tried again once a second (SlateViewportOffset.hpp).
+        static uevr::slate_viewport_offset::Discovery s_viewport_offset_discovery{};
+        const auto viewport_offset_attempts_before = s_viewport_offset_discovery.attempts;
+        const auto viewport_offset = uevr::slate_viewport_offset::resolve(s_viewport_offset_discovery,
+            std::chrono::steady_clock::now(), [&]() -> std::optional<size_t> {
             std::optional<size_t> result{};
             const auto module_within = utility::get_module_within(g_hook->m_slate_thread_hook.target_address());
 
@@ -39689,7 +39694,19 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
             }
 
             return result;
-        }();
+        });
+
+        if (s_viewport_offset_discovery.attempts != viewport_offset_attempts_before) {
+            if (viewport_offset && s_viewport_offset_discovery.attempts > 1) {
+                SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] Found the viewport offset on attempt {}", s_viewport_offset_discovery.attempts);
+            } else if (uevr::slate_viewport_offset::gave_up(s_viewport_offset_discovery)) {
+                SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] No viewport offset after {} attempts; not trying again",
+                    s_viewport_offset_discovery.attempts);
+            } else if (!viewport_offset) {
+                SPDLOG_INFO_EVERY_N_SEC(10, "[SlateRHIRenderer::DrawWindow_RenderThread] No viewport offset yet (attempt {}); trying again in 1 s",
+                    s_viewport_offset_discovery.attempts);
+            }
+        }
 
         if (viewport_offset) {
             sdk::ISlateViewport* candidate{};

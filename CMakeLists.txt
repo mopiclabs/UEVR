@@ -1821,6 +1821,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/SatisfactoryRuntime.hpp"
 	"src/mods/vr/SifuMeshCommands.hpp"
 	"src/mods/vr/SifuRendererEntry.hpp"
+	"src/mods/vr/SlateViewportOffset.hpp"
 	"src/mods/vr/SlateVrTargetPolicy.hpp"
 	"src/mods/vr/Stalker2NativeD3D12.hpp"
 	"src/mods/vr/Stalker2NativePolicy.hpp"
