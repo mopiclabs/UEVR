@@ -248,6 +248,15 @@ private:
     uint64_t m_hold_source_width{};
     uint32_t m_hold_source_height{};
     std::chrono::steady_clock::time_point m_hold_source_changed_at{};
+    // Mopic (MopicNativeSubmitD3D12.cpp): the double-wide submits of the Native Stereo Fix that upstream doesn't have.
+    struct MopicDoubleWideSubmit;
+    struct MopicDoubleWideResult {
+        bool submitted{};              // the frame went to the swapchain; on_frame skips its own copies
+        bool native_stereo_fix_live{}; // VR_PerfLog: a Native Stereo Fix submit carries this frame's right eye
+    };
+    MopicDoubleWideResult submit_mopic_double_wide(MopicDoubleWideSubmit&& submit);
+    // The Native Stereo Fix puts the eyes side by side at the top left, each the size of an eye.
+    static void set_native_pair_content(VR* vr, uint32_t eye_width, uint32_t eye_height);
     uint32_t m_scene_capture_width{};
     uint32_t m_scene_capture_height{};
     // VR_NativeStereoFixPairSnapshot: one consistent eye pair per engine frame (see d3d12/NativePairSnapshot.hpp).
