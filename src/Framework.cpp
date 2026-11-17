@@ -860,6 +860,11 @@ void Framework::on_frame_d3d12() {
 
     m_renderer_type = RendererType::D3D12;
 
+    // The startup shader compile wait counts from here (ShaderCompileWait.hpp).
+    if (m_shader_compile_wait.first_present.time_since_epoch().count() == 0) {
+        m_shader_compile_wait.first_present = m_last_game_present_time;
+    }
+
     auto command_queue = m_d3d12_hook->get_command_queue();
     //spdlog::debug("on_frame (D3D12)");
     
@@ -2224,6 +2229,17 @@ bool Framework::should_defer_vr_start_for_shader_compile() {
         return true;
     }
 
+    // No compile seen yet, but the game hasn't presented long enough to conclude it won't compile (ShaderCompileWait.hpp).
+    if (!wait.deferring && uevr::shader_compile::still_observing(wait.first_present, now)) {
+        if (!wait.observing_logged) {
+            wait.observing_logged = true;
+            spdlog::info("[Framework] Watching for a startup shader compile until the game has presented for {} s",
+                std::chrono::duration_cast<std::chrono::seconds>(uevr::shader_compile::min_observe).count());
+        }
+
+        return true;
+    }
+
     if (wait.deferring) {
         wait.deferring = false;
 
@@ -2232,6 +2248,8 @@ bool Framework::should_defer_vr_start_for_shader_compile() {
         } else {
             spdlog::info("[Framework] The shader compile is over ({} pipeline states, {} s); starting VR", created, waited_s);
         }
+    } else if (wait.observing_logged) {
+        spdlog::info("[Framework] No startup shader compile ({} pipeline states, {} s); starting VR", created, waited_s);
     }
 
     return false;

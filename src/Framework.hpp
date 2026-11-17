@@ -16,6 +16,7 @@
 #include <sdk/Math.hpp>
 #include <utility/Patch.hpp>
 #include "utility/FrameworkInitialization.hpp"
+#include "utility/ShaderCompileWait.hpp"
 
 #include <sdk/threading/ThreadWorker.hpp>
 #include <mods/vr/d3d12/CommandContext.hpp>
@@ -328,7 +329,9 @@ private:
         std::chrono::steady_clock::time_point last_busy{};
         std::chrono::steady_clock::time_point deferred_since{};
         std::chrono::steady_clock::time_point next_log{};
+        std::chrono::steady_clock::time_point first_present{}; // the first D3D12 Present the framework saw
         bool deferring{false};
+        bool observing_logged{false};
     } m_shader_compile_wait{};
     
     // UI
