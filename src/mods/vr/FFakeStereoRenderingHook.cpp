@@ -105,6 +105,7 @@
 #include "B1RendererEntry.hpp"
 #include "B1RendererFallback.hpp"
 #include "SlateViewportOffset.hpp"
+#include "MopicNativeStereoPass.hpp"
 #include "SatisfactoryRuntime.hpp"
 #include "SifuMeshCommands.hpp"
 #include "DuneFrameHandoff.hpp"
@@ -24178,13 +24179,7 @@ sdk::FSceneView* FFakeStereoRenderingHook::sceneview_constructor(sdk::FSceneView
         // frame where both final eyes can originate from the primary view.
         if (capture_generation_ready) {
             const bool is_ue55_or_newer = is_ue_5_5_runtime() || is_ue_5_6_or_newer();
-            // Mopic: on UE5.5/5.6 the right eye renders in a view family of its own, where a SECONDARY view expects a
-            // PRIMARY view of the same family to have done the work the engine shares between the eyes. Hozy (UE5.6)
-            // lost the directional light's shadow in the right eye: its Attic came out washed white (L/R 13.6 %,
-            // 0.05 % relabeled PRIMARY). From UE5.7 on joeyhodge's behavior stays: 5.7 renders it in a family linked
-            // to the left eye's (use_ue57_linked_family_transaction), whose validation needs the SECONDARY identity
-            // (Dead as Disco fails closed without it); 5.8+ is untested.
-            const bool right_eye_renders_alone = is_ue55_or_newer && !is_ue_5_7_or_newer();
+            const bool right_eye_renders_alone = uevr::native_stereo_pass::right_eye_renders_alone(is_ue55_or_newer, is_ue_5_7_or_newer()); // Mopic
             const bool force_primary_constructor_pass = subnautica2_is_current_game();
             const bool hellblade_preserve_secondary_pass =
                 hellblade_is_current_game() &&

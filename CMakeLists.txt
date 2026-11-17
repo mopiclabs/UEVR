@@ -1808,6 +1808,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/KtjLRendererEntry.hpp"
 	"src/mods/vr/KtjLShadowGather.hpp"
 	"src/mods/vr/KtjLShadowGatherHook.hpp"
+	"src/mods/vr/MopicNativeStereoPass.hpp"
 	"src/mods/vr/MopicNativeSubmitD3D11.hpp"
 	"src/mods/vr/MopicNativeSubmitD3D12.hpp"
 	"src/mods/vr/NativeFrameDiagnostics.hpp"
