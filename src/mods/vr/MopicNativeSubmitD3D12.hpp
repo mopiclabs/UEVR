@@ -3,7 +3,8 @@
 // Mopic: the Native Stereo Fix double-wide submits UEVR upstream doesn't have, moved out of D3D12Component::on_frame
 // so a joeyhodge release that rewrites that function only meets a call there (MOPIC.md, "Updating to a new joeyhodge
 // release"). on_frame calls submit_mopic_double_wide before its own submit chain and skips that chain when it returns
-// submitted; the PerfLog notes and m_last_native_capture_submit of upstream's own copies stay next to them.
+// submitted; the PerfLog notes and m_last_native_capture_submit of upstream's own copies stay next to them. Also
+// brings PerfLog.hpp and PerfLogXr.hpp, which D3D12Component.cpp uses.
 
 #include <cstdint>
 #include <functional>
@@ -15,6 +16,7 @@
 
 #include "D3D12Component.hpp"
 #include "FFakeStereoRenderingHook.hpp"
+#include "PerfLogXr.hpp"
 
 namespace vrmod {
 

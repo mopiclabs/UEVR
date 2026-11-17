@@ -25,7 +25,7 @@
 #include "../../../utility/Logging.hpp"
 #include "OpenXR.hpp"
 #include "../SteamFrameBindings.hpp"
-#include "../PerfLog.hpp"
+#include "../PerfLogXr.hpp"
 
 using namespace nlohmann;
 
@@ -113,10 +113,7 @@ const char* sync_frame_callsite_name(VRRuntime::SyncFrameCallsite callsite) {
 // xrBeginFrame for the perf log: counts XR_FRAME_DISCARDED and keeps the time inside the runtime out of UEVR's
 // own render-thread cost.
 XrResult begin_frame_counted(XrSession session, const XrFrameBeginInfo& info) {
-    const auto start = uevr::perf::now_ns();
-    const auto result = xrBeginFrame(session, &info);
-    uevr::perf::note_xr_begin(uevr::perf::now_ns() - start, result == XR_FRAME_DISCARDED);
-    return result;
+    return uevr::perf::XrBeginFrameProbe{}(session, &info);
 }
 
 // xrEndFrame without layers (recovery, startup and mono-transition frames). The perf log counts them as empty
@@ -3869,11 +3866,12 @@ XrResult OpenXR::begin_frame(const char* caller) {
     this->begin_profile();
 
     XrFrameBeginInfo frame_begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    const uevr::perf::XrBeginFrameProbe xrBeginFrame{}; // Mopic VR_PerfLog: times the xrBeginFrame calls below (PerfLogXr.hpp)
     const auto collect_frame_timing = collect_openxr_frame_timing();
     const auto begin_frame_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    auto result = begin_frame_counted(this->session, frame_begin_info);
+    auto result = xrBeginFrame(this->session, &frame_begin_info);
     if (collect_frame_timing) {
         this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
     }
@@ -3891,7 +3889,7 @@ XrResult OpenXR::begin_frame(const char* caller) {
         const auto retry_begin_frame_start = collect_frame_timing
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        result = begin_frame_counted(this->session, frame_begin_info);
+        result = xrBeginFrame(this->session, &frame_begin_info);
         if (collect_frame_timing) {
             this->begin_frame_timing.add(std::chrono::steady_clock::now() - retry_begin_frame_start);
         }
@@ -4227,16 +4225,12 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     //spdlog::info("[VR] Ending frame, layer ptr: {:x}", (uintptr_t)frame_end_info.layers);
 
     this->begin_profile();
+    const uevr::perf::XrEndFrameProbe xrEndFrame{projection_layer_views, submit_state.frame_count, pipelined_frame_state}; // Mopic VR_PerfLog (PerfLogXr.hpp)
     const auto collect_frame_timing = collect_openxr_frame_timing();
     const auto end_frame_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
-    const auto perf_end_start = uevr::perf::now_ns();
     auto result = xrEndFrame(this->session, &frame_end_info);
-    const auto perf_end_time = uevr::perf::now_ns();
-    // A projection for an engine frame that was already submitted counts as a repeat, not a new VR frame.
-    uevr::perf::note_xr_end(result == XR_SUCCESS, !projection_layer_views.empty(), submit_state.frame_count,
-        perf_end_time, perf_end_time - perf_end_start, frame_end_info.displayTime, pipelined_frame_state.predictedDisplayPeriod);
     if (collect_frame_timing) {
         this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
     }

@@ -1814,6 +1814,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/NativeFrameDiagnosticsJson.hpp"
 	"src/mods/vr/OverlayComponent.hpp"
 	"src/mods/vr/PerfLog.hpp"
+	"src/mods/vr/PerfLogXr.hpp"
 	"src/mods/vr/PhantomBladeZeroNative.hpp"
 	"src/mods/vr/PhantomBladeZeroUI.hpp"
 	"src/mods/vr/Pre57SlateCode.hpp"

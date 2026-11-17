@@ -34,7 +34,6 @@
 #include "D3D12Component.hpp"
 #include "GalacticRacerRenderTargets.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
-#include "PerfLog.hpp"
 #include "MopicNativeSubmitD3D12.hpp"
 #include "PhantomBladeZeroNative.hpp"
 
@@ -7143,13 +7142,11 @@ bool D3D12Component::OpenXR::copy(
 
         ctx.num_textures_acquired++;
         ctx.last_acquired_texture = texture_index;
+        const uevr::perf::XrWaitSwapchainImageProbe xrWaitSwapchainImage{}; // Mopic VR_PerfLog: blocked time (PerfLogXr.hpp)
 
         XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         wait_info.timeout = XR_INFINITE_DURATION;
-        // VR_PerfLog: waiting for the runtime to release the image is blocked time, not UEVR's own cost.
-        const auto perf_wait_start = uevr::perf::now_ns();
         result = xrWaitSwapchainImage(swapchain.handle, &wait_info);
-        uevr::perf::note_blocked(uevr::perf::now_ns() - perf_wait_start);
 
         if (result != XR_SUCCESS) {
             spdlog::error("[VR] xrWaitSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));
