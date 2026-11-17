@@ -1874,7 +1874,6 @@ list(APPEND uevr_SOURCES
 	"src/utility/ProtectedHookTrampoline.hpp"
 	"src/utility/ReadOnlyPointerAccessor.hpp"
 	"src/utility/SceneCaptureLifecycle.hpp"
-	"src/utility/ShaderCompileWait.hpp"
 	"src/utility/SupportDiagnostics.hpp"
 	"src/utility/UObjectAllocatorDiscovery.hpp"
 	"src/utility/UObjectArrayBrowser.hpp"
