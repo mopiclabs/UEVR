@@ -9,8 +9,10 @@ eye tracking through Mopic Hub).
   `joeyhodge/110526pbzp2`, merged on 2026-11-17 as stage 1 of the upstream sync (from `101226HELLRAISERp1`,
   `387ccb7`, the base since 2026-10-14; later tags are stage 3).
 - `git describe --tags --match "joeyhodge/*"` shows which joeyhodge release a build is based on and how many commits
-  sit on top. The "Tag / Commits past tag" lines at the top of UEVR's log.txt come from plain `git describe --tags`,
-  which since the Mopic release tags (`v1.0.5.4` on) names the nearest Mopic release instead.
+  sit on top. The "Tag / Commits past tag" lines at the top of UEVR's log.txt (and the plugin API's `get_tag`,
+  `get_tag_long`, the window title) give the same since 2026-11-18 (`MakeCommitHash.bat`); the next line, "Mopic
+  release tag", names the nearest Mopic release (`v*`). A checkout without the `joeyhodge/*` tags (CI: they are local
+  tags, not on mopiclabs/UEVR) falls back to plain `git describe --tags`, the nearest Mopic release, as before.
 - Lineage: until 2026-10 this branch sat on `092826MONO+5_8_3_UEVR` (`49c423e`), which joeyhodge cut from his
   `eBaseballfocused` line (the DIBR / Mono / ProSpi experiments). Every later release tag is on `ue57performance`, and
   the two lines exchange the same changes as cherry-picks with different hashes (common ancestor praydog `4ee5c6b`),

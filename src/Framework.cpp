@@ -478,6 +478,7 @@ Framework::Framework(HMODULE framework_module)
         UEVR_UESDK_COMMIT_HASH, UEVR_TRACKED_DIRTY, UEVR_UESDK_TRACKED_DIRTY);
     spdlog::info("Tag: {}", UEVR_TAG);
     spdlog::info("Commits past tag: {}", UEVR_COMMITS_PAST_TAG);
+    spdlog::info("Mopic release tag: {}", UEVR_MOPIC_TAG); // Mopic: Tag names the joeyhodge base (MakeCommitHash.bat)
     spdlog::info("Branch: {}", UEVR_BRANCH);
     spdlog::info("Total commits: {}", UEVR_TOTAL_COMMITS);
     spdlog::info("Build date: {}", UEVR_BUILD_DATE);
