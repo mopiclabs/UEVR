@@ -319,7 +319,7 @@ int test_native_frame_adapters() {
                 ++pos; ++submits;
             }
         }
-        expect(copies == (std::string(backend) == "D3D11" ? 3 : 4) &&
+        expect(copies == (std::string(backend) == "D3D11" ? 2 : 3) &&
             deferred_pair_copies == (std::string(backend) == "D3D11" ? 0 : 2) &&
             submits == (std::string(backend) == "D3D11" ? 4 : 5),
             "expected backend copy/submit coverage (update fixture for new paths)");
@@ -361,6 +361,22 @@ int test_native_frame_adapters() {
             "production selection uses the tested unchanged frame-window helper");
         expect(selector.find("shadow_window") == std::string::npos && selector.find("Shadow::") == std::string::npos,
             "shadow verdict cannot control production selection");
+    }
+    // Mopic: the live resolution change holds consume the packet in MopicNativeSubmitD3D11/12.cpp, one site per
+    // backend, with the same retained-packet record as the sites counted above (whose counts are upstream's).
+    for (const auto backend : {"D3D11", "D3D12"}) {
+        const auto file = "src/mods/vr/MopicNativeSubmit" + std::string(backend) + ".cpp";
+        const auto code = source(file.c_str());
+        size_t pos = 0, copies = 0;
+        while ((pos = code.find("->note_native_stereo_frame_packet_consumed(", pos)) != std::string::npos) {
+            const auto before = code.substr(pos > 750 ? pos - 750 : 0, pos > 750 ? 750 : pos);
+            expect(before.find("record_native_frame_stage(*native_stereo_packet, native_frame_ticket") != std::string::npos &&
+                before.find("Stage::copy_recorded") != std::string::npos,
+                "every Mopic consume site records retained packet, not newest global packet");
+            ++pos;
+            ++copies;
+        }
+        expect(copies == 1, "expected Mopic hold copy coverage (update fixture for new Mopic paths)");
     }
     return failures;
 }
