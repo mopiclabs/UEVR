@@ -40481,9 +40481,7 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
     utility::ScopeGuard naruto_slate_scope_guard{restore_naruto_slate_scope};
 
     slate_resource->get_mutable_resource() = ui_target;
-    g_hook->m_last_legacy_slate_redirect_ns.store(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
-        std::memory_order_relaxed);
+    g_hook->note_legacy_slate_redirect();
 
     // To be seen if we need to resort to a MidHook on this function if the parameters
     // are wildly different between UE versions.

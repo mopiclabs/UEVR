@@ -6188,6 +6188,21 @@ bool D3D12Component::setup() {
     return true;
 }
 
+void D3D12Component::OpenXR::wait_for_all_copies() {
+    std::scoped_lock _{this->mtx};
+
+    for (auto& it : this->contexts) {
+        if (it.second.num_textures_acquired > 0) {
+            release_acquired(it.first);
+        }
+
+        for (auto& texture_ctx : it.second.texture_contexts) {
+            // Bounded: runs on the present thread under the OpenXR mutex; a paused GPU must not wedge it.
+            texture_ctx->commands.wait(2000);
+        }
+    }
+}
+
 void D3D12Component::OpenXR::initialize(XrSessionCreateInfo& session_info) {
     std::scoped_lock _{this->mtx};
 
