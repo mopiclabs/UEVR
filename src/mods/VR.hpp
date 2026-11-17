@@ -355,6 +355,9 @@ public:
     };
 
     ExitSessionResult end_openxr_session_for_exit();
+    // on_post_present, after the session was ended for the game's exit: true when the Present's VR work is skipped
+    // (the session stays ended, or OpenXR was reinitialized). MopicVR.cpp.
+    bool handle_session_ended_for_exit(VRRuntime* runtime);
 
     bool is_hmd_active() const {
         if (m_disable_vr) {
@@ -2236,6 +2239,7 @@ private:
     // VR_SubmitOncePerEngineFrame: this Present pass skipped the VR work (should_skip_duplicate_present), and when the
     // engine frame counter last moved.
     bool should_skip_duplicate_present(VRRuntime* runtime);
+    void begin_duplicate_present_check(); // on_present: a new Present pass, and whether the engine frame moved (MopicVR.cpp)
     bool m_skipped_duplicate_present{false};
     uint64_t m_skipped_duplicate_presents{0};
     int m_last_advanced_frame_count{-1};

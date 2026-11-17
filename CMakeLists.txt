@@ -1664,6 +1664,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/FrameworkConfig.cpp"
 	"src/mods/ImGuiThemeHelpers.cpp"
 	"src/mods/LuaLoader.cpp"
+	"src/mods/MopicVR.cpp"
 	"src/mods/PluginLoader.cpp"
 	"src/mods/RenderInspector.cpp"
 	"src/mods/UObjectHook.cpp"
