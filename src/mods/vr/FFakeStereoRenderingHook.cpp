@@ -103,6 +103,7 @@
 #include "HiFiRushRendererEntry.hpp"
 #include "SifuRendererEntry.hpp"
 #include "B1RendererEntry.hpp"
+#include "B1RendererFallback.hpp"
 #include "SatisfactoryRuntime.hpp"
 #include "SifuMeshCommands.hpp"
 #include "DuneFrameHandoff.hpp"
@@ -11455,13 +11456,13 @@ std::optional<uintptr_t> resolve_begin_rendering_viewfamilies_from_stack(
 {
     if (b1_is_supported_renderer_runtime()) {
         const auto candidate = get_b1_callable_renderer_range(direct_callback_return, excluded_viewport_draw);
-        if (!candidate) {
-            SPDLOG_WARN_ONCE("[B1][NativeStereoFix] Renderer callback/ABI not validated; preserving the original renderer without a size-based stack fallback");
-            return std::nullopt;
+        // Mopic: a rejected adapter falls through to the callback-caller path below (B1RendererFallback.hpp).
+        if (uevr::b1::resolver_step(true, candidate.has_value()) == uevr::b1::ResolverStep::use_adapter_entry) {
+            SPDLOG_INFO("[B1][NativeStereoFix] Validated singular renderer entry {:x} from callback {:x}; family FrameNumber +0x7C, SDK layout unchanged",
+                candidate->begin, direct_callback_return);
+            return candidate->begin;
         }
-        SPDLOG_INFO("[B1][NativeStereoFix] Validated singular renderer entry {:x} from callback {:x}; family FrameNumber +0x7C, SDK layout unchanged",
-            candidate->begin, direct_callback_return);
-        return candidate->begin;
+        SPDLOG_WARN_ONCE("[B1][NativeStereoFix] Renderer callback/ABI not validated; falling back to the callback-caller path");
     }
 
     {

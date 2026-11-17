@@ -2646,6 +2646,7 @@ void test_ktjl_hook_contracts() {
 #include "GalacticRacerBinkTests.hpp"
 #include "GalacticRacerBinkSeekTests.hpp"
 #include "DeadAsDiscoNativeFixTests.hpp"
+#include "B1RendererFallbackTests.hpp"
 #include "GearsEDayNativeFixTests.hpp"
 #include "FinalFantasyResonanceTests.hpp"
 #include "ShippingSceneViewTests.hpp"
@@ -2663,6 +2664,7 @@ int main(int argc, char** argv) {
     pbz_ui_tests::run(expect);
     cvar_existing_priority_tests::run(expect);
     b1_renderer_tests::run(expect);
+    b1_renderer_fallback_tests::run(expect);
     if (argc == 3 && std::string_view{argv[1]} == "--glory-fname-image") { glory_fname_tests::shipping_image(argv[2], expect); }
     test_pre57_ui_resources();
     test_pre57_ui_safety();

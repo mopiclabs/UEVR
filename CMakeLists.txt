@@ -1745,6 +1745,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/AutoResGpu.hpp"
 	"src/mods/vr/AutoResPolicy.hpp"
 	"src/mods/vr/B1RendererEntry.hpp"
+	"src/mods/vr/B1RendererFallback.hpp"
 	"src/mods/vr/BodycamTextureLayout.hpp"
 	"src/mods/vr/Borderlands4Slate.hpp"
 	"src/mods/vr/BreathedgeInventoryPolicy.hpp"
