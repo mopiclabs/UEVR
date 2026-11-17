@@ -2248,6 +2248,7 @@ private:
     // VR_AutoRes (update_autores): the controller, the last engine stall (loading) and frame generation (more Presents
     // than engine frames over a second).
     void update_autores();
+    void tick_autores_frame_bound_detect(sdk::UGameEngine* engine, float delta); // on_pre_engine_tick
     AutoResController m_autores_controller{};
     std::chrono::steady_clock::time_point m_last_engine_stall{};
     std::chrono::steady_clock::time_point m_autores_last_present{};

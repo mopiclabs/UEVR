@@ -5057,16 +5057,7 @@ void VR::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     const auto previous_engine_tick = m_last_engine_tick.load(std::memory_order_relaxed);
     const bool hitch_diagnostics_enabled = m_enable_hitch_diagnostics->value();
 
-    // VR_AutoResFrameBoundDetect: the tick's game time against the wall time, and once the engine's frame rate settings.
-    if (m_autores->value() && m_autores_frame_bound_detect->value()) {
-        m_autores_tick_clock.on_tick(delta);
-
-        if (!m_autores_engine_frame_rate_read) {
-            m_autores_engine_frame_rate_read = true;
-            m_autores_engine_frame_rate = read_engine_frame_rate(engine);
-            m_autores_engine_frame_rate_ready.store(true, std::memory_order_release);
-        }
-    }
+    tick_autores_frame_bound_detect(engine, delta); // Mopic: VR_AutoResFrameBoundDetect (next to update_autores)
 
     m_cvar_manager->on_pre_engine_tick(engine, delta);
     if (!hitch_diagnostics_enabled) {
@@ -8966,6 +8957,20 @@ void VR::update_autores() {
         .test_level = m_autores_test_level->value(),
         .test_internal = m_autores_test_internal->value(),
     });
+}
+
+// VR_AutoResFrameBoundDetect, from on_pre_engine_tick: the tick's game time against the wall time, and once the
+// engine's frame rate settings.
+void VR::tick_autores_frame_bound_detect(sdk::UGameEngine* engine, float delta) {
+    if (m_autores->value() && m_autores_frame_bound_detect->value()) {
+        m_autores_tick_clock.on_tick(delta);
+
+        if (!m_autores_engine_frame_rate_read) {
+            m_autores_engine_frame_rate_read = true;
+            m_autores_engine_frame_rate = read_engine_frame_rate(engine);
+            m_autores_engine_frame_rate_ready.store(true, std::memory_order_release);
+        }
+    }
 }
 
 void VR::on_present() {
