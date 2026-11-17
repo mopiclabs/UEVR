@@ -39497,11 +39497,13 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
     } else if (!supports_ue55_dedicated_ui_target_for_current_game()) {
         const auto window = (uintptr_t)ue55_inputs.window;
 
-        // Mopic: a search that found nothing is tried again once a second (SlateViewportOffset.hpp).
+        // Mopic: a search that failed because the game has no viewport yet is tried again once a second
+        // (SlateViewportOffset.hpp).
         static uevr::slate_viewport_offset::Discovery s_viewport_offset_discovery{};
         const auto viewport_offset_attempts_before = s_viewport_offset_discovery.attempts;
+        bool viewport_member_null = false;
         const auto viewport_offset = uevr::slate_viewport_offset::resolve(s_viewport_offset_discovery,
-            std::chrono::steady_clock::now(), [&]() -> std::optional<size_t> {
+            std::chrono::steady_clock::now(), [&]() -> uevr::slate_viewport_offset::Attempt {
             std::optional<size_t> result{};
             const auto module_within = utility::get_module_within(g_hook->m_slate_thread_hook.target_address());
 
@@ -39511,14 +39513,14 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
             // and so, the hook must be temporarily unhooked
             if (!module_within) {
                 SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] Failed to get module within for target address!");
-                return result;
+                return {result, viewport_member_null};
             }
 
             SPDLOG_DEBUG("[SlateRHIRenderer::DrawWindow_RenderThread] Module within: {:x}", (uintptr_t)*module_within);
 
             if (!g_hook->m_slate_thread_hook.disable().has_value()) {
                 SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] Failed to disable slate thread hook!");
-                return result;
+                return {result, viewport_member_null};
             }
 
             utility::ScopeGuard guard{[&]() {
@@ -39653,6 +39655,7 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
                         const auto value = *(uintptr_t***)((uintptr_t)*reg + offset);
 
                         if (value == nullptr || IsBadReadPtr((void*)value, sizeof(void*))) {
+                            viewport_member_null = viewport_member_null || value == nullptr;
                             SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] Skipping invalid offset at {:x}!", (uintptr_t)value);
                             return utility::ExhaustionResult::CONTINUE;
                         }
@@ -39693,12 +39696,17 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
                 SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] Failed to find viewport offset!");
             }
 
-            return result;
+            return {result, viewport_member_null};
         });
 
         if (s_viewport_offset_discovery.attempts != viewport_offset_attempts_before) {
             if (viewport_offset && s_viewport_offset_discovery.attempts > 1) {
                 SPDLOG_INFO("[SlateRHIRenderer::DrawWindow_RenderThread] Found the viewport offset on attempt {}", s_viewport_offset_discovery.attempts);
+            } else if (s_viewport_offset_discovery.stopped) {
+                if (s_viewport_offset_discovery.attempts > 1) {
+                    SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] No viewport offset on attempt {}, and not for want of a viewport; not trying again",
+                        s_viewport_offset_discovery.attempts);
+                }
             } else if (uevr::slate_viewport_offset::gave_up(s_viewport_offset_discovery)) {
                 SPDLOG_ERROR("[SlateRHIRenderer::DrawWindow_RenderThread] No viewport offset after {} attempts; not trying again",
                     s_viewport_offset_discovery.attempts);
