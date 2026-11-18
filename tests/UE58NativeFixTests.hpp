@@ -4,6 +4,11 @@
 #include <utility>
 #include <vector>
 #include "mods/vr/UE58NativeFix.hpp"
+#include "mods/vr/NativeStereoCopyExtent.hpp"
+#include "mods/vr/ParadoxDriveRHI.hpp"
+#include "mods/vr/UE584Development.hpp"
+#include "fixtures/UE584StockABI.hpp"
+#include "fixtures/UE584DevelopmentABI.hpp"
 
 namespace ue58_native_tests {
 namespace n = uevr::ue58_native;
@@ -87,13 +92,133 @@ struct NativeCalls {
     }
 };
 
+template<class Expect> void test_copy_extent(Expect&& expect) {
+    namespace c = uevr::native_stereo_copy;
+    expect(n::needs_copy_extent_revalidation(L"D:/Games/ParadoxDrive-Win64-Shipping.exe", 0x50008),
+        "ParadoxDrive UE5.8 revalidates Native Fix copy extents after deferred scene adoption");
+    for (const auto version : {0x4001bu, 0x50007u, 0x50009u, 0x60000u, 0u}) {
+        expect(!n::needs_copy_extent_revalidation(L"ParadoxDrive-Win64-Shipping.exe", version),
+            "The ParadoxDrive copy follow-up does not change other engine intervals");
+    }
+    for (const auto name : {L"ParadoxDrive.exe", L"Other-Win64-Shipping.exe",
+        L"ParadoxDrive-Win64-Shipping.exe.old", L"D:/ParadoxDrive-Win64-Shipping.exe/Other.exe"}) {
+        expect(!n::needs_copy_extent_revalidation(name, 0x50008),
+            "The ParadoxDrive copy follow-up requires the exact game basename");
+    }
+
+    // The live resize rebuilt XR before the engine published its smaller target.
+    c::CopyExtent extent{true, true, true, 2734, 1336, 3708, 1812, 1367, 1336};
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::rebuild,
+        "ParadoxDrive rejects the recorded stale 3708x1812 copy against 2734x1336 resources");
+    extent.source_width = 3708; extent.source_height = 1812;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::wait_for_scene,
+        "ParadoxDrive waits while the old scene target is still published, even if its cache matches");
+    extent.source_width = 2734; extent.source_height = 1336;
+    extent.cached_width = 2734; extent.cached_height = 1336;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::unchanged,
+        "ParadoxDrive resumes only after ordinary setup has refreshed both cached dimensions");
+    extent.cached_height = 1812;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::rebuild,
+        "A matching width cannot hide a stale height or permit an out-of-bounds source box");
+    extent.cached_height = 1336; extent.cached_width = 3708;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::rebuild,
+        "A matching height cannot hide a stale right-eye destination offset");
+    extent.external_scene = false;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::wait_for_scene,
+        "A desktop backbuffer cannot stand in for the ParadoxDrive packed engine target");
+    extent.external_scene = true; extent.descriptor_valid = false;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::wait_for_scene,
+        "ParadoxDrive does not rebuild from an incompatible native resource");
+    extent.scoped = false;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::unchanged,
+        "The copy policy is inert outside the existing Native Fix OpenXR title guard");
+
+    extent = {true, true, true, 4944, 2416, 2734, 1336, 2472, 2416};
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::rebuild,
+        "Growing resolution also refreshes copy and spectator resources instead of clipping the new eye pair");
+    extent.cached_width = 4944; extent.cached_height = 2416;
+    expect(c::copy_extent_action(extent) == c::CopyExtentAction::unchanged,
+        "The corrected resolution does not cause a steady-state rebuild loop");
+}
+
+template<class Expect> void test_development(Expect&& expect) {
+    namespace d = uevr::ue584_development;
+    namespace f = uevr::tests::ue584_development;
+    namespace s = uevr::tests::ue584_stock;
+    Memory memory;
+    const auto base = memory.base, copy = base + 0x100, deleting = base + 0x700, destroy = base + 0x800;
+    const auto table = base + 0x6000, constructor = base + 0x2000, renderer = base + 0x3000;
+    memory.put(constructor + 0x39, s::view_identity);
+    memory.put(constructor + 0x3af, s::view_rects);
+    memory.put(constructor + 0x495, s::view_projection);
+    memory.put(constructor + 0x53d, f::view_stereo);
+    memory.put(renderer + 0x30, f::renderer);
+    memory.put(copy, f::family_copy); memory.put(deleting, f::family_delete); memory.put(destroy, f::family_destroy);
+    memory.put(table, deleting);
+    memory.put(copy + 0x25, int32_t(table - (copy + 0x29)));
+    memory.put(deleting + 0x10, int32_t(destroy - (deleting + 0x14)));
+    memory.put(destroy + 9, int32_t(table - (destroy + 0xd)));
+    const auto size = [&](uintptr_t address) -> size_t {
+        return address == copy ? f::family_copy.size() : address == deleting ? f::family_delete.size() :
+            address == destroy ? f::family_destroy.size() : 0;
+    };
+    const auto resolve = [&] { return d::family_functions(memory.view(), copy, base, memory.bytes.size(), size); };
+    const auto family = resolve();
+    expect(d::view_layout(memory.view(), constructor) && d::renderer_layout(memory.view(), renderer) &&
+        family && family->development_layout && family->copy == copy && family->destroy == destroy && family->vtable == table,
+        "independent Development bytes prove eye fields, the linked renderer and the larger family's native ownership");
+    expect(!n::view_layout(memory.view(), constructor) && !n::renderer_layout(memory.view(), renderer) &&
+        !n::family_functions(memory.view(), copy, base, memory.bytes.size(), size),
+        "Development cannot inherit Shipping constructor, renderer or placement-storage authorization");
+    const auto original = memory;
+    const auto mutate = [&](uintptr_t address, const auto& mask, auto&& check) {
+        for (size_t i = 0; i < mask.size(); ++i) {
+            if (!mask[i]) { continue; }
+            memory = original;
+            memory.bytes[address - base + i] ^= 1;
+            expect(!check(), "changed Development identity, ownership or control flow rejects before engine calls");
+        }
+    };
+    const auto view = [&] { return d::view_layout(memory.view(), constructor); };
+    const auto render = [&] { return d::renderer_layout(memory.view(), renderer); };
+    mutate(constructor + 0x39, n::contract::view_identity_mask, view);
+    mutate(constructor + 0x3af, n::contract::view_rects_mask, view);
+    mutate(constructor + 0x495, n::contract::view_projection_mask, view);
+    mutate(constructor + 0x53d, d::contract::view_stereo_mask, view);
+    mutate(renderer + 0x30, d::contract::renderer_mask, render);
+    mutate(copy, uevr::ue59_native::contract::development_family_copy_mask, resolve);
+    mutate(deleting, uevr::ue59_native::contract::development_family_delete_mask, resolve);
+    mutate(destroy, d::contract::family_destroy_mask, resolve);
+    memory = original; memory.put(destroy + 9, int32_t(table + 8 - (destroy + 0xd)));
+    expect(!resolve(), "the Development base destructor must restore the same vtable as its copy constructor");
+    memory = original; memory.put(table, deleting + 1);
+    expect(!resolve(), "a Development interior/deleting/context-destructor mismatch rejects");
+    memory = original; memory.readable = false;
+    expect(!view() && !render() && !resolve(), "unreadable Development code cannot authorize a write or native call");
+    memory = original; memory.executable = false;
+    expect(!view() && !render() && !resolve(), "non-executable Development candidates reject");
+    memory = original;
+    expect(!d::view_layout(memory.view(), UINTPTR_MAX - 16) &&
+        !d::family_functions(memory.view(), copy, base, memory.bytes.size(), [](uintptr_t) -> size_t { return 0; }),
+        "Development requires bounded addresses and original function starts/sizes");
+}
+
 template<class Expect> void run(Expect&& expect) {
+    test_copy_extent(expect);
+    test_development(expect);
     using namespace n::contract;
     expect(n::needs_guarded_fallback(L"D:/Games/SLASHER-Win64-Shipping.exe") &&
         n::needs_guarded_fallback(L"d:\\Games\\slasher-win64-shipping.EXE"), "changed Fatekeeper code must fail closed rather than return to the crashing path");
+    for (auto name : {L"ParadoxDrive-Win64-Shipping.exe", L"D:/Games/ParadoxDrive/ParadoxDrive-Win64-Shipping.exe",
+            L"d:\\Games\\PARADOXDRIVE-WIN64-SHIPPING.EXE"}) {
+        expect(n::is_paradox_drive(name) && n::needs_guarded_fallback(name),
+            "ParadoxDrive keeps its code-validated linked route or fails closed after an update");
+    }
     for (auto name : {L"", L"Other.exe", L"xSLASHER-Win64-Shipping.exe", L"SLASHER-Win64-Shipping.exe.old",
-            L"D:/SLASHER-Win64-Shipping.exe/Other.exe"}) {
-        expect(!n::needs_guarded_fallback(name), "other titles require actual code capability rather than a substring or patch-number guess");
+            L"D:/SLASHER-Win64-Shipping.exe/Other.exe", L"ParadoxDrive.exe", L"xParadoxDrive-Win64-Shipping.exe",
+            L"ParadoxDrive-Win64-Shipping.exe.old", L"D:/ParadoxDrive-Win64-Shipping.exe/Other.exe"}) {
+        expect(!n::needs_guarded_fallback(name) && !n::is_paradox_drive(name),
+            "other titles and launchers require actual code capability rather than a substring or patch-number guess");
     }
     Memory m;
     const auto b = m.base, copy = b + 0x100, deleting = b + 0x700, destroy = b + 0x800;
@@ -143,6 +268,66 @@ template<class Expect> void run(Expect&& expect) {
     m = good;
     expect(!n::family_functions(m.view(), copy, b, m.bytes.size(), [](uintptr_t) -> size_t { return 0; }),
         "native family calls require original function boundaries, not interior pattern matches");
+
+    {
+        Memory shifted;
+        shifted.put(ctor + 0x39, view_identity_code);
+        shifted.put(ctor + 0x3af, view_rects_code);
+        shifted.put(ctor + 0x495, view_projection_code);
+        shifted.put(ctor + 0x53d, view_stereo_code);
+        expect(n::view_layout(shifted.view(), ctor),
+            "independently verified stock UE5.8.4 Shipping and ParadoxDrive share the shifted constructor proof");
+        const auto before = shifted;
+        const auto mutate_shifted = [&](uintptr_t address, const auto& mask) {
+            for (size_t i = 0; i < mask.size(); ++i) {
+                if (!mask[i]) { continue; }
+                shifted = before;
+                shifted.bytes[address - b + i] ^= 1;
+                expect(!n::view_layout(shifted.view(), ctor),
+                    "changed stock UE5.8.4 member access or control flow rejects before eye writes or engine calls");
+            }
+        };
+        mutate_shifted(ctor + 0x39, view_identity_mask);
+        mutate_shifted(ctor + 0x3af, view_rects_mask);
+        mutate_shifted(ctor + 0x495, view_projection_mask);
+        mutate_shifted(ctor + 0x53d, view_stereo_mask);
+        shifted = before;
+        shifted.readable = false;
+        expect(!n::view_layout(shifted.view(), ctor), "unreadable stock Shipping constructor code rejects");
+        shifted = before;
+        shifted.executable = false;
+        expect(!n::view_layout(shifted.view(), ctor), "non-executable stock Shipping code rejects");
+        shifted = before;
+        expect(!n::view_layout(shifted.view(), 0) &&
+            !n::view_layout(shifted.view(), UINTPTR_MAX - 0x10) &&
+            !n::view_layout(shifted.view(), ctor + 1),
+            "null, overflowing and interior stock Shipping constructor candidates cannot authorize the layout");
+    }
+
+    {
+        namespace stock = uevr::tests::ue584_stock;
+        Memory captured;
+        captured.put(ctor + 0x39, stock::view_identity);
+        captured.put(ctor + 0x3af, stock::view_rects);
+        captured.put(ctor + 0x495, stock::view_projection);
+        captured.put(ctor + 0x53d, stock::view_stereo);
+        captured.put(renderer + 0x2a, stock::renderer_span);
+        captured.put(renderer + 0x19c, stock::renderer_frame);
+        captured.put(copy, stock::family_copy);
+        captured.put(deleting, stock::family_delete);
+        captured.put(destroy, stock::family_destroy);
+        captured.put(table, deleting);
+        captured.put(copy + 0x2b, int32_t(table - (copy + 0x2f)));
+        captured.put(deleting + 0x10, int32_t(destroy - (deleting + 0x14)));
+        captured.put(destroy + 9, int32_t(table - (destroy + 0xd)));
+        const auto family = n::family_functions(captured.view(), copy, b, captured.bytes.size(), size);
+        expect(n::view_layout(captured.view(), ctor) && n::renderer_layout(captured.view(), renderer) &&
+            family && family->copy == copy && family->destroy == destroy && family->vtable == table,
+            "independent stock UE5.8.4 Shipping bytes prove the linked view/renderer and family ownership contracts");
+        captured.bytes[ctor - b + 0x53d] ^= 1;
+        expect(!n::view_layout(captured.view(), ctor),
+            "a changed stock constructor cannot use the confirmed Shipping eye layout");
+    }
 
     for (auto dims : {std::pair{1024,1024}, std::pair{2472,2416}, std::pair{3500,3100}, std::pair{8192,4096}}) {
         for (int letterbox : {0, 20, 100}) {
@@ -245,7 +430,7 @@ template<class Expect> void shipping_image(const char* path, Expect&& expect) {
         }
     } image;
     image.file.open(path, std::ios::binary | std::ios::ate);
-    if (!image.file) { expect(false,"open exact Fatekeeper shipping image"); return; }
+    if (!image.file) { expect(false,"open exact analyzed UE5.8 shipping image"); return; }
     image.size = static_cast<uint64_t>(image.file.tellg());
     std::array<uint8_t,65536> header{};
     image.file.seekg(0);
@@ -288,16 +473,54 @@ template<class Expect> void shipping_image(const char* path, Expect&& expect) {
         const auto e=std::lower_bound(entries.begin(),entries.end(),rva,[](auto e,uint32_t rva) { return e[0]<rva; });
         return e!=entries.end() && (*e)[0]==rva && (*e)[1]>(*e)[0] ? (*e)[1]-(*e)[0] : 0;
     };
+    if (image.size == 331843000 && image.base == 0x140000000) {
+        namespace d = uevr::ue584_development;
+        constexpr uintptr_t constructor = 0x145e36770, renderer = 0x147973b60;
+        constexpr uintptr_t copy = 0x145e38330, destroy = 0x145e3c9e0, table = 0x14fdc9398;
+        const auto family = d::family_functions(memory, copy, image.base, image.module_size, size);
+        expect(d::view_layout(memory, constructor) && d::renderer_layout(memory, renderer) &&
+            family && family->development_layout && family->destroy == destroy && family->vtable == table,
+            "actual Development EXE/PDB code proves its independent linked renderer and full native family ownership");
+        expect(!n::view_layout(memory, constructor) && !n::renderer_layout(memory, renderer) &&
+            !n::family_functions(memory, copy, image.base, image.module_size, size),
+            "the actual Development binary is never authorized by Shipping layout contracts");
+        namespace p = uevr::paradoxdrive_rhi;
+        constexpr uintptr_t callback = 0x146546610, builder = 0x146607330;
+        const auto scan = [&](uintptr_t cursor, size_t, const char*) -> std::optional<uintptr_t> {
+            return cursor <= builder ? std::optional<uintptr_t>{builder} : std::nullopt;
+        };
+        expect(p::classify_input(memory, L"UnrealGame.exe", 0x50008, image.base, image.module_size,
+            callback, scan, size) == p::Input::VerifiedRDG,
+            "actual Development callback and constructor prove RDG +0xc0 rather than the legacy allocator root");
+        expect(!d::view_layout(memory, constructor+1) &&
+            !d::family_functions(memory, copy+1, image.base, image.module_size, size),
+            "interior Development addresses cannot authorize private calls");
+        return;
+    }
     const bool roadtruckers = image.size==186809344;
-    expect((image.size==195425280 || roadtruckers) && image.base==0x140000000,
-        "UE5.8 fixture is an analyzed complete Fatekeeper or RoadTruckers build");
-    const uintptr_t constructor=roadtruckers ? 0x142f9c3e0 : 0x142f43710;
-    const uintptr_t renderer=roadtruckers ? 0x143befbb0 : 0x143b8c630;
-    const uintptr_t copy=roadtruckers ? 0x142f9dd20 : 0x142f45050;
-    const uintptr_t destroy=roadtruckers ? 0x142fa0180 : 0x142f47530;
-    const uintptr_t table=roadtruckers ? 0x148967ea0 : 0x148eba550;
+    const bool paradoxdrive = image.size==167882752;
+    const bool stock584 = image.size==165862328;
+    const bool analyzed = (image.size==195425280 || roadtruckers || paradoxdrive || stock584) && image.base==0x140000000;
+    expect(analyzed, "UE5.8 fixture is an analyzed complete stock Shipping, Fatekeeper, RoadTruckers or ParadoxDrive build");
+    if (!analyzed) { return; }
+    const uintptr_t constructor=stock584 ? 0x142f02bb0 : paradoxdrive ? 0x142f098f0 : roadtruckers ? 0x142f9c3e0 : 0x142f43710;
+    const uintptr_t renderer=stock584 ? 0x143b4cc80 : paradoxdrive ? 0x143b53a40 : roadtruckers ? 0x143befbb0 : 0x143b8c630;
+    const uintptr_t copy=stock584 ? 0x142f042d0 : paradoxdrive ? 0x142f0b010 : roadtruckers ? 0x142f9dd20 : 0x142f45050;
+    const uintptr_t destroy=stock584 ? 0x142f06690 : paradoxdrive ? 0x142f0d3d0 : roadtruckers ? 0x142fa0180 : 0x142f47530;
+    const uintptr_t table=stock584 ? 0x147cb4820 : paradoxdrive ? 0x147df9c90 : roadtruckers ? 0x148967ea0 : 0x148eba550;
     expect(n::view_layout(memory,constructor) && n::renderer_layout(memory,renderer),
         "actual unmodified game code proves projection/rect/stereo identity and linked renderer argument flow");
+    if (paradoxdrive || stock584) {
+        namespace p = uevr::paradoxdrive_rhi;
+        const auto callback=stock584 ? uintptr_t{0x143202870} : uintptr_t{0x143209630};
+        const auto builder=stock584 ? uintptr_t{0x14325a3d0} : uintptr_t{0x143261190};
+        expect(p::render_texture_layout(memory,image.base,image.module_size,callback,size) &&
+            p::builder_layout(memory,image.base,image.module_size,builder,size),
+            "actual stock/ParadoxDrive RDG overload and constructor prove the immediate-list reference before unwrapping");
+        expect(!p::render_texture_layout(memory,image.base,image.module_size,callback+1,size) &&
+            !p::builder_layout(memory,image.base,image.module_size,builder+1,size),
+            "actual interior RDG code addresses cannot authorize the borrowed reference");
+    }
     const auto f=n::family_functions(memory,copy,image.base,image.module_size,size);
     expect(f && f->destroy==destroy && f->vtable==table,
         "actual game copy and base destructor resolve through original unwind boundaries and shared native vtable");

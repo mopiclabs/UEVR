@@ -35,6 +35,8 @@
 #include "Mod.hpp"
 #include "vr/SteamFrameInput.hpp"
 #include "vr/GamepadRecovery.hpp"
+#include "vr/NativeOpenXRAsyncWorker.hpp"
+#include "vr/NativeOpenXRWaitOnly.hpp"
 
 #undef max
 #include <tracy/Tracy.hpp>
@@ -42,6 +44,8 @@
 class VR : public Mod {
 public:
     nlohmann::json get_support_diagnostics();
+    nlohmann::json get_health_snapshot();
+    void draw_health_diagnostics();
     ~VR() override;
 
     enum RenderingMethod {
@@ -149,6 +153,7 @@ public:
             {"Keybinds", false},
             {"Console/CVars", true},
             {"Compatibility", true},
+            {"Health / Diagnostics", false},
             {"Debug", true},
         };
     }
@@ -711,18 +716,8 @@ public:
     // Mopic: the VR_NativeStereoFix* and VR_ExperimentRightEyeRTShare* getters UEVR upstream does not have.
 #include "MopicVR.inl"
 
-    bool is_native_stereo_fix_texture_array_submit_enabled() const {
-        if (uevr::nascar::is_target()) { return false; }
-        const auto runtime = get_runtime();
-        return m_native_stereo_fix_texture_array_submit->value() &&
-            is_native_stereo_fix_enabled() &&
-            !is_native_stereo_fix_same_pass_enabled() &&
-            m_is_d3d12 &&
-            runtime != nullptr &&
-            runtime->is_openxr() &&
-            !is_using_afr() &&
-            m_rendering_method->value() == RenderingMethod::NATIVE_STEREO;
-    }
+    bool is_native_stereo_fix_texture_array_submit_enabled() const;
+    bool is_native_stereo_array_ready() const;
 
     bool is_stalker2_native_fix_experiment_enabled() const;
     bool is_stalker2_sharpen_priority_enabled() const {
@@ -864,10 +859,11 @@ public:
     void note_stalker2_transition_stress(const char* reason);
     bool should_defer_stalker2_openxr_frame_for_transition(const char* reason);
     bool is_native_openxr_async_wait_active() const;
+    uevr::openxr_wait::Scope native_openxr_wait_only_scope() const;
+    const char* native_openxr_wait_only_status() const;
     bool request_native_openxr_async_wait();
-    void ensure_native_openxr_async_wait_worker();
     void stop_native_openxr_async_wait_worker();
-    void native_openxr_async_wait_worker_loop(std::stop_token stop_token);
+    void shutdown_native_openxr_async_wait_worker();
 
     bool is_ghosting_fix_enabled() const {
         if (uevr::nascar::is_target()) { return false; }
@@ -1069,7 +1065,7 @@ private:
     bool is_any_action_down();
     bool can_recover_gamepad_input() const;
     void update_shf_auto_2d_mode(sdk::UGameEngine* engine);
-    void update_dispatch_auto_2d_mode(sdk::UGameEngine* engine);
+    void update_dispatch_movie_state(sdk::UGameEngine* engine);
     void update_mixtape_auto_2d_mode(sdk::UGameEngine* engine);
     void update_the_sinking_city_2_bink_ui_state(sdk::UGameEngine* engine);
     void update_halo_electra_cinematic_state(sdk::UGameEngine* engine);
@@ -1117,6 +1113,13 @@ private:
 
     std::optional<std::string> reinitialize_openxr() {
         spdlog::info("Reinitializing OpenXR");
+        m_native_openxr_async_worker.cancel_pending();
+        if (m_native_openxr_async_worker.busy()) {
+            // Reinitialization is retried by post-present; never join an XR wait
+            // while holding a lock its callback might need.
+            return "Waiting for the previous OpenXR worker before reinitializing";
+        }
+        stop_native_openxr_async_wait_worker();
         std::scoped_lock _{m_openvr_mtx};
 
         if (m_is_d3d12) {
@@ -1387,9 +1390,6 @@ private:
     std::chrono::steady_clock::time_point m_shf_auto_2d_last_sample{};
     bool m_shf_auto_2d_active{false};
     bool m_shf_auto_2d_previous_mode{false};
-    std::chrono::steady_clock::time_point m_dispatch_auto_2d_last_sample{};
-    bool m_dispatch_auto_2d_active{false};
-    bool m_dispatch_auto_2d_previous_mode{false};
     std::chrono::steady_clock::time_point m_mixtape_auto_2d_last_sample{};
     std::atomic_bool m_mixtape_auto_2d_active{false};
     bool m_mixtape_auto_2d_previous_mode{false};
@@ -1539,6 +1539,9 @@ private:
     const ModCombo::Ptr m_desktop_mirror_mode{ ModCombo::create(generate_name("DesktopSpectatorViewMode"), s_desktop_mirror_mode_names, DESKTOP_MIRROR_FULL) };
     const ModToggle::Ptr m_enable_gui{ ModToggle::create(generate_name("EnableGUI"), true) };
     const ModToggle::Ptr m_enable_depth{ ModToggle::create(generate_name("PassDepthToRuntime"), false, true) };
+    std::string m_health_snapshot_text{}, m_health_export_status{};
+    nlohmann::json m_health_snapshot{};
+    uint64_t m_health_cvar_revision{};
     const ModToggle::Ptr m_enable_hitch_diagnostics{ ModToggle::create(generate_name("EnableHitchDiagnostics"), false, true) };
     // perf.csv / perf-frames.csv next to log.txt (see PerfLog.hpp). Off by default: perf-frames.csv grows by a row per
     // frame for as long as the game runs; the test harness turns it on for its runs.
@@ -1766,6 +1769,7 @@ private:
     const ModToggle::Ptr m_experiment_right_eye_rt_share_cull_gather{ ModToggle::create(generate_name("ExperimentRightEyeRTShareCullGather"), false) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
     const ModToggle::Ptr m_native_stereo_fix_async_openxr_wait{ ModToggle::create(generate_name("NativeStereoFixAsyncOpenXRWait"), false) };
+    const ModToggle::Ptr m_native_openxr_wait_only{ ModToggle::create(generate_name("NativeOpenXRAsyncWaitOnly"), uevr::openxr_wait::default_enabled) };
     const ModToggle::Ptr m_stalker2_native_pair_experiment{ ModToggle::create(generate_name("Stalker2NativePairExperiment"), false) };
     const ModToggle::Ptr m_stalker2_sharpen_priority{ ModToggle::create(generate_name("Stalker2SharpenExistingPriority"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
@@ -1790,6 +1794,7 @@ private:
     const ModToggle::Ptr m_compatibility_head_turn_camera_stabilizer{ ModToggle::create(generate_name("Compatibility_HeadTurnCameraStabilizer"), false, true) };
     const ModToggle::Ptr m_compatibility_ui_layer_pose_telemetry{ ModToggle::create(generate_name("Compatibility_UILayerPoseTelemetry"), false, true) };
     const ModToggle::Ptr m_compatibility_ui_layer_pose_stabilizer{ ModToggle::create(generate_name("Compatibility_UILayerPoseStabilizer"), false, true) };
+    const ModToggle::Ptr m_compatibility_dispatch_world_locked_movies{ ModToggle::create(generate_name("Compatibility_DispatchWorldLockedMovies"), false, true) };
     const ModToggle::Ptr m_compatibility_pre57_slate_ui_observation{ ModToggle::create(generate_name("Compatibility_Pre57SlateUIObservation"), false, true) };
     const ModToggle::Ptr m_compatibility_swgr_bink_seek_budget{ ModToggle::create(generate_name("Compatibility_SWGRBinkSeekBudget"), false, true) };
     const ModToggle::Ptr m_compatibility_swgr_disable_panini{ ModToggle::create(generate_name("Compatibility_SWGRDisablePanini"), false, true) };
@@ -2120,6 +2125,7 @@ public:
             *m_experiment_right_eye_rt_share_cull_gather,
             *m_native_stereo_fix_texture_array_submit,
             *m_native_stereo_fix_async_openxr_wait,
+            *m_native_openxr_wait_only,
             *m_stalker2_native_pair_experiment,
             *m_stalker2_sharpen_priority,
             *m_native_stereo_fix_pair_snapshot,
@@ -2136,6 +2142,7 @@ public:
             *m_compatibility_head_turn_camera_stabilizer,
             *m_compatibility_ui_layer_pose_telemetry,
             *m_compatibility_ui_layer_pose_stabilizer,
+            *m_compatibility_dispatch_world_locked_movies,
             *m_compatibility_pre57_slate_ui_observation,
             *m_compatibility_swgr_bink_seek_budget,
             *m_compatibility_swgr_disable_panini,
@@ -2288,11 +2295,16 @@ private:
     bool m_subnautica2_save_thumbnail_fallback_logged{false};
     bool m_subnautica2_save_thumbnail_guard_warned_exhausted{false};
     bool m_subnautica2_save_thumbnail_guard_found_candidate{false};
-    std::jthread m_native_openxr_async_wait_thread{};
-    std::mutex m_native_openxr_async_wait_mtx{};
-    std::condition_variable m_native_openxr_async_wait_cv{};
-    std::atomic_bool m_native_openxr_async_wait_inflight{false};
-    bool m_native_openxr_async_wait_pending{false};
+    struct NativeOpenXRAsyncRequest {
+        std::shared_ptr<runtimes::OpenXR> runtime;
+        uevr::native_array::FrameKey frame;
+        uint64_t array_generation{};
+        uevr::openxr_wait::Operation operation{uevr::openxr_wait::Operation::array_pre_acquire};
+        uevr::openxr_wait::Reservation wait_only{};
+    };
+    uevr::native_array::AsyncWorker<NativeOpenXRAsyncRequest> m_native_openxr_async_worker;
+    std::atomic<uevr::openxr_wait::Operation> m_native_openxr_async_operation{uevr::openxr_wait::Operation::array_pre_acquire};
+    bool m_native_openxr_wait_only_was_requested{};
     uint32_t m_subnautica2_save_thumbnail_guard_full_sweeps{0};
     uint32_t m_subnautica2_save_thumbnail_guard_patched_objects{0};
     int32_t m_subnautica2_save_thumbnail_guard_cursor{0};

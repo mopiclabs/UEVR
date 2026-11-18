@@ -1,5 +1,9 @@
 #pragma once
 
+namespace uevr::ue59_native::dx11 {
+struct Binding;
+}
+
 #include <sdk/GalacticRacerRuntime.hpp>
 
 #include <memory>
@@ -39,8 +43,10 @@
 #include "Pre57SlateSafety.hpp"
 #include "GalacticRacerOwnedTexture.hpp"
 #include "utility/BufferedRTTextureCall.hpp"
+#include "Subnautica2BetaRenderTarget.hpp"
 #include "StupidNeverDiesUI.hpp"
 #include "NativeFrameDiagnostics.hpp"
+#include "ParadoxDriveRHI.hpp"
 #include "Stalker2NativePolicy.hpp"
 #include "UE57SlateSymbols.hpp"
 #include "utility/NascarHookCompatibility.hpp"
@@ -506,6 +512,7 @@ protected:
     uintptr_t texture_finalize_func{0};
     uintptr_t texture_extract_func{0};
     uintptr_t texture_finalize_callsite{0};
+    std::optional<uevr::subnautica2_beta::FinalizeOutput> subnautica2_beta_finalize_output;
     uintptr_t texture_extract_callsite{0};
 
     std::vector<uint8_t> texture_create_insn_bytes{};
@@ -894,6 +901,7 @@ public:
 
     struct NativeStereoFramePacket {
         std::shared_ptr<const VRRenderTargetManager_Base::SceneCaptureTargetSnapshot> capture{};
+        std::shared_ptr<const uevr::ue59_native::dx11::Binding> ue59_dx11_binding{};
         sdk::FSceneViewFamily* family{};
         sdk::FSceneView* left_view{};
         sdk::FSceneView* right_view{};
@@ -937,7 +945,9 @@ public:
     std::shared_ptr<const NativeStereoFramePacket> get_native_stereo_frame_packet_for_submit(
         int32_t render_frame, uevr::native_frame::Backend backend = uevr::native_frame::Backend::unknown,
         uevr::native_frame::Ticket* diagnostic_ticket = nullptr) const;
-    void note_native_stereo_frame_packet_consumed(uint64_t serial);
+    bool ue59_dx11_split_pending(int32_t render_frame) const;
+    void note_native_stereo_frame_packet_consumed(uint64_t serial,
+        const uevr::ue59_native::dx11::Binding* submitted_dx11_binding = nullptr);
     void reject_native_stereo_frame_packet(uint64_t serial, const char* detail);
     void sync_stalker2_native_experiment(bool enabled);
     uint64_t stalker2_native_epoch() const { return m_stalker2_native_packets.epoch(); }
@@ -1132,6 +1142,10 @@ public:
         return reinterpret_cast<uintptr_t>(m_sceneview_data.constructor_hook.target());
     }
 
+    const std::vector<uint8_t>& get_scene_view_constructor_original_bytes() const {
+        return m_sceneview_data.constructor_hook.original_bytes();
+    }
+
     uintptr_t get_slate_hook_target_address() const {
         if (m_swgr_slate_output_hook) { return m_swgr_slate_output_hook.target_address(); }
         return m_slate_thread_hook.target_address();
@@ -1180,14 +1194,25 @@ public:
     static void pre_render_dune_frame(ISceneViewExtension* extension, void* graph, sdk::FSceneViewFamily& family);
 
     const char* get_ghosting_fix_status_text();
+    const char* try_get_ghosting_fix_status_text() {
+        std::unique_lock lock{m_sceneview_data.mtx, std::try_to_lock};
+        return lock.owns_lock() ? get_ghosting_fix_status_text() : "snapshot busy; refresh later";
+    }
     const char* get_native_stereo_fix_status_text() const;
     bool is_native_stereo_fix_operational() const;
+    bool has_rdg_render_texture_input() const noexcept {
+        return m_render_texture_command_input.load(std::memory_order_acquire) != uevr::paradoxdrive_rhi::Input::LegacyRHI;
+    }
     bool is_hook_provenance_diagnostics_enabled() const noexcept {
         return m_hook_provenance_diagnostics.load(std::memory_order_acquire);
     }
     const char* get_pre57_slate_ui_observation_status() const {
         std::scoped_lock lock{m_pre57_slate_observation_mutex};
         return uevr::pre57_slate::name(m_pre57_slate_observation.state);
+    }
+    const char* try_get_pre57_slate_ui_observation_status() const {
+        std::unique_lock lock{m_pre57_slate_observation_mutex, std::try_to_lock};
+        return lock.owns_lock() ? uevr::pre57_slate::name(m_pre57_slate_observation.state) : "snapshot busy; refresh later";
     }
     uevr::vr_compatibility::UE58DedicatedUICapability get_ue58_dedicated_ui_capability() const {
         return m_ue58_slate_ui_capability.capability.load(std::memory_order_acquire);
@@ -1297,7 +1322,7 @@ private:
     static void calculate_stereo_view_offset(FFakeStereoRendering* stereo, const int32_t view_index, Rotator<float>* view_rotation,
         const float world_to_meters, Vector3f* view_location);
     static Matrix4x4f* calculate_stereo_projection_matrix(FFakeStereoRendering* stereo, Matrix4x4f* out, const int32_t view_index);
-    static void render_texture_render_thread(FFakeStereoRendering* stereo, FRHICommandListImmediate* rhi_command_list,
+    static void render_texture_render_thread(FFakeStereoRendering* stereo, void* command_input,
         FRHITexture2D* backbuffer, FRHITexture2D* src_texture, double window_size);
     static void init_canvas(FFakeStereoRendering* stereo, sdk::FSceneView* view, UCanvas* canvas);
     static uint32_t get_desired_number_of_views_hook(FFakeStereoRendering* stereo, bool is_stereo_enabled);
@@ -1575,6 +1600,7 @@ private:
     std::chrono::steady_clock::duration m_native_stereo_fix_inactive_time{}; // present thread only
     std::chrono::steady_clock::time_point m_native_stereo_fix_watchdog_last{}; // present thread only
     std::atomic<std::shared_ptr<const NativeStereoFramePacket>> m_native_stereo_frame_packet{};
+    std::atomic<uint64_t> m_ue59_dx11_split_clocks{UINT64_MAX};
     uevr::stalker2_native::PacketRing<NativeStereoFramePacket> m_stalker2_native_packets{};
     std::atomic_bool m_stalker2_native_experiment{};
     std::atomic<uint64_t> m_native_stereo_packet_serial{};
@@ -1637,6 +1663,7 @@ private:
     std::unique_ptr<PointerHook> m_calculate_stereo_view_offset_hook_ptr{}; // some games have a short jmp which isnt supported by safetyhook right now so we use pointerhook
     safetyhook::InlineHook m_calculate_stereo_projection_matrix_hook{};
     safetyhook::InlineHook m_render_texture_render_thread_hook{};
+    std::atomic<uevr::paradoxdrive_rhi::Input> m_render_texture_command_input{uevr::paradoxdrive_rhi::Input::LegacyRHI};
     safetyhook::InlineHook m_ue418_oculus_pixel_density_hook{};
     safetyhook::InlineHook m_dune_dlss_add_passes_hook{};
     safetyhook::InlineHook m_dune_ffx_register_frame_resources_hook{};

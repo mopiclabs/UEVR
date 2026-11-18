@@ -23,9 +23,13 @@
 #include "../../GameSpecific.hpp"
 #include "../../VR.hpp"
 #include "../../../utility/Logging.hpp"
+#include "../../../utility/PacingRecorder.hpp"
 #include "OpenXR.hpp"
+#include "../NativeOpenXRArrayPolicy.hpp"
 #include "../SteamFrameBindings.hpp"
 #include "../PerfLogXr.hpp"
+#include "../DispatchMovie.hpp"
+#include "../DispatchMovieOpenXR.hpp"
 
 using namespace nlohmann;
 
@@ -1129,6 +1133,7 @@ bool OpenXR::recover_focused_stale_frame_loop(const char* caller) {
 }
 
 XrResult OpenXR::recover_wedged_frame(const char* reason) {
+    if (native_wait_only_handoff.faulted()) { return XR_ERROR_SESSION_NOT_READY; }
     if (!this->frame_began || this->session == XR_NULL_HANDLE) {
         return XR_SUCCESS;
     }
@@ -1158,6 +1163,7 @@ XrResult OpenXR::recover_wedged_frame(const char* reason) {
 
 bool OpenXR::close_synced_frame_without_layers(const char* reason) {
     std::scoped_lock _{sync_mtx};
+    if (native_wait_only_handoff.faulted()) { return false; }
 
     if (this->session == XR_NULL_HANDLE || !this->session_ready || !this->frame_synced) {
         return false;
@@ -1231,6 +1237,9 @@ bool OpenXR::close_synced_frame_without_layers(const char* reason) {
 }
 
 void OpenXR::prepare_resolution_scale_reconfigure(const char* reason) {
+    std::scoped_lock frame_lock{sync_mtx};
+    if (native_wait_only_handoff.faulted()) { return; }
+    native_wait_only_handoff.reset();
     const auto safe_reason = reason != nullptr ? reason : "resolution_scale_reconfigure";
     const auto had_synced = this->frame_synced;
     const auto had_began = this->frame_began;
@@ -1272,8 +1281,106 @@ void OpenXR::prepare_resolution_scale_reconfigure(const char* reason) {
         this->session_ready);
 }
 
+std::optional<uevr::native_array::FrameKey> OpenXR::native_async_wait_request() {
+    std::unique_lock lock{sync_mtx, std::try_to_lock};
+    if (!lock.owns_lock() || wants_reinitialize || !ever_submitted) { return std::nullopt; }
+    const uevr::native_array::FrameKey key{reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+        last_wait_trace_sequence, frame_state.predictedDisplayTime};
+    if (!uevr::native_array::can_async_wait(key, key, can_run_frame_loop(), frame_synced, frame_began)) { return std::nullopt; }
+    return key;
+}
+
+std::optional<uevr::native_array::FrameKey> OpenXR::synchronize_native_async_frame(uevr::native_array::FrameKey request) {
+    utility::pacing::ScopedOwner trace_owner{utility::pacing::Owner::array_worker};
+    std::scoped_lock lock{sync_mtx};
+    const uevr::native_array::FrameKey current{reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+        last_wait_trace_sequence, frame_state.predictedDisplayTime};
+    if (wants_reinitialize || !uevr::native_array::can_async_wait(request, current, can_run_frame_loop(), frame_synced, frame_began)) {
+        return std::nullopt;
+    }
+    // Retain the normal frame-loop serialization and publish its actual display time.
+    const auto result = synchronize_frame(std::nullopt, SyncFrameCallsite::VRVeryLatePostPresent);
+    if (result != Error::SUCCESS || !frame_synced || frame_began) { return std::nullopt; }
+    return uevr::native_array::FrameKey{reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+        last_wait_trace_sequence, frame_state.predictedDisplayTime};
+}
+
+bool OpenXR::native_async_pre_acquire_allowed(uevr::native_array::FrameKey frame) {
+    std::scoped_lock lock{sync_mtx};
+    const uevr::native_array::FrameKey current{reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+        last_wait_trace_sequence, frame_state.predictedDisplayTime};
+    return !wants_reinitialize && uevr::native_array::can_pre_acquire(frame, current, can_run_frame_loop(),
+        frame_synced, frame_began, frame_state.shouldRender == XR_TRUE);
+}
+
+std::optional<uevr::openxr_wait::Reservation> OpenXR::native_wait_only_request() {
+    namespace pacing = utility::pacing;
+    std::unique_lock lock{sync_mtx, std::try_to_lock};
+    if (!lock.owns_lock()) { pacing::decision(pacing::Reason::frame_lock_busy, {.runtime_id = diagnostic_id}); return std::nullopt; }
+    std::unique_lock assignment{sync_assignment_mtx, std::try_to_lock};
+    if (!assignment.owns_lock()) { pacing::decision(pacing::Reason::assignment_busy, {.runtime_id = diagnostic_id}); return std::nullopt; }
+    if (wants_reinitialize || !ever_submitted || !got_first_valid_poses || !last_submit_state.frame_count) {
+        native_wait_only_handoff.waiting_frame();
+        pacing::decision(wants_reinitialize ? pacing::Reason::reinitializing : !ever_submitted ? pacing::Reason::first_frame :
+            !got_first_valid_poses ? pacing::Reason::valid_poses_required : pacing::Reason::submit_frame_required,
+            {.runtime_id = diagnostic_id});
+        return std::nullopt;
+    }
+    const uevr::native_array::FrameKey key{reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+        last_wait_trace_sequence, frame_state.predictedDisplayTime};
+    if (!uevr::native_array::can_async_wait(key, key, can_run_frame_loop(), frame_synced, frame_began)) {
+        native_wait_only_handoff.normal_pacing();
+        pacing::decision(frame_began ? pacing::Reason::frame_already_began : frame_synced ? pacing::Reason::frame_already_synced :
+            pacing::Reason::normal_pacing, {.runtime_id = diagnostic_id, .session_generation = native_async_session_generation,
+                .wait_sequence = last_wait_trace_sequence, .display_time = frame_state.predictedDisplayTime});
+        return std::nullopt;
+    }
+    const auto next = last_submit_state.frame_count + 1;
+    const auto& pose = pipeline_states[next % QUEUE_SIZE];
+    // The game thread may already be further ahead than this ring slot. Do not
+    // advance the clock under ANY next/future pose, including a skipped frame.
+    const bool posed =
+        uevr::openxr_wait::frame_at_or_after(last_pose_update_frame_count, next) ||
+        (pose.frame_count == next && !pose.stage_views.empty());
+    const auto request = native_wait_only_handoff.reserve(key, next, posed);
+    pacing::decision(request ? pacing::Reason::reserved : native_wait_only_handoff.progress() == uevr::openxr_wait::Progress::pose_ahead
+        ? pacing::Reason::pose_ahead : pacing::Reason::reservation_busy,
+        {.runtime_id = diagnostic_id, .session_generation = native_async_session_generation,
+            .wait_sequence = last_wait_trace_sequence, .display_time = frame_state.predictedDisplayTime, .next_frame = next});
+    return request;
+}
+
+bool OpenXR::synchronize_native_wait_only(uevr::openxr_wait::Reservation request) {
+    utility::pacing::ScopedOwner trace_owner{utility::pacing::Owner::wait_only_worker};
+    std::scoped_lock lock{sync_mtx};
+    if (!native_wait_only_handoff.owns(request)) { return false; }
+    {
+        std::scoped_lock assignment{sync_assignment_mtx};
+        const uevr::native_array::FrameKey current{reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+            last_wait_trace_sequence, frame_state.predictedDisplayTime};
+        if (wants_reinitialize || !uevr::native_array::can_async_wait(request.before, current, can_run_frame_loop(), frame_synced, frame_began)) {
+            native_wait_only_handoff.fail(request);
+            return false;
+        }
+    }
+    if (!native_wait_only_handoff.begin_worker(request)) { return false; }
+    const auto result = synchronize_frame(std::nullopt, SyncFrameCallsite::VRVeryLatePostPresent);
+    if (result != Error::SUCCESS || native_wait_only_handoff.pending()) {
+        native_wait_only_handoff.fail(request);
+        return false;
+    }
+    return true;
+}
+
+void OpenXR::fail_native_wait_only(uevr::openxr_wait::Reservation request) {
+    std::scoped_lock lock{sync_mtx};
+    if (reinterpret_cast<uintptr_t>(session) == request.before.session) { native_wait_only_handoff.fault(); }
+}
+
 VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, SyncFrameCallsite callsite) {
     std::scoped_lock _{sync_mtx};
+    if (native_wait_only_handoff.faulted()) { return VRRuntime::Error::UNSPECIFIED; }
+    return uevr::openxr_wait::guarded_wait(native_wait_only_handoff, [&]() -> VRRuntime::Error {
 
     if (this->recover_focused_stale_frame_loop(sync_frame_callsite_name(callsite))) {
         return VRRuntime::Error::UNSPECIFIED;
@@ -1345,10 +1452,25 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, 
 
     XrFrameWaitInfo frame_wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState local_frame_state{XR_TYPE_FRAME_STATE};
+    utility::pacing::ScopedEvent pacing_wait{utility::pacing::Stage::wait_frame,
+        frame_count ? utility::pacing::Domain::engine : utility::pacing::Domain::xr_internal,
+        frame_count.value_or(this->internal_frame_count)};
+    pacing_wait.data().owner = utility::pacing::wait_owner() == utility::pacing::Owner::normal && native_wait_only_handoff.pending()
+        ? utility::pacing::Owner::normal_consumer : utility::pacing::wait_owner();
+    pacing_wait.data().session_generation = native_async_session_generation;
+    pacing_wait.data().runtime_id = diagnostic_id;
+    pacing_wait.data().callsite = static_cast<uint32_t>(callsite);
     const auto wait_frame_start = std::chrono::steady_clock::now();
     auto result = xrWaitFrame(this->session, &frame_wait_info, &local_frame_state);
     const auto wait_frame_end = std::chrono::steady_clock::now();
     const auto wait_frame_duration = wait_frame_end - wait_frame_start;
+    pacing_wait.data().start_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        wait_frame_start.time_since_epoch()).count());
+    pacing_wait.data().display_time = local_frame_state.predictedDisplayTime;
+    const auto pacing_wait_end = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        wait_frame_end.time_since_epoch()).count());
+    pacing_wait.complete_cpu_interval(pacing_wait_end, static_cast<int32_t>(result));
+    pacing_wait.data().wait_sequence = last_wait_trace_sequence;
     if (collect_openxr_frame_timing()) {
         this->wait_frame_timing.add(wait_frame_duration);
 
@@ -1404,7 +1526,10 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, 
 
     this->end_profile("xrWaitFrame");
 
-    if (result != XR_SUCCESS) {
+    if (result != XR_SUCCESS && result != XR_SESSION_LOSS_PENDING) {
+        pacing_wait.data().wait_sequence = last_wait_trace_sequence;
+        pacing_wait.finish_at(pacing_wait_end, static_cast<int32_t>(result));
+        if (native_wait_only_handoff.pending()) { native_wait_only_handoff.fail(native_wait_only_handoff.reservation()); }
         spdlog::error("[VR] xrWaitFrame failed: {}", this->get_result_string(result));
         return (VRRuntime::Error)result;
     } else {
@@ -1450,18 +1575,48 @@ VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, 
         this->frame_synced = true;
         this->should_update_eye_matrices = true;
         this->trace_wait_frame_success(frame_count, callsite);
+        pacing_wait.data().wait_sequence = last_wait_trace_sequence;
+        pacing_wait.finish_at(pacing_wait_end, static_cast<int32_t>(result));
+        native_wait_only_handoff.observe({reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+            last_wait_trace_sequence, frame_state.predictedDisplayTime});
     }
     return VRRuntime::Error::SUCCESS;
+    });
 }
 
 VRRuntime::Error OpenXR::update_poses(bool from_view_extensions, uint32_t frame_count) {
-    //std::scoped_lock ___{sync_mtx};
+    if (native_wait_only_handoff.faulted()) { return VRRuntime::Error::UNSPECIFIED; }
+    // A delayed/cancelled queued worker must not let the next pose use the old
+    // clock. A normal consumer may complete its reserved wait under the SAME
+    // runtime lock; the late worker then sees a changed frame key and does no wait.
+    std::unique_lock<std::recursive_mutex> wait_only_clock{sync_mtx, std::defer_lock};
     std::unique_lock<std::mutex> everspace2_pose_lock{this->everspace2_pose_capture_mtx, std::defer_lock};
-    if (this->is_everspace2_coherent_submit_active()) {
-        everspace2_pose_lock.lock();
-    }
-
-    std::scoped_lock _{ this->sync_assignment_mtx };
+    std::unique_lock<std::recursive_mutex> assignment{sync_assignment_mtx, std::defer_lock};
+    VRRuntime::Error clock_result{VRRuntime::Error::SUCCESS};
+    const auto service_wait = [&] {
+        if (native_wait_only_handoff.applies_to(frame_count)) {
+            const auto reserved = native_wait_only_handoff.reservation();
+            native_wait_only_handoff.observe({reinterpret_cast<uintptr_t>(session), native_async_session_generation,
+                last_wait_trace_sequence, frame_state.predictedDisplayTime});
+            if (native_wait_only_handoff.pending()) {
+                if (wants_reinitialize || !can_run_frame_loop()) {
+                    native_wait_only_handoff.fail(reserved);
+                    clock_result = VRRuntime::Error::UNSPECIFIED;
+                    return false;
+                }
+                const auto result = synchronize_frame(std::nullopt, SyncFrameCallsite::RuntimeFixFrame);
+                if (result != VRRuntime::Error::SUCCESS || native_wait_only_handoff.pending()) {
+                    native_wait_only_handoff.fail(reserved);
+                    clock_result = result == VRRuntime::Error::SUCCESS ? VRRuntime::Error::UNSPECIFIED : result;
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    if (!uevr::openxr_wait::lock_pose_clock(native_wait_only_handoff, wait_only_clock, assignment,
+        everspace2_pose_lock, this->is_everspace2_coherent_submit_active(), service_wait)) { return clock_result; }
+    if (native_wait_only_handoff.faulted()) { return VRRuntime::Error::UNSPECIFIED; }
 
     if (!this->session_ready) {
         return VRRuntime::Error::SUCCESS;
@@ -1857,7 +2012,10 @@ VRRuntime::Error OpenXR::consume_events(std::function<void(void*)> callback) {
         }
 
         if (bh->type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+            std::scoped_lock frame_lock{sync_mtx};
             const auto ev = (XrEventDataSessionStateChanged*)&edb;
+            ++native_async_session_generation;
+            native_wait_only_handoff.reset();
             this->session_state = ev->state;
 
             spdlog::info("VR: XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED {} ({})", (uint32_t)ev->state, this->get_session_state_string(ev->state));
@@ -2292,6 +2450,8 @@ void OpenXR::destroy() {
     }
 
     std::scoped_lock _{sync_mtx};
+    ++native_async_session_generation;
+    native_wait_only_handoff.reset();
     if (m_stalker2_pair_pending.load(std::memory_order_acquire)) { set_stalker2_pair_submit(std::nullopt); }
 
     if (this->session != nullptr) {
@@ -3871,7 +4031,13 @@ XrResult OpenXR::begin_frame(const char* caller) {
     const auto begin_frame_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
+    utility::pacing::ScopedEvent pacing_begin{utility::pacing::Stage::begin_frame};
+    pacing_begin.data().session_generation = native_async_session_generation;
+    pacing_begin.data().runtime_id = diagnostic_id;
+    pacing_begin.data().wait_sequence = last_wait_trace_sequence;
+    pacing_begin.data().display_time = frame_state.predictedDisplayTime;
     auto result = xrBeginFrame(this->session, &frame_begin_info);
+    pacing_begin.finish(static_cast<int32_t>(result));
     if (collect_frame_timing) {
         this->begin_frame_timing.add(std::chrono::steady_clock::now() - begin_frame_start);
     }
@@ -3947,8 +4113,17 @@ XrResult OpenXR::begin_frame(const char* caller) {
     return result;
 }
 
-XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& quad_layers, bool has_depth) {
+void OpenXR::note_native_array_copy(bool success) {
+    std::scoped_lock lock{sync_mtx};
+    native_array_copy_time.store(success && frame_began && frame_synced ? frame_state.predictedDisplayTime : 0,
+        std::memory_order_release);
+}
+
+XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& quad_layers, bool has_depth,
+    PackedStereoSubmission* packed_stereo, uint64_t dispatch_movie_epoch) {
     std::scoped_lock _{sync_mtx};
+    if (packed_stereo) { packed_stereo->submitted = false; }
+    if (native_wait_only_handoff.faulted()) { return XR_ERROR_SESSION_NOT_READY; }
 
     emit_openxr_state_probes(this, "end_frame");
 
@@ -3969,14 +4144,25 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
 
     auto vr = VR::get();
     const auto is_afr = vr->is_using_afr();
+    bool movie_override=false;
+    if (dispatch_movie_epoch && !is_afr &&
+        !vr->is_stereo_emulation_enabled() &&
+        vr->is_using_native_stereo() && !vr->is_using_2d_screen()) {
+        const auto image=swapchains.find(static_cast<uint32_t>(SwapchainIndex::DISPATCH_MOVIE));
+        const auto movie=uevr::dispatch_movie::read();
+        movie_override=movie && movie->epoch == dispatch_movie_epoch && image != swapchains.end() &&
+            image->second.width == movie->width && image->second.height == movie->height &&
+            uevr::dispatch_movie::opaque_layer(quad_layers,stage_space,image->second.handle,image->second.width,image->second.height);
+    }
+    if (movie_override) { has_depth=false; }
     if (is_afr && is_dead_island_2_ue425_executable()) {
         has_depth = false;
         SPDLOG_INFO_ONCE("[DeadIsland2][UE4.25][OpenXR] Submitting the AFR projection layer without depth");
     }
 
     const auto has_native_stereo_array =
-        !is_afr &&
-        vr->is_native_stereo_fix_texture_array_submit_enabled() &&
+        uevr::native_array::current_copy(vr->is_native_stereo_array_ready(), is_afr, false,
+            native_array_copy_time.load(std::memory_order_acquire), frame_state.predictedDisplayTime) &&
         this->swapchains.contains((uint32_t)OpenXR::SwapchainIndex::NATIVE_STEREO_ARRAY);
 
     if (is_afr || has_native_stereo_array) {
@@ -4072,7 +4258,14 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
 
     // we CANT push the layers every time, it cause some layer error
     // in xrEndFrame, so we must only do it when shouldRender is true
-    if (!debug_submit_empty && (!stalker_pair || stalker_pair->scene_available) && pipelined_frame_state.shouldRender == XR_TRUE && !pipelined_stage_views.empty()) {
+    const auto packed_scene_matches = [&] {
+        if (!packed_stereo) { return true; }
+        if (packed_stereo->color_swapchain == XR_NULL_HANDLE || is_afr || has_native_stereo_array ||
+            pipelined_stage_views.size() != 2) { return false; }
+        const auto scene = swapchains.find((uint32_t)SwapchainIndex::DOUBLE_WIDE);
+        return scene != swapchains.end() && scene->second.handle == packed_stereo->color_swapchain;
+    };
+    if (packed_scene_matches() && !debug_submit_empty && (!stalker_pair || stalker_pair->scene_available) && pipelined_frame_state.shouldRender == XR_TRUE && !pipelined_stage_views.empty()) {
         projection_layer_views.resize(pipelined_stage_views.size(), {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
         depth_layers.resize(projection_layer_views.size(), {XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR});
 
@@ -4188,15 +4381,20 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
         layer.views = projection_layer_views.data();
         layer.layerFlags = 0;
 
-        if (should_push_dummy) {
+        if (should_push_dummy && !movie_override) {
             layers.push_back((XrCompositionLayerBaseHeader*)&dummy_projection_layer);
         }
 
-        for (auto& l : projection_layer_cache) {
-            layers.push_back((XrCompositionLayerBaseHeader*)&l);
+        if (!movie_override) {
+            for (auto& l : projection_layer_cache) {
+                layers.push_back((XrCompositionLayerBaseHeader*)&l);
+            }
         }
 
-        for (auto& l : quad_layers) {   
+        for (auto* l : quad_layers) {
+            const auto movie=dispatch_movie_epoch ? swapchains.find(static_cast<uint32_t>(SwapchainIndex::DISPATCH_MOVIE)) : swapchains.end();
+            if (!movie_override && movie != swapchains.end() && l && l->type == XR_TYPE_COMPOSITION_LAYER_QUAD &&
+                reinterpret_cast<XrCompositionLayerQuad*>(l)->subImage.swapchain == movie->second.handle) { continue; }
             layers.push_back(l);
         }
     } else if (debug_submit_empty) {
@@ -4230,7 +4428,20 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     const auto end_frame_start = collect_frame_timing
         ? std::chrono::steady_clock::now()
         : std::chrono::steady_clock::time_point{};
+    utility::pacing::ScopedEvent pacing_end{utility::pacing::Stage::end_frame};
+    pacing_end.data().session_generation = native_async_session_generation;
+    pacing_end.data().runtime_id = diagnostic_id;
+    pacing_end.data().wait_sequence = last_wait_trace_sequence;
+    pacing_end.data().display_time = frame_end_info.displayTime;
     auto result = xrEndFrame(this->session, &frame_end_info);
+    pacing_end.finish(static_cast<int32_t>(result));
+    uevr::dispatch_movie::note_submission(movie_override,result == XR_SUCCESS && !debug_submit_empty && !layers.empty());
+    if (packed_stereo) {
+        packed_stereo->submitted = result == XR_SUCCESS && !projection_layer_cache.empty() &&
+            projection_layer_views.size() == 2 &&
+            projection_layer_views[0].subImage.swapchain == packed_stereo->color_swapchain &&
+            projection_layer_views[1].subImage.swapchain == packed_stereo->color_swapchain;
+    }
     if (collect_frame_timing) {
         this->end_frame_timing.add(std::chrono::steady_clock::now() - end_frame_start);
     }

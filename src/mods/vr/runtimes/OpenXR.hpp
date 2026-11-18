@@ -27,6 +27,8 @@
 
 #include "Mod.hpp"
 #include "../ControllerTouchBindings.hpp"
+#include "../NativeOpenXRArrayPolicy.hpp"
+#include "../NativeOpenXRWaitOnly.hpp"
 
 #include "VRRuntime.hpp"
 
@@ -80,7 +82,7 @@ struct OpenXR final : public VRRuntime {
     }
 
     bool can_run_frame_loop() const {
-        return ready() &&
+        return ready() && !native_wait_only_handoff.faulted() &&
             (this->session_state == XR_SESSION_STATE_READY ||
              this->session_state == XR_SESSION_STATE_SYNCHRONIZED ||
              this->session_state == XR_SESSION_STATE_VISIBLE ||
@@ -115,6 +117,12 @@ struct OpenXR final : public VRRuntime {
     VRRuntime::Error synchronize_frame(
         std::optional<uint32_t> frame_count = std::nullopt,
         SyncFrameCallsite callsite = SyncFrameCallsite::Unknown) override;
+    std::optional<uevr::native_array::FrameKey> native_async_wait_request();
+    std::optional<uevr::native_array::FrameKey> synchronize_native_async_frame(uevr::native_array::FrameKey request);
+    std::optional<uevr::openxr_wait::Reservation> native_wait_only_request();
+    bool synchronize_native_wait_only(uevr::openxr_wait::Reservation request);
+    void fail_native_wait_only(uevr::openxr_wait::Reservation request);
+    bool native_async_pre_acquire_allowed(uevr::native_array::FrameKey frame);
     VRRuntime::Error fix_frame() override {
         // sync if necessary.
         VRRuntime::fix_frame();
@@ -188,7 +196,12 @@ public:
     std::optional<std::string> initialize_actions(const std::string& json_string);
 
     XrResult begin_frame(const char* caller = "unknown");
-    XrResult end_frame(const std::vector<XrCompositionLayerBaseHeader*>& quad_layers, bool has_depth = false);
+    struct PackedStereoSubmission {
+        XrSwapchain color_swapchain{XR_NULL_HANDLE};
+        bool submitted{};
+    };
+    XrResult end_frame(const std::vector<XrCompositionLayerBaseHeader*>& quad_layers, bool has_depth = false,
+        PackedStereoSubmission* packed_stereo = nullptr, uint64_t dispatch_movie_epoch = 0);
     XrResult recover_wedged_frame(const char* reason);
     bool close_synced_frame_without_layers(const char* reason);
     void prepare_resolution_scale_reconfigure(const char* reason);
@@ -266,9 +279,13 @@ public:
     std::chrono::high_resolution_clock::time_point profiler_start_time{};
 
     std::recursive_mutex sync_mtx{};
+    uint64_t native_async_session_generation{1}; // sync_mtx owned, including session-state events.
+    uevr::openxr_wait::Handoff native_wait_only_handoff;
     std::recursive_mutex sync_assignment_mtx{};
     std::recursive_mutex event_mtx{};
     std::recursive_mutex swapchain_mtx{};
+    void note_native_array_copy(bool success);
+    std::atomic<XrTime> native_array_copy_time{0};
 
     // Making it static because for some reason destroying it doesn't actually completely destroy everything.
     // So we must make sure it always exists if we ever re-initialize OpenXR.
@@ -626,6 +643,9 @@ public:
 
         STANDARD_COUNT = STANDARD_END - STANDARD_START,
         EXTRA_COUNT = EXTRA_END - EXTRA_START,
+
+        // Independent of scene/UI ranges; never changes existing indices.
+        DISPATCH_MOVIE = 100,
     };
 
     void clear_cached_swapchain_dimensions() {
