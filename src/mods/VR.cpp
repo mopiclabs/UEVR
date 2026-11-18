@@ -5057,16 +5057,7 @@ void VR::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     const auto previous_engine_tick = m_last_engine_tick.load(std::memory_order_relaxed);
     const bool hitch_diagnostics_enabled = m_enable_hitch_diagnostics->value();
 
-    // VR_AutoResFrameBoundDetect: the tick's game time against the wall time, and once the engine's frame rate settings.
-    if (m_autores->value() && m_autores_frame_bound_detect->value()) {
-        m_autores_tick_clock.on_tick(delta);
-
-        if (!m_autores_engine_frame_rate_read) {
-            m_autores_engine_frame_rate_read = true;
-            m_autores_engine_frame_rate = read_engine_frame_rate(engine);
-            m_autores_engine_frame_rate_ready.store(true, std::memory_order_release);
-        }
-    }
+    tick_autores_frame_bound_detect(engine, delta); // Mopic: VR_AutoResFrameBoundDetect (next to update_autores)
 
     m_cvar_manager->on_pre_engine_tick(engine, delta);
     if (!hitch_diagnostics_enabled) {
@@ -8968,6 +8959,20 @@ void VR::update_autores() {
     });
 }
 
+// VR_AutoResFrameBoundDetect, from on_pre_engine_tick: the tick's game time against the wall time, and once the
+// engine's frame rate settings.
+void VR::tick_autores_frame_bound_detect(sdk::UGameEngine* engine, float delta) {
+    if (m_autores->value() && m_autores_frame_bound_detect->value()) {
+        m_autores_tick_clock.on_tick(delta);
+
+        if (!m_autores_engine_frame_rate_read) {
+            m_autores_engine_frame_rate_read = true;
+            m_autores_engine_frame_rate = read_engine_frame_rate(engine);
+            m_autores_engine_frame_rate_ready.store(true, std::memory_order_release);
+        }
+    }
+}
+
 void VR::on_present() {
     ZoneScopedN(__FUNCTION__);
 
@@ -8983,13 +8988,8 @@ void VR::on_present() {
     }};
 
     m_frame_count = get_runtime()->internal_render_frame_count;
-    m_skipped_duplicate_present = false;
 
-    if (m_frame_count != m_last_advanced_frame_count) {
-        m_last_advanced_frame_count = m_frame_count;
-        m_last_engine_frame_advance = std::chrono::steady_clock::now();
-    }
-
+    begin_duplicate_present_check(); // Mopic: VR_SubmitOncePerEngineFrame (MopicVR.cpp)
     if (!is_using_afr() || m_render_frame_count % 2 == m_left_eye_interval) {
         ResetEvent(m_present_finished_event);
     }
@@ -9171,31 +9171,7 @@ void VR::on_post_present() {
     }
 
     std::scoped_lock _{m_openvr_mtx};
-
-    // The session was destroyed because the game's window was gone and it had stopped presenting
-    // (end_openxr_session_for_exit). The frame work below would touch the destroyed swapchains, so it is skipped.
-    // A Present to a live window is a recreated window, not an exit: take the wants_reinitialize path right away.
-    // One to the destroyed window is the game still shutting down: stay ended rather than create a new instance and
-    // session (and bring the runtime's window back) in a process that is exiting.
-    if (runtime->is_openxr() && m_openxr->session_ended_for_exit) {
-        // Recorded by Framework::on_frame_d3d11/d3d12 for this Present; m_wnd when the swap chain has no window.
-        const auto last_present_wnd = g_framework->get_last_present_window();
-        const auto present_wnd = last_present_wnd != nullptr ? last_present_wnd : g_framework->get_window();
-
-        if (present_wnd != nullptr && !IsWindow(present_wnd)) {
-            SPDLOG_INFO_EVERY_N_SEC(5, "[VR] The game presents to its destroyed window {:x} after its OpenXR session was ended for exit; keeping the session ended",
-                (uintptr_t)present_wnd);
-            return;
-        }
-
-        std::scoped_lock __{m_reinitialize_mtx};
-
-        spdlog::info("[VR] The game presents again (window {:x}) after its OpenXR session was ended for exit; reinitializing OpenXR",
-            (uintptr_t)present_wnd);
-        m_openxr->wants_reinitialize = false;
-        reinitialize_openxr();
-        return;
-    }
+    if (handle_session_ended_for_exit(runtime)) { return; } // Mopic: the session was ended for the game's exit (MopicVR.cpp)
 
     if (!m_is_d3d12) {
         m_d3d11.on_post_present(this);

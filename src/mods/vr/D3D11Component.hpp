@@ -177,6 +177,9 @@ private:
     std::chrono::steady_clock::time_point m_hold_source_changed_at{};
     bool m_nsf_was_active{false};
     std::chrono::steady_clock::time_point m_nsf_active_since{};
+    // Mopic (MopicNativeSubmitD3D11.cpp): the live resolution change holds; true when the hold submitted the frame.
+    struct MopicHoldSubmit;
+    bool submit_mopic_hold(const MopicHoldSubmit& submit);
     std::array<TextureContext, 2> m_2d_screen_tex{};
     ComPtr<ID3D11Texture2D> m_left_eye_tex{};
     ComPtr<ID3D11Texture2D> m_right_eye_tex{};

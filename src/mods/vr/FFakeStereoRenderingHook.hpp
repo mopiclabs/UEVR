@@ -842,6 +842,13 @@ public:
         return last != 0 && now - last <= window.count();
     }
 
+    // The generic Slate DrawWindow hook redirected the render target just now (slate_draw_window_render_thread).
+    void note_legacy_slate_redirect() {
+        m_last_legacy_slate_redirect_ns.store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+            std::memory_order_relaxed);
+    }
+
     bool has_successful_command_list_hijack() const {
         return m_has_successful_command_list_hijack;
     }
