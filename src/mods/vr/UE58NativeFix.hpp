@@ -24,16 +24,27 @@ static_assert(constrained_offset == sdk::sinking_city_2::native::constrained_vie
     pass_offset == sdk::sinking_city_2::native::pass_offset &&
     primary_index_offset == sdk::sinking_city_2::native::primary_index_offset);
 
-inline bool needs_guarded_fallback(std::wstring_view path) {
+inline bool matches_executable_name(std::wstring_view path, std::wstring_view name) {
     const auto separator = path.find_last_of(L"/\\");
     path = path.substr(separator == path.npos ? 0 : separator + 1);
-    constexpr std::wstring_view name = L"slasher-win64-shipping.exe";
     if (path.size() != name.size()) { return false; }
     for (size_t i = 0; i < path.size(); ++i) {
         const auto c = path[i] >= L'A' && path[i] <= L'Z' ? path[i] + (L'a' - L'A') : path[i];
         if (c != name[i]) { return false; }
     }
     return true;
+}
+
+inline bool is_paradox_drive(std::wstring_view path) {
+    return matches_executable_name(path, L"paradoxdrive-win64-shipping.exe");
+}
+
+inline bool needs_copy_extent_revalidation(std::wstring_view path, uint32_t file_version_ms) {
+    return is_paradox_drive(path) && file_version_ms == ((5u << 16) | 8u);
+}
+
+inline bool needs_guarded_fallback(std::wstring_view path) {
+    return matches_executable_name(path, L"slasher-win64-shipping.exe") || is_paradox_drive(path);
 }
 
 template<size_t N>
@@ -44,11 +55,18 @@ bool matches(const sdk::discovery::Memory& memory, uintptr_t address,
 
 inline bool view_layout(const sdk::discovery::Memory& memory, uintptr_t constructor) {
     using namespace contract;
-    return sdk::discovery::relative_address(constructor, 0x5d2) &&
-        matches(memory, constructor + 0x30, view_identity_code, view_identity_mask) &&
+    if (!sdk::discovery::relative_address(constructor, 0x5d2)) { return false; }
+    if (matches(memory, constructor + 0x30, view_identity_code, view_identity_mask) &&
         matches(memory, constructor + 0x3b9, view_rects_code, view_rects_mask) &&
         matches(memory, constructor + 0x49f, view_projection_code, view_projection_mask) &&
-        matches(memory, constructor + 0x547, view_stereo_code, view_stereo_mask);
+        matches(memory, constructor + 0x547, view_stereo_code, view_stereo_mask)) { return true; }
+
+    // Stock UE5.8.4 Shipping and ParadoxDrive independently match this placement.
+    // The complete field/control-flow proof, not an executable name, authorizes it.
+    return matches(memory, constructor + 0x39, view_identity_code, view_identity_mask) &&
+        matches(memory, constructor + 0x3af, view_rects_code, view_rects_mask) &&
+        matches(memory, constructor + 0x495, view_projection_code, view_projection_mask) &&
+        matches(memory, constructor + 0x53d, view_stereo_code, view_stereo_mask);
 }
 
 inline bool renderer_layout(const sdk::discovery::Memory& memory, uintptr_t renderer) {
@@ -58,7 +76,7 @@ inline bool renderer_layout(const sdk::discovery::Memory& memory, uintptr_t rend
         matches(memory, renderer + 0x19c, renderer_frame_code, renderer_frame_mask);
 }
 
-struct FamilyFunctions { uintptr_t copy{}, destroy{}, vtable{}; };
+struct FamilyFunctions { uintptr_t copy{}, destroy{}, vtable{}; bool development_layout{}; };
 
 template<class FunctionSize>
 std::optional<FamilyFunctions> family_functions(const sdk::discovery::Memory& memory,
@@ -111,12 +129,12 @@ static_assert(sizeof(ViewArray) == 16);
 
 // Native construction retains shared-ref members and deep-copies every array.
 // Only the base destructor is permitted: the context destructor deletes views.
-class FamilyClone {
+template<size_t FamilySize, size_t InterfacesOffset> class FamilyCloneStorage {
 public:
-    FamilyClone() = default;
-    FamilyClone(const FamilyClone&) = delete;
-    FamilyClone& operator=(const FamilyClone&) = delete;
-    ~FamilyClone() {
+    FamilyCloneStorage() = default;
+    FamilyCloneStorage(const FamilyCloneStorage&) = delete;
+    FamilyCloneStorage& operator=(const FamilyCloneStorage&) = delete;
+    ~FamilyCloneStorage() {
         if (!m_constructed) { return; }
         for (const size_t offset : {size_t{8}, size_t{0x18}}) {
             ViewArray array{};
@@ -126,7 +144,7 @@ public:
             }
         }
         for (size_t i = 0; i < m_borrowed.size(); ++i) {
-            auto* slot = m_storage.data() + interfaces_offset + i * sizeof(uintptr_t);
+            auto* slot = m_storage.data() + InterfacesOffset + i * sizeof(uintptr_t);
             uintptr_t value{};
             std::memcpy(&value, slot, sizeof(value));
             if (value && value == m_borrowed[i]) { std::memset(slot, 0, sizeof(value)); }
@@ -139,12 +157,12 @@ public:
         uintptr_t expected_vtable, const FamilyFunctions& functions, const char*& reason) {
         reason = "native family copy contract is unavailable";
         if (m_constructed || !functions.copy || !functions.destroy || !functions.vtable) { return false; }
-        std::array<uint8_t, family_size> bytes{};
+        std::array<uint8_t, FamilySize> bytes{};
         if (!source || !memory.load(source, bytes)) { return false; }
         uintptr_t table{}, renderer{};
         std::memcpy(&table, bytes.data(), sizeof(table));
-        std::memcpy(&renderer, bytes.data() + 0x160, sizeof(renderer));
-        std::memcpy(m_borrowed.data(), bytes.data() + interfaces_offset, sizeof(m_borrowed));
+        std::memcpy(&renderer, bytes.data() + InterfacesOffset - sizeof(uintptr_t), sizeof(renderer));
+        std::memcpy(m_borrowed.data(), bytes.data() + InterfacesOffset, sizeof(m_borrowed));
         m_original_render_safe = renderer == 0 && fresh_interfaces(m_borrowed);
         if (table != expected_vtable || !m_original_render_safe || bytes[0xb8] != 0 ||
             bytes[0xb0] > 1 || bytes[0xb7] > 1) {
@@ -169,7 +187,7 @@ public:
         std::memcpy(&table, m_storage.data(), sizeof(table));
         std::memcpy(&copy_views, m_storage.data() + 8, sizeof(copy_views));
         std::memcpy(&copy_all, m_storage.data() + 0x18, sizeof(copy_all));
-        std::memcpy(copied_interfaces.data(), m_storage.data() + interfaces_offset, sizeof(copied_interfaces));
+        std::memcpy(copied_interfaces.data(), m_storage.data() + InterfacesOffset, sizeof(copied_interfaces));
         std::array<uintptr_t, 2> copied{};
         const bool independent = copy_views.count == 2 && copy_views.capacity >= 2 && copy_views.capacity <= 16 &&
             copy_views.data && copy_views.data != views.data && copy_views.data != all.data &&
@@ -189,20 +207,22 @@ public:
     bool finish(const sdk::discovery::Memory& memory, uintptr_t source) {
         Interfaces original{}, clone{};
         if (!m_constructed) { return false; }
-        std::memcpy(clone.data(), m_storage.data() + interfaces_offset, sizeof(clone));
-        if (!memory.load(source + interfaces_offset, original)) {
+        std::memcpy(clone.data(), m_storage.data() + InterfacesOffset, sizeof(clone));
+        if (!memory.load(source + InterfacesOffset, original)) {
             m_borrowed = clone;
             return false;
         }
         return retain_shared_interfaces(original, clone, m_borrowed);
     }
 private:
-    alignas(16) std::array<uint8_t, family_size> m_storage{};
+    static_assert(InterfacesOffset >= 0x168 && FamilySize >= InterfacesOffset + sizeof(Interfaces));
+    alignas(16) std::array<uint8_t, FamilySize> m_storage{};
     Interfaces m_borrowed{};
     std::array<uintptr_t, 2> m_source_arrays{};
     FamilyFunctions m_functions{};
     bool m_constructed{};
     bool m_original_render_safe{true};
 };
+using FamilyClone = FamilyCloneStorage<family_size,interfaces_offset>;
 
 } // namespace uevr::ue58_native

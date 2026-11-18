@@ -1,7 +1,9 @@
 #define NOMINMAX
 
+#include "vr/NativeOpenXRArrayPolicy.hpp"
 #include "vr/ControllerTouchBindings.hpp"
 #include "vr/StockFrameBindingMigration.hpp"
+#include "vr/DispatchMovie.hpp"
 
 #include <fstream>
 #include <cmath>
@@ -44,6 +46,10 @@
 
 #include <tracy/Tracy.hpp>
 #include "utility/SupportDiagnostics.hpp"
+#include "utility/BuildIdentity.hpp"
+#include "utility/PacingRecorder.hpp"
+#include "utility/PacingRecorderJson.hpp"
+#include "utility/SupportHealth.hpp"
 
 #include "Framework.hpp"
 #include "frameworkConfig.hpp"
@@ -71,9 +77,10 @@ std::shared_ptr<VR>& VR::get() {
 }
 
 VR::~VR() {
+    uevr::dispatch_movie::shutdown();
+    shutdown_native_openxr_async_wait_worker();
     uevr::swgr_panini::shutdown();
     uevr::swgr_letterbox::shutdown();
-    stop_native_openxr_async_wait_worker();
     restore_1666amsterdam_native_postprocess_cvars();
     restore_daysgone_gbuffer_cvar();
     stop_hitch_snapshot_writer();
@@ -2170,88 +2177,6 @@ ShfAuto2DDecision evaluate_shf_auto_2d(sdk::UGameEngine* engine) {
     return decision;
 }
 
-struct DispatchAuto2DDecision {
-    bool should_force{false};
-    std::string reason{};
-    std::string subsystem{};
-    std::string source{};
-    std::string player{};
-    std::string texture{};
-    std::optional<bool> playing{};
-    std::optional<bool> preparing{};
-    std::optional<bool> buffering{};
-    std::optional<bool> ready{};
-};
-
-bool is_dispatch_media_player_active(sdk::UObject* player, DispatchAuto2DDecision& decision) {
-    decision.playing = call_object_bool_function(player, L"IsPlaying");
-    decision.preparing = call_object_bool_function(player, L"IsPreparing");
-    decision.buffering = call_object_bool_function(player, L"IsBuffering");
-    decision.ready = call_object_bool_function(player, L"IsReady");
-
-    if (decision.playing.value_or(false)) {
-        decision.reason = "media-player-playing";
-        return true;
-    }
-
-    if (decision.preparing.value_or(false) || decision.buffering.value_or(false)) {
-        decision.reason = "media-player-loading";
-        return true;
-    }
-
-    // If UE4 media functions cannot be resolved in this title, trust Dispatch's
-    // explicit ActiveMediaObjects struct instead of leaving movie scenes in HMD space.
-    if (!decision.playing.has_value() && !decision.preparing.has_value() && !decision.buffering.has_value() && !decision.ready.has_value()) {
-        decision.reason = "active-media-objects";
-        return true;
-    }
-
-    return false;
-}
-
-DispatchAuto2DDecision evaluate_dispatch_auto_2d(sdk::UGameEngine* engine) {
-    (void)engine;
-
-    static const std::wstring media_subsystem_class_name = L"Class /Script/AdHocMedia.AdHocMediaSubsystem";
-    static const std::wstring map_transition_widget_class_name =
-        L"WidgetBlueprintGeneratedClass /Game/Shared/Shifts/Gameplay/Widgets/HeroDatabase/SubWidgets/WBP_VideoPlayerMapTransition.WBP_VideoPlayerMapTransition_C";
-
-    DispatchAuto2DDecision decision{};
-
-    for (auto* subsystem : get_live_objects_by_class_name(media_subsystem_class_name)) {
-        const auto source = read_struct_object_field(subsystem, L"ActiveMediaObjects", 0x0);
-        const auto player = read_struct_object_field(subsystem, L"ActiveMediaObjects", 0x8);
-        const auto texture = read_struct_object_field(subsystem, L"ActiveMediaObjects", 0x10);
-
-        if (!source.has_value() && !player.has_value() && !texture.has_value()) {
-            continue;
-        }
-
-        decision.subsystem = get_log_object_name(subsystem);
-        decision.source = source.has_value() ? get_log_object_name(*source) : "null";
-        decision.player = player.has_value() ? get_log_object_name(*player) : "null";
-        decision.texture = texture.has_value() ? get_log_object_name(*texture) : "null";
-
-        if (player.has_value() && *player != nullptr && is_dispatch_media_player_active(*player, decision)) {
-            decision.should_force = true;
-            return decision;
-        }
-    }
-
-    for (auto* widget : get_live_objects_by_class_name(map_transition_widget_class_name)) {
-        const auto in_viewport = call_object_bool_function(widget, L"IsInViewport");
-        const auto visible = call_object_bool_function(widget, L"IsVisible");
-        if (in_viewport.value_or(false) || (!in_viewport.has_value() && visible.value_or(false))) {
-            decision.should_force = true;
-            decision.reason = "video-map-transition-widget";
-            decision.player = get_log_object_name(widget);
-            return decision;
-        }
-    }
-
-    return decision;
-}
-
 struct MixtapeAuto2DDecision {
     bool should_force{false};
     std::string reason{};
@@ -2841,107 +2766,134 @@ bool VR::is_stalker2_native_fix_experiment_enabled() const {
         is_using_2d_screen()}.enabled();
 }
 
-bool VR::is_native_openxr_async_wait_active() const {
-    return is_native_stereo_fix_async_openxr_wait_enabled() &&
-        m_openxr != nullptr &&
-        get_runtime() != nullptr &&
-        get_runtime()->is_openxr();
+bool VR::is_native_stereo_fix_texture_array_submit_enabled() const {
+    const auto* runtime = get_runtime();
+    // Config loads before the first on_frame assignment to m_is_d3d12.
+    return uevr::native_array::Scope{m_native_stereo_fix_texture_array_submit->value(),
+        is_native_stereo_fix_enabled(), is_native_stereo_fix_same_pass_enabled(),
+        g_framework != nullptr && g_framework->is_dx12(), runtime != nullptr && runtime->is_openxr(),
+        m_rendering_method->value() == RenderingMethod::NATIVE_STEREO, is_using_afr(), uevr::nascar::is_target()}.enabled();
 }
 
-void VR::ensure_native_openxr_async_wait_worker() {
-    if (m_native_openxr_async_wait_thread.joinable()) {
-        return;
-    }
+bool VR::is_native_stereo_array_ready() const {
+    return m_openxr != nullptr && get_runtime() == m_openxr.get() &&
+        m_d3d12.openxr().native_array_ready(m_openxr->session, get_hmd_width(), get_hmd_height());
+}
 
-    m_native_openxr_async_wait_thread = std::jthread([this](std::stop_token stop_token) {
-        native_openxr_async_wait_worker_loop(stop_token);
-    });
+bool VR::is_native_openxr_async_wait_active() const {
+    return !m_native_openxr_async_worker.closed() && !m_native_openxr_async_worker.failed() &&
+        is_native_stereo_fix_async_openxr_wait_enabled() &&
+        m_openxr != nullptr &&
+        get_runtime() != nullptr &&
+        get_runtime()->is_openxr() && is_native_stereo_array_ready() && m_d3d12.openxr().native_array_last_copy_ok();
+}
+
+uevr::openxr_wait::Scope VR::native_openxr_wait_only_scope() const {
+    if (!m_native_openxr_wait_only->value()) { return {}; }
+    const auto* runtime = get_runtime();
+    return {true, g_framework != nullptr && g_framework->is_dx12(),
+        runtime != nullptr && runtime == m_openxr.get() && runtime->is_openxr() && runtime->loaded,
+        is_using_native_stereo(), static_cast<SynchronizeStage>(m_sync_mode->value()) == SynchronizeStage::VERY_LATE,
+        m_native_stereo_fix_async_openxr_wait->value(), m_native_stereo_fix_texture_array_submit->value(),
+        m_disable_vr || is_using_afr() || m_extreme_compat_mode->value() || m_sceneview_compatibility_mode->value() ||
+        is_using_2d_screen() || is_stereo_emulation_enabled() || is_splitscreen_compatibility_enabled() ||
+        uevr::nascar::is_target() ||
+        is_dune_awakening_executable_cached() || is_stalker2_legacy_ue51_runtime_cached()};
+}
+
+const char* VR::native_openxr_wait_only_status() const {
+    const auto scope = native_openxr_wait_only_scope();
+    if (!scope.enabled()) { return uevr::openxr_wait::text(scope.blocked()); }
+    if (m_native_openxr_async_worker.closed()) { return "unavailable: worker is shutting down"; }
+    if (m_openxr->native_wait_only_handoff.faulted()) { return "fell back: uncertain frame wait; OpenXR reinitialization required"; }
+    if (m_native_openxr_async_worker.failed()) { return "fell back: worker failed; reinitialize OpenXR to retry"; }
+    return uevr::openxr_wait::text(m_openxr->native_wait_only_handoff.progress());
 }
 
 void VR::stop_native_openxr_async_wait_worker() {
-    if (!m_native_openxr_async_wait_thread.joinable()) {
-        return;
-    }
+    m_native_openxr_async_worker.stop();
+}
 
-    m_native_openxr_async_wait_thread.request_stop();
-    m_native_openxr_async_wait_cv.notify_all();
+void VR::shutdown_native_openxr_async_wait_worker() {
+    m_native_openxr_async_worker.shutdown();
 }
 
 bool VR::request_native_openxr_async_wait() {
-    if (!is_native_openxr_async_wait_active()) {
+    using uevr::openxr_wait::Operation;
+    const bool wait_only_requested = m_native_openxr_wait_only->value();
+    if (m_native_openxr_wait_only_was_requested && !wait_only_requested && m_openxr) {
+        m_openxr->native_wait_only_handoff.rearm();
+    }
+    m_native_openxr_wait_only_was_requested = wait_only_requested;
+    if (m_native_openxr_async_worker.closed()) { return false; }
+    if (m_native_openxr_async_worker.failed()) {
+        SPDLOG_WARNING_EVERY_N_SEC(5, "[OpenXR][native] Async worker failed; using normal frame pacing");
         return false;
     }
-
-    auto openxr = m_openxr;
-    if (openxr == nullptr ||
-        !openxr->can_run_frame_loop() ||
-        !openxr->ever_submitted ||
-        openxr->frame_synced ||
-        openxr->frame_began)
-    {
-        return false;
+    const bool array_active = is_native_openxr_async_wait_active();
+    const bool wait_only_active = native_openxr_wait_only_scope().enabled();
+    const auto operation = array_active ? Operation::array_pre_acquire : Operation::wait_only;
+    const bool was_wait_only = m_native_openxr_async_operation.load(std::memory_order_acquire) == Operation::wait_only;
+    if (!array_active && !wait_only_active) {
+        m_native_openxr_async_worker.cancel_pending();
+        // Turning an option/mode off cannot cancel an xrWaitFrame already in progress.
+        return was_wait_only && m_native_openxr_async_worker.busy();
     }
-
-    if (m_native_openxr_async_wait_inflight.exchange(true)) {
-        return false;
+    if (m_native_openxr_async_worker.busy() && operation != m_native_openxr_async_operation.load(std::memory_order_acquire)) {
+        m_native_openxr_async_worker.cancel_pending();
+        return m_native_openxr_async_worker.busy();
     }
-
-    ensure_native_openxr_async_wait_worker();
-
-    {
-        std::lock_guard lock{m_native_openxr_async_wait_mtx};
-        m_native_openxr_async_wait_pending = true;
+    // The existing request owns the wait. Do not fall back to a second,
+    // synchronous post-present wait just because its worker is still busy.
+    if (m_native_openxr_async_worker.busy()) {
+        utility::pacing::decision(utility::pacing::Reason::worker_busy);
+        return true;
     }
-
-    m_native_openxr_async_wait_cv.notify_one();
-    return true;
-}
-
-void VR::native_openxr_async_wait_worker_loop(std::stop_token stop_token) {
-    SetThreadDescription(GetCurrentThread(), L"UEVR Native OpenXR Wait");
-
-    while (!stop_token.stop_requested()) {
-        {
-            std::unique_lock lock{m_native_openxr_async_wait_mtx};
-            m_native_openxr_async_wait_cv.wait(lock, [this, &stop_token]() {
-                return stop_token.stop_requested() || m_native_openxr_async_wait_pending;
+    const auto openxr = m_openxr;
+    NativeOpenXRAsyncRequest request{};
+    request.runtime = openxr;
+    request.operation = operation;
+    if (!openxr) { return false; }
+    if (operation == Operation::wait_only) {
+        const auto reservation = openxr->native_wait_only_request();
+        if (!reservation) { return false; }
+        request.frame = reservation->before;
+        request.wait_only = *reservation;
+    } else {
+        const auto frame = openxr->native_async_wait_request();
+        if (!frame) { return false; }
+        request.frame = *frame;
+        request.array_generation = m_d3d12.openxr().native_array_generation();
+    }
+    try {
+        m_native_openxr_async_operation.store(operation, std::memory_order_release);
+        return m_native_openxr_async_worker.submit(
+            std::move(request),
+            [this](const NativeOpenXRAsyncRequest& request, const auto& cancellation) {
+                try {
+                    thread_local const auto named = SetThreadDescription(GetCurrentThread(), L"UEVR Native OpenXR Wait");
+                    (void)named;
+                    uevr::openxr_wait::run_operation(request.operation,
+                        [&] { request.runtime->synchronize_native_wait_only(request.wait_only); },
+                        [&] { return request.runtime->synchronize_native_async_frame(request.frame); },
+                        [&](const auto& frame) { m_d3d12.openxr().pre_acquire_native_array(*request.runtime, frame, request.array_generation); },
+                        [&] { return cancellation.cancelled(); });
+                } catch (...) {
+                    // An exception can leave acquisition ownership unproven.
+                    // Do not reuse that generation or poison a replacement one.
+                    if (request.operation == Operation::array_pre_acquire) {
+                        m_d3d12.openxr().fault_native_array(request.array_generation);
+                    } else {
+                        request.runtime->fail_native_wait_only(request.wait_only);
+                    }
+                    spdlog::error("[OpenXR][native] Async worker failed; preserving owned frame/resources and using normal pacing");
+                    throw;
+                }
             });
-
-            if (stop_token.stop_requested()) {
-                break;
-            }
-
-            m_native_openxr_async_wait_pending = false;
-        }
-
-        utility::ScopeGuard clear_inflight{[this]() {
-            m_native_openxr_async_wait_inflight.store(false);
-        }};
-
-        auto openxr = m_openxr;
-        if (openxr == nullptr ||
-            !is_native_openxr_async_wait_active() ||
-            !openxr->can_run_frame_loop() ||
-            openxr->frame_synced ||
-            openxr->frame_began)
-        {
-            continue;
-        }
-
-        const auto sync_result = openxr->synchronize_frame(std::nullopt, VRRuntime::SyncFrameCallsite::VRVeryLatePostPresent);
-
-        if (sync_result == VRRuntime::Error::SUCCESS &&
-            m_is_d3d12 &&
-            is_native_openxr_async_wait_active() &&
-            openxr->frame_synced &&
-            !openxr->frame_began)
-        {
-            const auto native_array_swapchain = (uint32_t)runtimes::OpenXR::SwapchainIndex::NATIVE_STEREO_ARRAY;
-            m_d3d12.openxr().pre_acquire(native_array_swapchain);
-        }
+    } catch (...) {
+        SPDLOG_WARNING_EVERY_N_SEC(5, "[OpenXR][native] Could not start async worker; using normal frame pacing");
+        return false;
     }
-
-    m_native_openxr_async_wait_inflight.store(false);
 }
 
 bool VR::is_controller_camera_conflict_guard_active() const {
@@ -4629,6 +4581,10 @@ nlohmann::json VR::get_support_diagnostics() {
             xr["unavailable_reason"] = "OpenXR is not the active runtime";
         } else {
             const auto& runtime = m_openxr;
+            const auto& wait_only = runtime->native_wait_only_handoff;
+            nlohmann::json wait_only_info{{"requested", m_native_openxr_wait_only->value()},
+                {"status", native_openxr_wait_only_status()}, {"worker_waits", wait_only.worker_waits()},
+                {"cooperative_waits", wait_only.cooperative_waits()}};
             std::unique_lock events{runtime->event_mtx, std::try_to_lock};
             std::unique_lock assignment{runtime->sync_assignment_mtx, std::try_to_lock};
             if (events.owns_lock() && assignment.owns_lock()) {
@@ -4640,14 +4596,22 @@ nlohmann::json VR::get_support_diagnostics() {
             } else {
                 xr["unavailable_reason"] = "XR state busy; refresh later";
             }
+            xr["native_wait_only"] = std::move(wait_only_info);
         }
     }
-    const auto ui = get_ui_layer_pose_telemetry_snapshot();
+    std::optional<UILayerPoseTelemetrySnapshot> ui;
+    {
+        std::unique_lock lock{m_ui_layer_pose_telemetry_mtx, std::try_to_lock};
+        if (lock.owns_lock()) { ui = m_ui_layer_pose_snapshot; }
+    }
     nlohmann::json result{
+        {"rendering_method", {{"requested", m_rendering_method->value()}, {"effective", m_rendering_method->value()}}},
         {"read_only", true}, {"cvars", std::move(cvars)}, {"openxr", std::move(xr)},
         {"pacing", utility::support::pacing(display_period, cap)},
-        {"ui_pose_telemetry", {{"sample_count", ui.sample_count},
-            {"last_pose_age_ms", ui.last_pose_age_ms}, {"last_image_age_frames", ui.last_ui_image_age_frames},
+        {"ui_pose_telemetry", {{"snapshot_read", ui.has_value()}, {"sampled", ui && ui->sample_count > 0},
+            {"sample_count", ui ? nlohmann::json(ui->sample_count) : nlohmann::json(nullptr)},
+            {"last_pose_age_ms", ui ? nlohmann::json(ui->last_pose_age_ms) : nlohmann::json(nullptr)},
+            {"last_image_age_frames", ui ? nlohmann::json(ui->last_ui_image_age_frames) : nlohmann::json(nullptr)},
             {"note", "Ages belong to the last telemetry sample, not necessarily this export; zero samples means unavailable."}}},
         {"native_fix_same_pass", is_native_stereo_fix_same_pass_enabled()},
         {"native_fix_preserve_secondary_pass", is_native_stereo_fix_preserve_secondary_pass_enabled()},
@@ -5194,7 +5158,7 @@ void VR::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     update_statistics_overlay(engine);
     update_game_fov();
     update_shf_auto_2d_mode(engine);
-    update_dispatch_auto_2d_mode(engine);
+    update_dispatch_movie_state(engine);
     update_mixtape_auto_2d_mode(engine);
     update_the_sinking_city_2_bink_ui_state(engine);
     update_halo_electra_cinematic_state(engine);
@@ -6174,48 +6138,14 @@ void VR::update_shf_auto_2d_mode(sdk::UGameEngine* engine) {
     }
 }
 
-void VR::update_dispatch_auto_2d_mode(sdk::UGameEngine* engine) {
-    if (!is_dispatch_executable()) {
-        return;
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    if (m_dispatch_auto_2d_last_sample.time_since_epoch().count() != 0 &&
-        now - m_dispatch_auto_2d_last_sample < std::chrono::milliseconds(250)) {
-        return;
-    }
-
-    m_dispatch_auto_2d_last_sample = now;
-
-    const auto decision = evaluate_dispatch_auto_2d(engine);
-
-    if (decision.should_force) {
-        if (!m_dispatch_auto_2d_active) {
-            m_dispatch_auto_2d_previous_mode = m_2d_screen_mode->value();
-            m_dispatch_auto_2d_active = true;
-            spdlog::info(
-                "[Dispatch][Auto2D] active=true previous={} reason={} subsystem={} source={} player={} texture={} playing={} preparing={} buffering={} ready={}",
-                m_dispatch_auto_2d_previous_mode,
-                decision.reason,
-                decision.subsystem.empty() ? "unresolved" : decision.subsystem,
-                decision.source.empty() ? "unresolved" : decision.source,
-                decision.player.empty() ? "unresolved" : decision.player,
-                decision.texture.empty() ? "unresolved" : decision.texture,
-                decision.playing.has_value() ? (*decision.playing ? "true" : "false") : "unresolved",
-                decision.preparing.has_value() ? (*decision.preparing ? "true" : "false") : "unresolved",
-                decision.buffering.has_value() ? (*decision.buffering ? "true" : "false") : "unresolved",
-                decision.ready.has_value() ? (*decision.ready ? "true" : "false") : "unresolved");
-        }
-
-        m_2d_screen_mode->value() = true;
-        return;
-    }
-
-    if (m_dispatch_auto_2d_active) {
-        m_2d_screen_mode->value() = m_dispatch_auto_2d_previous_mode;
-        m_dispatch_auto_2d_active = false;
-        spdlog::info("[Dispatch][Auto2D] active=false restored={}", m_dispatch_auto_2d_previous_mode);
-    }
+void VR::update_dispatch_movie_state(sdk::UGameEngine* engine) {
+    if (!is_dispatch_executable()) { return; }
+    const auto runtime = get_runtime();
+    uevr::dispatch_movie::update({
+        true, m_compatibility_dispatch_world_locked_movies->value(),
+        runtime && runtime->is_openxr(), is_using_native_stereo(), is_using_2d_screen(),
+        is_stereo_emulation_enabled(),
+        g_framework->is_dx11(), g_framework->is_dx12()}, engine ? engine->get_world() : nullptr);
 }
 
 void VR::update_mixtape_auto_2d_mode(sdk::UGameEngine* engine) {
@@ -8007,6 +7937,10 @@ void VR::on_config_load(const utility::Config& cfg, bool set_defaults) {
     for (IModValue& option : m_options) {
         option.config_load(cfg, set_defaults);
     }
+    // A profile without this new key must not inherit an enabled experiment
+    // from an earlier in-process configuration reload.
+    m_native_openxr_wait_only->value() = uevr::openxr_wait::load_setting(
+        cfg.get<bool>(m_native_openxr_wait_only->get_config_name()), set_defaults);
 
     if (set_defaults && is_subnautica2_executable()) {
         // Subnautica 2's UE5.6 native path can render SingleLayerWater black in the right eye.
@@ -8701,6 +8635,11 @@ void VR::draw_resolution_label() {
 void VR::on_frame() {
     ZoneScopedN(__FUNCTION__);
 
+    if (!sdk::where_seeds_fall_version_ready()) {
+        SPDLOG_WARNING_EVERY_N_SEC(5, "[WhereSeedsFall] Waiting for a validated native engine version before CVars, reflection and stereo hooks");
+        return;
+    }
+
     m_last_mod_frame = std::chrono::steady_clock::now();
     m_cvar_manager->on_frame();
     handle_keybinds();
@@ -8974,6 +8913,7 @@ void VR::tick_autores_frame_bound_detect(sdk::UGameEngine* engine, float delta) 
 }
 
 void VR::on_present() {
+    utility::pacing::ScopedEvent pacing_present{utility::pacing::Stage::present};
     ZoneScopedN(__FUNCTION__);
 
     m_present_thread_id = GetCurrentThreadId();
@@ -8988,6 +8928,8 @@ void VR::on_present() {
     }};
 
     m_frame_count = get_runtime()->internal_render_frame_count;
+    pacing_present.data().domain = m_frame_count >= 0 ? utility::pacing::Domain::uevr_render : utility::pacing::Domain::unknown;
+    pacing_present.data().frame = static_cast<uint32_t>(m_frame_count);
 
     begin_duplicate_present_check(); // Mopic: VR_SubmitOncePerEngineFrame (MopicVR.cpp)
     if (!is_using_afr() || m_render_frame_count % 2 == m_left_eye_interval) {
@@ -9150,6 +9092,7 @@ void VR::on_present() {
 }
 
 void VR::on_post_present() {
+    utility::pacing::ScopedEvent pacing_post_present{utility::pacing::Stage::post_present};
     FrameMarkNamed("Present");
     ZoneScopedN(__FUNCTION__);
 
@@ -9159,6 +9102,8 @@ void VR::on_post_present() {
     }
 
     const auto completed_present_frame = m_frame_count;
+    pacing_post_present.data().domain = completed_present_frame >= 0 ? utility::pacing::Domain::uevr_render : utility::pacing::Domain::unknown;
+    pacing_post_present.data().frame = completed_present_frame;
     m_render_frame_count = completed_present_frame;
     if (m_fake_stereo_hook != nullptr) {
         m_fake_stereo_hook->observe_native_frame_present(completed_present_frame);
@@ -9173,6 +9118,12 @@ void VR::on_post_present() {
     std::scoped_lock _{m_openvr_mtx};
     if (handle_session_ended_for_exit(runtime)) { return; } // Mopic: the session was ended for the game's exit (MopicVR.cpp)
 
+    if (runtime->is_openxr() && m_openxr->native_wait_only_handoff.faulted()) {
+        // Only the control thread requests reinitialization. The worker's
+        // atomic fault flag already blocks an unproven second wait/begin/end.
+        runtime->wants_reinitialize = true;
+    }
+
     if (!m_is_d3d12) {
         m_d3d11.on_post_present(this);
     } else {
@@ -9186,11 +9137,16 @@ void VR::on_post_present() {
     }
 
     bool native_openxr_async_wait_requested = false;
-    if (m_is_d3d12 && runtime->is_openxr() && is_native_openxr_async_wait_active()) {
+    const bool wait_only_owned = m_native_openxr_async_operation.load(std::memory_order_acquire) == uevr::openxr_wait::Operation::wait_only &&
+        m_native_openxr_async_worker.busy();
+    if (m_is_d3d12 && runtime->is_openxr() && !runtime->wants_reinitialize &&
+        (is_native_openxr_async_wait_active() || m_native_openxr_wait_only->value() || m_native_openxr_wait_only_was_requested || wait_only_owned)) {
         native_openxr_async_wait_requested = request_native_openxr_async_wait();
         if (native_openxr_async_wait_requested) {
             SPDLOG_INFO_ONCE("[OpenXR][native] Running opt-in xrWaitFrame asynchronously after D3D12 submit");
         }
+    } else {
+        m_native_openxr_async_worker.cancel_pending();
     }
 
     detect_controllers();
@@ -9202,7 +9158,9 @@ void VR::on_post_present() {
             get_synchronize_stage() == VR::SynchronizeStage::VERY_LATE &&
             should_defer_game_specific_very_late_openxr_wait(runtime, m_is_d3d12);
 
-        if (!native_openxr_async_wait_requested && !should_defer_very_late_wait && (get_synchronize_stage() == VR::SynchronizeStage::VERY_LATE || !runtime->got_first_sync)) {
+        if (!native_openxr_async_wait_requested && !should_defer_very_late_wait &&
+            !(runtime->is_openxr() && runtime->wants_reinitialize) &&
+            (get_synchronize_stage() == VR::SynchronizeStage::VERY_LATE || !runtime->got_first_sync)) {
             const auto had_sync = runtime->got_first_sync;
             const auto callsite = get_synchronize_stage() == VR::SynchronizeStage::VERY_LATE
                 ? VRRuntime::SyncFrameCallsite::VRVeryLatePostPresent
@@ -9230,8 +9188,11 @@ void VR::on_post_present() {
             m_openvr->wants_reinitialize = false;
             reinitialize_openvr();
         } else if (runtime->is_openxr()) {
-            m_openxr->wants_reinitialize = false;
-            reinitialize_openxr();
+            m_native_openxr_async_worker.cancel_pending();
+            if (!m_native_openxr_async_worker.busy()) {
+                m_openxr->wants_reinitialize = false;
+                reinitialize_openxr();
+            }
         }
     }
 }
@@ -9358,6 +9319,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         PAGE_KEYBINDS,
         PAGE_CONSOLE,
         PAGE_COMPATIBILITY,
+        PAGE_HEALTH,
         PAGE_DEBUG,
     };
 
@@ -9424,6 +9386,9 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         break;
     case "Debug"_fnv:
         selected_page = PAGE_DEBUG;
+        break;
+    case "Health / Diagnostics"_fnv:
+        selected_page = PAGE_HEALTH;
         break;
     default:
         ImGui::Text("Unknown page selected");
@@ -9637,9 +9602,7 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             m_native_stereo_fix_texture_array_submit->draw("Experimental OpenXR Texture-Array Submit");
             {
                 const auto runtime = get_runtime();
-                const bool has_array_swapchain =
-                    m_openxr != nullptr &&
-                    m_openxr->swapchains.contains((uint32_t)runtimes::OpenXR::SwapchainIndex::NATIVE_STEREO_ARRAY);
+                const bool has_array_swapchain = is_native_stereo_array_ready();
 
                 if (!m_native_stereo_fix_texture_array_submit->value()) {
                     draw_status_badge("Texture-array status:", "skipped: disabled", skipped_color);
@@ -9647,16 +9610,17 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                     draw_status_badge("Texture-array status:", "blocked: Use Same Stereo Pass is on", blocked_color);
                 } else if (!is_native_stereo_fix_enabled()) {
                     draw_status_badge("Texture-array status:", "blocked: Native Stereo Fix inactive", blocked_color);
-                } else if (!m_is_d3d12) {
+                } else if (g_framework == nullptr || !g_framework->is_dx12()) {
                     draw_status_badge("Texture-array status:", "blocked: D3D12 required", blocked_color);
                 } else if (runtime == nullptr || !runtime->is_openxr()) {
                     draw_status_badge("Texture-array status:", "blocked: OpenXR required", blocked_color);
                 } else if (m_rendering_method->value() != RenderingMethod::NATIVE_STEREO) {
                     draw_status_badge("Texture-array status:", "blocked: Native Stereo required", blocked_color);
                 } else if (has_array_swapchain) {
-                    draw_status_badge("Texture-array status:", "active", active_color);
+                    draw_status_badge("Texture-array status:", m_d3d12.openxr().native_array_last_copy_ok()
+                        ? "active: validated array copy submitted" : "ready: waiting for a validated eye copy", active_color);
                 } else {
-                    draw_status_badge("Texture-array status:", "fell back: array swapchain unavailable", fallback_color);
+                    draw_status_badge("Texture-array status:", m_d3d12.openxr().native_array_status(), fallback_color);
                 }
             }
             if (is_native_stereo_fix_same_pass_enabled()) {
@@ -9665,17 +9629,21 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             }
             ImGui::TextWrapped(
                 "Default off. D3D12 + OpenXR + Native Stereo Fix only, and requires Use Same Stereo Pass OFF. "
-                "Copies each eye into a two-slice OpenXR swapchain and falls back to the existing double-wide path if unavailable.");
+                "Copies each eye into a two-slice OpenXR swapchain and falls back to the existing double-wide path if unavailable. "
+                "Can be enabled mid-game; allocation retries are bounded. Toggle off/on to re-arm after the retry limit.");
             m_native_stereo_fix_async_openxr_wait->draw("Experimental Async OpenXR Wait/Pre-Acquire");
             if (!m_native_stereo_fix_async_openxr_wait->value()) {
                 draw_status_badge("Async wait status:", "skipped: disabled", skipped_color);
+            } else if (m_native_openxr_async_worker.failed()) {
+                draw_status_badge("Async wait status:", "fell back: worker failed; reinitialize OpenXR to retry", fallback_color);
             } else if (is_native_stereo_fix_same_pass_enabled()) {
                 draw_status_badge("Async wait status:", "blocked: Use Same Stereo Pass is on", blocked_color);
             } else if (!is_native_stereo_fix_texture_array_submit_enabled()) {
                 draw_status_badge("Async wait status:", "blocked: texture-array submit inactive", blocked_color);
-            } else if (m_openxr == nullptr ||
-                       !m_openxr->swapchains.contains((uint32_t)runtimes::OpenXR::SwapchainIndex::NATIVE_STEREO_ARRAY)) {
+            } else if (!is_native_stereo_array_ready()) {
                 draw_status_badge("Async wait status:", "fell back: array swapchain unavailable", fallback_color);
+            } else if (!m_d3d12.openxr().native_array_last_copy_ok()) {
+                draw_status_badge("Async wait status:", "waiting: validated array copy required", fallback_color);
             } else if (is_native_openxr_async_wait_active()) {
                 draw_status_badge("Async wait status:", "active: opportunistic pre-acquire", active_color);
             } else {
@@ -9687,6 +9655,28 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             ImGui::TextWrapped(
                 "Default off and only active with texture-array submit. Moves xrWaitFrame/pre-acquire off the render thread opportunistically; "
                 "it never auto-enables per game and falls back to the normal wait path if it cannot queue safely.");
+            ImGui::TreePop();
+        }
+
+        ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
+        if (ImGui::TreeNode("Native OpenXR Wait Only")) {
+            m_native_openxr_wait_only->draw("Experimental Async Wait Only (Same Pass compatible)");
+            const auto scope = native_openxr_wait_only_scope();
+            const bool active = scope.enabled() && !m_native_openxr_async_worker.failed() && !m_native_openxr_async_worker.closed() &&
+                m_openxr->native_wait_only_handoff.progress() == uevr::openxr_wait::Progress::active;
+            draw_status_badge("Wait-only status:", native_openxr_wait_only_status(),
+                !m_native_openxr_wait_only->value() ? skipped_color : active ? active_color : fallback_color);
+            if (m_native_openxr_wait_only->value() && m_openxr) {
+                ImGui::Text("Completed waits: worker %llu / normal consumer %llu",
+                    static_cast<unsigned long long>(m_openxr->native_wait_only_handoff.worker_waits()),
+                    static_cast<unsigned long long>(m_openxr->native_wait_only_handoff.cooperative_waits()));
+            }
+            ImGui::TextWrapped(
+                "Default off for each game. D3D12 + OpenXR + Native Stereo + Very Late synchronization only. "
+                "Keep Texture-Array Submit and Wait/Pre-Acquire OFF. Moves only xrWaitFrame to the owned worker; "
+                "does not change Same Pass, shadows, eye copies, or swapchains. May not improve GPU-bound games. "
+                "If poses are already queued or the result is needed immediately, normal pacing is retained. "
+                "Turning it off cancels future work, not an in-progress runtime wait.");
             ImGui::TreePop();
         }
 
@@ -10218,6 +10208,11 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
             m_compatibility_head_turn_camera_stabilizer->draw("Head-Turn Camera Stabilizer");
             m_compatibility_ui_layer_pose_telemetry->draw("UI Layer Pose Telemetry");
             m_compatibility_ui_layer_pose_stabilizer->draw("UI Layer Pose Stabilizer");
+            if (is_dispatch_executable()) {
+                m_compatibility_dispatch_world_locked_movies->draw("Dispatch World-Locked Movies (Experimental)");
+                ImGui::TextWrapped("%s", uevr::dispatch_movie::status());
+                ImGui::TextWrapped("Movies do not change the 2D Screen checkbox. Leave it off to use the separate movie surface.");
+            }
             m_compatibility_pre57_slate_ui_observation->draw("Observe UE5.5/5.6 Slate UI (Experimental)");
             if (m_compatibility_pre57_slate_ui_observation->value() && m_fake_stereo_hook) {
                 ImGui::TextWrapped("%s", m_fake_stereo_hook->get_pre57_slate_ui_observation_status());
@@ -10335,6 +10330,10 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
         }
     }
     
+    if (selected_page == PAGE_HEALTH) {
+        draw_health_diagnostics();
+    }
+
     if (selected_page == PAGE_DEBUG) {
         if (m_fake_stereo_hook != nullptr) {
             m_fake_stereo_hook->on_draw_ui();

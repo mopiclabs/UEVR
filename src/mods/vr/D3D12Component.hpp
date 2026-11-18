@@ -22,9 +22,13 @@
 #include "d3d12/CommandContext.hpp"
 #include "d3d12/NativePairSnapshot.hpp"
 #include "d3d12/TextureContext.hpp"
+#include "DispatchMovieOpenXR.hpp"
 #include "Stalker2NativeD3D12.hpp"
+#include "NativeOpenXRArrayPolicy.hpp"
 
 class VR;
+namespace uevr::dispatch_movie { struct Frame; }
+namespace runtimes { struct OpenXR; }
 namespace render {
 class FrameResourceInspector;
 }
@@ -54,6 +58,7 @@ public:
     const auto& get_last_on_frame_time() const { return m_last_on_frame; }
 
     auto& openxr() { return m_openxr; }
+    const auto& openxr() const { return m_openxr; }
     auto& get_openvr_ui_tex() { return m_openvr.ui_tex; }
 
     struct HitchFrameSnapshot {
@@ -384,14 +389,36 @@ private:
         void initialize(XrSessionCreateInfo& session_info);
         std::optional<std::string> create_swapchains();
         void destroy_swapchains();
-        bool pre_acquire(uint32_t swapchain_idx);
+        bool ensure_dispatch_movie(uint32_t width, uint32_t height, uint64_t epoch);
+        bool copy_dispatch_movie(const uevr::dispatch_movie::Frame& frame);
+        bool retire_dispatch_movie(bool drain);
+        uint64_t dispatch_movie_failed_epoch{};
+        void ensure_native_array(bool during_setup = false);
+        bool native_array_ready(XrSession session, uint32_t width, uint32_t height) const {
+            return session != XR_NULL_HANDLE && m_native_array_session.load(std::memory_order_acquire) == session &&
+                m_native_array_width.load(std::memory_order_relaxed) == width &&
+                m_native_array_height.load(std::memory_order_relaxed) == height &&
+                m_native_array_session.load(std::memory_order_acquire) == session;
+        }
+        bool native_array_last_copy_ok() const { return m_native_array_copy_ok.load(std::memory_order_acquire); }
+        void note_native_array_copy(bool success) { m_native_array_copy_ok.store(success, std::memory_order_release); }
+        const char* native_array_status() const;
+        using NativeArraySources = std::array<ComPtr<ID3D12Resource>, 2>;
+        bool wait_native_array_image(uint32_t swapchain_idx, XrDuration timeout);
+        bool wait_native_array_image(runtimes::OpenXR& runtime, uint32_t swapchain_idx, XrDuration timeout);
+        bool native_array_faulted(uint32_t swapchain_idx) const;
+        void fault_native_array(uint64_t generation);
+        void retire_native_array_sources();
+        uint64_t native_array_generation() const { return m_native_array_generation.load(std::memory_order_acquire); }
+        bool pre_acquire_native_array(runtimes::OpenXR& runtime, uevr::native_array::FrameKey frame, uint64_t generation);
         void release_acquired(uint32_t swapchain_idx);
         bool copy(uint32_t swapchain_idx, ID3D12Resource* src,
             std::optional<std::function<void(d3d12::CommandContext&, ID3D12Resource*)>> pre_commands = std::nullopt,
             std::optional<std::function<void(d3d12::CommandContext&)>> additional_commands = std::nullopt,
             D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT,
             D3D12_BOX* src_box = nullptr,
-            std::shared_ptr<uevr::stalker2_native::PairFrame> retained_stalker_pair = nullptr);
+            std::shared_ptr<uevr::stalker2_native::PairFrame> retained_stalker_pair = nullptr,
+            const NativeArraySources* retained_native_sources = nullptr);
 
         void copy(uint32_t swapchain_idx, ID3D12Resource* src,
             D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT, D3D12_BOX* src_box = nullptr)
@@ -404,7 +431,7 @@ private:
             ID3D12Resource* src,
             uint64_t source_generation,
             D3D12_RESOURCE_STATES src_state = D3D12_RESOURCE_STATE_PRESENT);
-        void wait_for_all_copies();
+        void wait_for_all_copies(bool drain_native_array = false);
 
         bool ever_acquired(uint32_t swapchain_idx) {
             std::scoped_lock _{this->mtx};
@@ -443,8 +470,14 @@ private:
         XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
 
         struct SwapchainContext {
+            uevr::dispatch_movie::ImageAccess movie_access;
             // Declared first so command contexts retire before these references are destroyed.
             std::vector<std::shared_ptr<uevr::stalker2_native::PairFrame>> stalker_pairs{};
+            std::vector<NativeArraySources> native_array_sources{};
+            std::vector<ComPtr<ID3D12Resource>> movie_sources{};
+            uevr::native_array::ImageWait native_array_wait;
+            bool native_array_release_pending{false};
+            bool dispatch_movie_gpu_fault{false};
             std::vector<XrSwapchainImageD3D12KHR> textures{};
             std::vector<std::unique_ptr<d3d12::TextureContext>> texture_contexts{};
             uint32_t num_textures_acquired{0};
@@ -468,6 +501,18 @@ private:
         std::recursive_mutex mtx{};
         std::array<uint32_t, 2> last_resolution{};
         bool made_depth_with_null_defaults{false};
+
+        enum class NativeArrayStatus : uint8_t { unavailable, waiting, ready, failed, exhausted, gpu_unproven };
+        std::atomic<NativeArrayStatus> m_native_array_status{NativeArrayStatus::unavailable};
+        std::atomic<XrSession> m_native_array_session{XR_NULL_HANDLE};
+        std::atomic<uint32_t> m_native_array_width{0}, m_native_array_height{0};
+        std::atomic_bool m_native_array_requested{false};
+        std::atomic_bool m_native_array_copy_ok{false};
+        std::atomic_bool m_native_array_acquired{false};
+        std::atomic_bool m_native_array_references_pending{false};
+        std::atomic<uint64_t> m_native_array_generation{1};
+        uevr::native_array::Retry m_native_array_retry;
+        bool m_native_array_gpu_fault{false}; // Copy-mutex owned; an unproven submission cannot be reused.
 
         friend class D3D12Component;
     } m_openxr;

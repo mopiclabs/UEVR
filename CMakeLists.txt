@@ -505,6 +505,12 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	)
 
 	add_test(NAME compatibility-policy-tests COMMAND compatibility-policy-tests)
+	find_package(Python3 COMPONENTS Interpreter QUIET)
+	if(Python3_Interpreter_FOUND)
+	    add_test(NAME ue59-source-audit-tests COMMAND "${Python3_EXECUTABLE}"
+	        "${CMAKE_CURRENT_SOURCE_DIR}/tests/AuditUE59SourcesTests.py")
+	    set_tests_properties(ue59-source-audit-tests PROPERTIES TIMEOUT 30)
+	endif()
 	add_test(NAME build-metadata-tests COMMAND powershell -NoProfile -NonInteractive
 	    -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildMetadataTests.ps1")
 	set_tests_properties(build-metadata-tests PROPERTIES TIMEOUT 120)
@@ -663,6 +669,7 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 		"tests/UE58UIInitializationTests.cpp"
 		"tests/KtjLOpenXRFactoryTests.cpp"
 		"src/mods/vr/KtjLOpenXRFactory.cpp"
+		"src/utility/PacingRecorder.cpp"
 		"dependencies/submodules/UESDK/tests/DiscoveryValidationTests.cpp"
 		"dependencies/submodules/UESDK/tests/LayoutSafetyTests.cpp"
 	)
@@ -703,6 +710,86 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	)
 
 	add_test(NAME diagnostic-safety-tests COMMAND diagnostic-safety-tests)
+	add_dependencies(diagnostic-safety-tests support-capture-fixture support-capture-host)
+	find_program(UEVR_SUPPORT_PWSH NAMES pwsh PATHS "C:/Program Files/PowerShell/7" REQUIRED)
+	add_test(NAME support-capture-safety-tests COMMAND "${UEVR_SUPPORT_PWSH}"
+	    -NoProfile -NonInteractive -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/SupportCaptureTests.ps1"
+	    -SourceRoot "${CMAKE_CURRENT_SOURCE_DIR}" -Fixture "$<TARGET_FILE:support-capture-fixture>"
+	    -CaptureHost "$<TARGET_FILE:support-capture-host>")
+	set_tests_properties(support-capture-safety-tests PROPERTIES TIMEOUT 60)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
+# Target support-capture-fixture
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET support-capture-fixture)
+	set(support-capture-fixture_SOURCES "")
+
+	list(APPEND support-capture-fixture_SOURCES
+		"tests/SupportCaptureFixture.cpp"
+	)
+
+	list(APPEND support-capture-fixture_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${support-capture-fixture_SOURCES})
+	add_library(support-capture-fixture SHARED)
+
+	if(support-capture-fixture_SOURCES)
+		target_sources(support-capture-fixture PRIVATE ${support-capture-fixture_SOURCES})
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${support-capture-fixture_SOURCES})
+
+	target_compile_features(support-capture-fixture PUBLIC
+		cxx_std_17
+	)
+
+	target_compile_options(support-capture-fixture PUBLIC
+		"/Zi"
+	)
+
+	target_link_options(support-capture-fixture PUBLIC
+		"/DEBUG"
+	)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
+# Target support-capture-host
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET support-capture-host)
+	set(support-capture-host_SOURCES "")
+
+	list(APPEND support-capture-host_SOURCES
+		"tests/SupportCaptureHost.cpp"
+	)
+
+	list(APPEND support-capture-host_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${support-capture-host_SOURCES})
+	add_executable(support-capture-host)
+
+	if(support-capture-host_SOURCES)
+		target_sources(support-capture-host PRIVATE ${support-capture-host_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT support-capture-host)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${support-capture-host_SOURCES})
+
+	target_compile_features(support-capture-host PRIVATE
+		cxx_std_17
+	)
 
 	unset(CMKR_TARGET)
 	unset(CMKR_SOURCES)
@@ -1127,6 +1214,154 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 
 	add_test(NAME input-hook-installation-tests COMMAND input-hook-installation-tests)
 	set_tests_properties(input-hook-installation-tests PROPERTIES TIMEOUT 60)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
+# Target ue59-native-d3d11-tests
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET ue59-native-d3d11-tests)
+	set(ue59-native-d3d11-tests_SOURCES "")
+
+	list(APPEND ue59-native-d3d11-tests_SOURCES
+		"tests/UE59NativeD3D11Tests.cpp"
+	)
+
+	list(APPEND ue59-native-d3d11-tests_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${ue59-native-d3d11-tests_SOURCES})
+	add_executable(ue59-native-d3d11-tests)
+
+	if(ue59-native-d3d11-tests_SOURCES)
+		target_sources(ue59-native-d3d11-tests PRIVATE ${ue59-native-d3d11-tests_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ue59-native-d3d11-tests)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${ue59-native-d3d11-tests_SOURCES})
+
+	target_compile_features(ue59-native-d3d11-tests PRIVATE
+		cxx_std_23
+	)
+
+	target_include_directories(ue59-native-d3d11-tests PRIVATE
+		"src/"
+	)
+
+	target_link_libraries(ue59-native-d3d11-tests PRIVATE
+		d3d11
+	)
+
+	add_test(NAME ue59-native-d3d11-tests COMMAND ue59-native-d3d11-tests)
+	set_tests_properties(ue59-native-d3d11-tests PROPERTIES TIMEOUT 30)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
+# Target dispatch-movie-tests
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET dispatch-movie-tests)
+	set(dispatch-movie-tests_SOURCES "")
+
+	list(APPEND dispatch-movie-tests_SOURCES
+		"tests/DispatchMovieTests.cpp"
+	)
+
+	list(APPEND dispatch-movie-tests_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${dispatch-movie-tests_SOURCES})
+	add_executable(dispatch-movie-tests)
+
+	if(dispatch-movie-tests_SOURCES)
+		target_sources(dispatch-movie-tests PRIVATE ${dispatch-movie-tests_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT dispatch-movie-tests)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${dispatch-movie-tests_SOURCES})
+
+	target_compile_features(dispatch-movie-tests PRIVATE
+		cxx_std_23
+	)
+
+	target_include_directories(dispatch-movie-tests PRIVATE
+		"src/"
+	)
+
+	target_link_libraries(dispatch-movie-tests PRIVATE
+		d3d11
+		d3d12
+		dxgi
+		openxr_loader
+	)
+
+	add_test(NAME dispatch-movie-tests COMMAND dispatch-movie-tests)
+	set_tests_properties(dispatch-movie-tests PROPERTIES TIMEOUT 60)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
+# Target native-openxr-array-tests
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET native-openxr-array-tests)
+	set(native-openxr-array-tests_SOURCES "")
+
+	list(APPEND native-openxr-array-tests_SOURCES
+		"tests/NativeOpenXRArrayTests.cpp"
+	)
+
+	list(APPEND native-openxr-array-tests_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${native-openxr-array-tests_SOURCES})
+	add_executable(native-openxr-array-tests)
+
+	if(native-openxr-array-tests_SOURCES)
+		target_sources(native-openxr-array-tests PRIVATE ${native-openxr-array-tests_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT native-openxr-array-tests)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${native-openxr-array-tests_SOURCES})
+
+	target_compile_features(native-openxr-array-tests PRIVATE
+		cxx_std_23
+	)
+
+	if(MSVC) # msvc
+		target_compile_options(native-openxr-array-tests PRIVATE
+			"/EHa"
+		)
+	endif()
+
+	target_include_directories(native-openxr-array-tests PRIVATE
+		"src/"
+	)
+
+	target_link_libraries(native-openxr-array-tests PRIVATE
+		d3d12
+		dxgi
+	)
+
+	add_test(NAME native-openxr-array-tests COMMAND native-openxr-array-tests "${CMAKE_CURRENT_SOURCE_DIR}")
+	set_tests_properties(native-openxr-array-tests PROPERTIES TIMEOUT 30)
 
 	unset(CMKR_TARGET)
 	unset(CMKR_SOURCES)
@@ -1685,9 +1920,11 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/CVarManager.cpp"
 	"src/mods/vr/D3D11Component.cpp"
 	"src/mods/vr/D3D12Component.cpp"
+	"src/mods/vr/DispatchMovie.cpp"
 	"src/mods/vr/FFakeStereoRenderingHook.cpp"
 	"src/mods/vr/GalacticRacerLetterboxing.cpp"
 	"src/mods/vr/GalacticRacerPanini.cpp"
+	"src/mods/vr/HealthDiagnostics.cpp"
 	"src/mods/vr/IXRTrackingSystemHook.cpp"
 	"src/mods/vr/KtjLOpenXRFactory.cpp"
 	"src/mods/vr/MopicNativeSubmitD3D11.cpp"
@@ -1716,6 +1953,7 @@ list(APPEND uevr_SOURCES
 	"src/utility/ImGui.cpp"
 	"src/utility/Nascar25HookCompatibility.cpp"
 	"src/utility/Nascar26HookCompatibility.cpp"
+	"src/utility/PacingRecorder.cpp"
 	"src/ExceptionHandler.hpp"
 	"src/Framework.hpp"
 	"src/LicenseStrings.hpp"
@@ -1760,6 +1998,11 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/D3D11Component.hpp"
 	"src/mods/vr/D3D12Component.hpp"
 	"src/mods/vr/DeadAsDiscoNativeFix.hpp"
+	"src/mods/vr/DispatchMovie.hpp"
+	"src/mods/vr/DispatchMovieD3D11.hpp"
+	"src/mods/vr/DispatchMovieD3D12.hpp"
+	"src/mods/vr/DispatchMovieOpenXR.hpp"
+	"src/mods/vr/DispatchMoviePolicy.hpp"
 	"src/mods/vr/DuneFrameHandoff.hpp"
 	"src/mods/vr/DuneFrameHandoffDiscovery.hpp"
 	"src/mods/vr/DuneNativeTransaction.hpp"
@@ -1813,7 +2056,14 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/MopicNativeSubmitD3D12.hpp"
 	"src/mods/vr/NativeFrameDiagnostics.hpp"
 	"src/mods/vr/NativeFrameDiagnosticsJson.hpp"
+	"src/mods/vr/NativeOpenXRArrayD3D12.hpp"
+	"src/mods/vr/NativeOpenXRArrayPolicy.hpp"
+	"src/mods/vr/NativeOpenXRAsyncWorker.hpp"
+	"src/mods/vr/NativeOpenXRWaitOnly.hpp"
+	"src/mods/vr/NativeStereoCopyExtent.hpp"
 	"src/mods/vr/OverlayComponent.hpp"
+	"src/mods/vr/ParadoxDriveRHI.hpp"
+	"src/mods/vr/ParadoxDriveRHIContracts.hpp"
 	"src/mods/vr/PerfLog.hpp"
 	"src/mods/vr/PerfLogXr.hpp"
 	"src/mods/vr/PhantomBladeZeroNative.hpp"
@@ -1838,11 +2088,22 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/StellarBladeSlate.hpp"
 	"src/mods/vr/StockFrameBindingMigration.hpp"
 	"src/mods/vr/StupidNeverDiesUI.hpp"
+	"src/mods/vr/Subnautica2BetaRenderTarget.hpp"
+	"src/mods/vr/Subnautica2BetaSlate.hpp"
+	"src/mods/vr/UE521ViewExtension.hpp"
+	"src/mods/vr/UE521ViewExtensionCode.hpp"
 	"src/mods/vr/UE57SlateSymbols.hpp"
+	"src/mods/vr/UE584Development.hpp"
+	"src/mods/vr/UE584DevelopmentContracts.hpp"
 	"src/mods/vr/UE58NativeContracts.hpp"
 	"src/mods/vr/UE58NativeFix.hpp"
 	"src/mods/vr/UE58OwnedUITexture.hpp"
 	"src/mods/vr/UE58UIInitialization.hpp"
+	"src/mods/vr/UE59NativeContracts.hpp"
+	"src/mods/vr/UE59NativeD3D11.hpp"
+	"src/mods/vr/UE59NativeFix.hpp"
+	"src/mods/vr/UE59Slate.hpp"
+	"src/mods/vr/UE59ViewExtension.hpp"
 	"src/mods/vr/d3d12/ComPtr.hpp"
 	"src/mods/vr/d3d12/CommandContext.hpp"
 	"src/mods/vr/d3d12/DirectXTK.hpp"
@@ -1876,17 +2137,22 @@ list(APPEND uevr_SOURCES
 	"src/utility/Nascar26HookCompatibility.hpp"
 	"src/utility/NascarHookCompatibility.hpp"
 	"src/utility/OpaqueStateRegistry.hpp"
+	"src/utility/PacingRecorder.hpp"
+	"src/utility/PacingRecorderJson.hpp"
 	"src/utility/PostInitCodeMemory.hpp"
 	"src/utility/PostInitValidation.hpp"
 	"src/utility/ProtectedHookTrampoline.hpp"
 	"src/utility/ReadOnlyPointerAccessor.hpp"
 	"src/utility/SceneCaptureLifecycle.hpp"
+	"src/utility/SceneStateValidation.hpp"
 	"src/utility/SupportDiagnostics.hpp"
+	"src/utility/SupportHealth.hpp"
 	"src/utility/UObjectAllocatorDiscovery.hpp"
 	"src/utility/UObjectArrayBrowser.hpp"
 	"src/utility/UObjectCandidateSnapshot.hpp"
 	"src/utility/UObjectMetadataFilter.hpp"
 	"src/utility/UObjectScanBudget.hpp"
+	"src/utility/VirtualSlotValidation.hpp"
 	"src/uevr-imgui/imgui_impl_dx11.h"
 	"src/uevr-imgui/imgui_impl_dx12.h"
 	"src/uevr-imgui/imgui_impl_win32.h"
@@ -1982,6 +2248,9 @@ add_custom_command(
 add_custom_command(
     TARGET uevr POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:openvr> $<TARGET_FILE_DIR:uevr>)
+add_custom_command(
+    TARGET uevr POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/tools/support" "$<TARGET_FILE_DIR:uevr>/support")
 
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
