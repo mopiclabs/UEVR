@@ -2252,19 +2252,14 @@ private:
     int m_last_advanced_frame_count{-1};
     std::chrono::steady_clock::time_point m_last_engine_frame_advance{};
 
-    // VR_AutoRes (update_autores): the controller, the last engine stall (loading) and frame generation (more Presents
-    // than engine frames over a second).
+    // VR_AutoRes (update_autores): the controller, stalls (loading, AutoResPolicy.hpp StallClock) and frame generation
+    // (Presents without a new engine frame, FrameGenCheck).
     void update_autores();
     void tick_autores_frame_bound_detect(sdk::UGameEngine* engine, float delta); // on_pre_engine_tick
     AutoResController m_autores_controller{};
-    std::chrono::steady_clock::time_point m_last_engine_stall{};
-    std::chrono::steady_clock::time_point m_autores_last_present{};
-    float m_autores_present_interval{0.0f}; // seconds, a running average
-    std::chrono::steady_clock::time_point m_autores_count_start{};
-    uint32_t m_autores_presents{0};
-    uint32_t m_autores_engine_frames{0};
+    uevr::autores::StallClock m_autores_stall{};
     int m_autores_last_frame_count{-1};
-    bool m_autores_frame_generation{false};
+    uevr::autores::FrameGenCheck m_autores_frame_generation{};
     // VR_AutoResFrameBoundDetect: the game thread's tick sums and the engine's frame rate settings (read once there).
     uevr::autores::TickClock m_autores_tick_clock{};
     uevr::autores::EngineFrameRate m_autores_engine_frame_rate{};
