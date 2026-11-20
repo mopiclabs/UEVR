@@ -412,17 +412,60 @@ static void test_step_strikes() {
     expect(!u.verdict(true, 200.0), "minutes later another misread is a first again, not the second");
 }
 
-// Frame generation (FrameGenCheck), fed as VR::update_autores feeds it: UEVR's stall (no new engine frame for 250 ms)
-// and loading (a stall in the last 3 s). It also counts the seconds the ratio alone, the check before 2026-11-20, read
-// as frame generation, to show a trace is one that fooled it.
+// StallClock: UEVR's stall (no new engine frame for 250 ms, or no Present for max(250 ms, 4x the usual interval)) and
+// loading (a stall in the last 3 s).
+static void test_stall_clock() {
+    constexpr int64_t MS = 1'000'000;
+    const int64_t t0 = 1'000'000 * MS;
+
+    {
+        ar::StallClock c{};
+        auto frame = t0;
+        auto stalls = 0;
+
+        for (int i = 1; i <= 120; ++i) {
+            frame = t0 + i * 16 * MS;
+            stalls += c.on_present(frame, frame) ? 1 : 0;
+        }
+
+        expect(stalls == 0 && !c.loading(frame), "stall: Presents with new engine frames are none");
+        expect(!c.on_present(frame + 200 * MS, frame), "stall: the engine still within 250 ms of its last frame");
+        expect(c.on_present(frame + 256 * MS, frame), "stall: no new engine frame for over 250 ms");
+        expect(c.loading(frame + 256 * MS + 2900 * MS) && !c.loading(frame + 256 * MS + 3000 * MS), "stall: loading for 3 s after it");
+    }
+
+    {
+        ar::StallClock c{};
+        auto t = t0;
+
+        for (int i = 0; i < 200; ++i) {
+            t += 100 * MS;
+            c.on_present(t, t);
+        }
+
+        t += 350 * MS;
+        expect(!c.on_present(t, t), "stall: a 10 Hz game presenting after 350 ms is merely slow");
+        t += 2000 * MS;
+        expect(c.on_present(t, t), "stall: no Present for 4x the usual interval");
+    }
+
+    {
+        ar::StallClock c{};
+        expect(c.on_present(t0, 0) && c.loading(t0), "stall: no engine frame yet");
+    }
+}
+
+// Frame generation (FrameGenCheck), fed as VR::update_autores feeds it (StallClock in front). It also counts the seconds
+// the ratio alone, the check before 2026-11-20, read as frame generation, to show a trace is one that fooled it.
 struct FrameGenFeed {
     static constexpr int64_t MS = 1'000'000;
 
     ar::FrameGenCheck check{};
+    ar::StallClock stalls{};
     int64_t now{1'000'000 * MS};
     int64_t last_frame{now};
-    int64_t last_stall{-1};
     int changes{0};
+    bool ever_on{false};
     size_t step{0};
     int64_t old_start{0};
     uint32_t old_presents{0};
@@ -436,14 +479,9 @@ struct FrameGenFeed {
             last_frame = now;
         }
 
-        const auto stall = now - last_frame > 250 * MS;
-
-        if (stall) {
-            last_stall = now;
-        }
-
-        const auto loading = last_stall >= 0 && now - last_stall < 3000 * MS;
-        changes += check.on_present(now, new_frame, stall, loading) ? 1 : 0;
+        const auto stall = stalls.on_present(now, last_frame);
+        changes += check.on_present(now, new_frame, stall) ? 1 : 0;
+        ever_on = ever_on || check.on;
 
         ++old_presents;
         old_frames += new_frame ? 1 : 0;
@@ -456,13 +494,21 @@ struct FrameGenFeed {
     }
 
     // Presents at `hz` for `seconds`; `pattern` per Present, repeating: 'N' brings a new engine frame, 'd' does not.
-    void run(double seconds, int hz, const char* pattern) {
+    FrameGenFeed& run(double seconds, int hz, const char* pattern) {
         const auto n = static_cast<int>(seconds * hz + 0.5);
         const auto len = std::strlen(pattern);
 
         for (int i = 0; i < n; ++i) {
             present(1000 * MS / hz, pattern[step++ % len] == 'N');
         }
+
+        return *this;
+    }
+
+    // No Present for `ms` (a synchronous load).
+    FrameGenFeed& pause(int ms) {
+        now += ms * MS;
+        return *this;
     }
 };
 
@@ -481,6 +527,8 @@ static void test_frame_generation() {
         expect(f.check.on, "frame generation: two seconds in a row are");
         f.run(5.0, 120, "NNdd");
         expect(f.check.on && f.changes == 1, "frame generation: 1 and 3 Presents per engine frame in turn is still 2:1");
+        f.run(5.0, 160, "Nddd");
+        expect(f.check.on && f.changes == 1, "frame generation: 4 Presents per engine frame is too");
         f.run(3.0, 60, "d");
         expect(f.check.on, "frame generation: a loading screen does not turn it off");
         f.run(5.0, 120, "Nd");
@@ -491,36 +539,80 @@ static void test_frame_generation() {
 
     // TEKKEN 8 after a stage select (2026-11-20): UEVR holds its submits for 250 ms while the game presents 7-32 times,
     // then a loading screen presents at 51-60 Hz with the engine frame put, then the fight; sometimes a second hold with
-    // 60-73 Presents. Every phase of the second against the load.
+    // 60-73 Presents, shorter than a stall. The second hold at every 5 ms from 2 to 4 s after the load (PR #38 review: 27
+    // of these 400 passed the ratio in two seconds in a row), the load at 20 phases of the second.
     auto fooled_old = 0;
 
-    for (int phase = 0; phase < 20; ++phase) {
+    for (int i = 0; i < 400; ++i) {
         FrameGenFeed f{};
-        f.run(2.0 + phase * 0.05, 60, "N");
-        f.run(0.25, 128, "d");
-        f.run(4.0, 55, "d");
-        f.run(2.0, 60, "N");
-        f.run(0.25, 292, "d");
-        f.run(5.0, 60, "N");
+        f.run(2.0 + (i % 20) * 0.05, 60, "N").run(0.25, 128, "d").run(4.0, 55, "d");
+        f.run(2.0 + i * 0.005, 60, "N").run(0.25, 292, "d").run(5.0, 60, "N");
         fooled_old += f.old_seconds > 0 ? 1 : 0;
-        expect(!f.check.on && f.changes == 0, "frame generation: TEKKEN's stage load is none, at any phase");
+        expect(!f.ever_on && f.changes == 0, "frame generation: TEKKEN's stage load is none, at any phase");
     }
 
-    expect(fooled_old >= 10, "frame generation: the TEKKEN trace fooled the one-second check");
+    expect(fooled_old >= 200, "frame generation: the TEKKEN trace fooled the one-second check");
 
-    // A burst of Presents without a stall (the engine back within 250 ms) passes the ratio for one second only.
-    auto fooled_old_burst = 0;
+    // Holds shorter than a stall (the engine back within 250 ms), at 200 phases of the second (PR #38 review: 14, 3 and
+    // 20 of the first three passed the ratio in two seconds in a row), and seconds of short hitches.
+    struct Hold {
+        int fps;
+        double seconds;
+        int hz;
+    };
 
-    for (int phase = 0; phase < 20; ++phase) {
+    for (const auto& h : {Hold{60, 0.25, 292}, Hold{60, 0.24, 250}, Hold{30, 0.24, 292}, Hold{60, 0.2, 150}}) {
+        auto fooled = 0;
+
+        for (int i = 0; i < 200; ++i) {
+            FrameGenFeed f{};
+            f.run(4.0 + i * 0.005, h.fps, "N").run(h.seconds, h.hz, "d").run(5.0, h.fps, "N");
+            fooled += f.old_seconds > 0 ? 1 : 0;
+            expect(!f.ever_on && f.changes == 0, "frame generation: a hold is one frame, at any phase");
+        }
+
+        expect(fooled >= 100, "frame generation: the hold fooled the one-second check");
+    }
+
+    {
         FrameGenFeed f{};
-        f.run(3.0 + phase * 0.05, 60, "N");
-        f.run(0.2, 150, "d");
-        f.run(5.0, 60, "N");
-        fooled_old_burst += f.old_seconds > 0 ? 1 : 0;
-        expect(!f.check.on && f.changes == 0, "frame generation: one mixed second is not frame generation");
+        f.run(3.0, 60, "N").run(5.0, 110, "NNNNNNddddd").run(5.0, 60, "N");
+        expect(!f.ever_on && f.old_seconds >= 4, "frame generation: hitches on a sixth of the frames are none");
     }
 
-    expect(fooled_old_burst >= 5, "frame generation: the burst fooled the one-second check");
+    // A stall every few seconds (PR #38 review): real frame generation still turns on, and turns off when the game stops
+    // generating, with the stalls going on.
+    for (const auto every : {1.5, 2.0, 3.0, 4.0}) {
+        FrameGenFeed f{};
+        f.run(0.5, 120, "Nd");
+        auto on = 0;
+
+        for (int i = 0; i < 20; ++i) {
+            f.pause(300).run(every - 0.3, 120, "Nd");
+            on += i >= 3 && f.check.on ? 1 : 0;
+        }
+
+        expect(on == 17, "frame generation: on with a stall every few seconds");
+
+        for (int i = 0; i < 20; ++i) {
+            f.run(0.3, 60, "d").run(every - 0.3, 60, "N");
+        }
+
+        expect(!f.check.on, "frame generation: and off once it stops, the stalls going on");
+    }
+
+    {
+        FrameGenFeed f{};
+        f.run(10.0, 120, "Nd").pause(300).run(1.2, 60, "N");
+        auto off = !f.check.on;
+
+        for (int i = 0; i < 10; ++i) {
+            f.pause(300).run(1.2, 60, "N");
+            off = off && !f.check.on;
+        }
+
+        expect(off, "frame generation: turned off at a stall, then a stall every 1.5 s: off at the first second");
+    }
 }
 
 int main() {
@@ -535,6 +627,7 @@ int main() {
     test_internal_recovery();
     test_anchor_gate();
     test_step_strikes();
+    test_stall_clock();
     test_frame_generation();
 
     if (failures == 0) {

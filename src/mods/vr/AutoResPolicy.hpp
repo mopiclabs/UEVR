@@ -318,16 +318,59 @@ struct FrameBoundJudge {
     }
 };
 
-// Frame generation, hinted as CPU BOOST ("FG on, freeze adjustments", design v1 §3-2): the game presents half again as
-// often as its engine makes frames (at least 10) over a second, in FRAME_GEN_SECONDS judged seconds in a row; off at the
-// first judged second without it. A load reads like it and must not: Presents without a new engine frame pile up while
-// the engine stalls (UEVR's 250 ms submit hold, a loading screen whose engine frame stays put), and a second that mixes
-// them with normal frames passes the ratio once (TEKKEN 8 after every stage select, 2026-11-20; every game measured had
-// such hints, 0.6-1.7 a run, each off a second later, and each one restarted the runtime's 10 s count before a step up).
-// So a stall at a Present starts the second over, a second that ends while loading (a stall in the last 3 s) is not
-// judged and keeps the verdict, and one second is not enough (aram, 2026-11-20: both). Replayed over the harness runs'
-// Presents: no hint left in the 211 runs that had them; real frame generation (55 runs, Wukong DLSS-G and Hogwarts) is on
-// in 86-99 % of the seconds, against 84-93 % before (loading screens no longer turn it off).
+// VR_AutoRes's stall and loading rule, at each Present (VR::update_autores). A stall: the engine made no new frame for
+// 250 ms (as should_skip_duplicate_present counts it), or the game did not present (a synchronous load, which refreshes
+// the frame advance before this runs) for 250 ms and four times its usual interval, so a game that is merely that slow
+// still counts as running. Loading: a stall in the last 3 s.
+inline constexpr int64_t STALL_ENGINE_FRAME_NS = 250'000'000;
+inline constexpr float STALL_PRESENT_GAP_SECONDS = 0.25f;
+inline constexpr int64_t LOADING_AFTER_STALL_NS = 3'000'000'000;
+
+struct StallClock {
+    int64_t last_present_ns{0}; // 0: none yet
+    int64_t last_stall_ns{0};   // 0: none yet
+    float present_interval{0.0f}; // seconds, a running average
+
+    // One Present at now_ns, the engine's last new frame at engine_frame_ns. True when this Present sees a stall.
+    bool on_present(int64_t now_ns, int64_t engine_frame_ns) {
+        auto stall = false;
+
+        if (last_present_ns != 0) {
+            const auto gap = static_cast<float>(static_cast<double>(now_ns - last_present_ns) / 1e9);
+            stall = gap > (std::max)(STALL_PRESENT_GAP_SECONDS, 4.0f * present_interval);
+            present_interval = 0.9f * present_interval + 0.1f * gap;
+        }
+
+        stall = stall || now_ns - engine_frame_ns > STALL_ENGINE_FRAME_NS;
+
+        if (stall) {
+            last_stall_ns = now_ns;
+        }
+
+        last_present_ns = now_ns;
+        return stall;
+    }
+
+    bool loading(int64_t now_ns) const { return last_stall_ns != 0 && now_ns - last_stall_ns < LOADING_AFTER_STALL_NS; }
+};
+
+// Frame generation, hinted as CPU BOOST ("FG on, freeze adjustments", design v1 §3-2): over a second, half again as many
+// Presents as engine frames (10 or more), and the extra Presents spread over at least a third of those frames (each
+// counted once), in FRAME_GEN_SECONDS judged seconds in a row; off at the first judged second without it.
+// Holds read like frame generation and must not: Presents without a new engine frame pile up while the engine stalls
+// (UEVR's 250 ms submit hold, a loading screen whose engine frame stays put) or hitches for less than a stall, and a
+// second that mixed them with normal frames passed the ratio (TEKKEN 8 after every stage select, 2026-11-20; every game
+// measured had such hints, 0.6-1.7 a run, each off a second later, and each one restarted the runtime's 10 s count before
+// a step up). So a stall at a Present starts the second over (nothing is judged while the engine is stalled, and the
+// verdict stays: real frame generation stays on through a loading screen), one second is not enough (aram, 2026-11-20),
+// and a hold counts as one frame (PR #38 review: a hold shorter than a stall that straddled two seconds passed the ratio
+// in both). A stall does not start the run of seconds over, and a second is judged right after one (PR #38 review: with a
+// stall every few seconds the verdict could not change, either way). A third, not a half: real frame generation alternates
+// 1 and 3 Presents per engine frame in places (Hogwarts AFR, 2026-11-03: 0.49 of the frames); the seconds that passed the
+// ratio with extras on fewer than a third of the frames were holds (one frame shown 7-11 times among 12-25). Replayed
+// over the harness runs' Presents and sampled once a second, as the hints go out: no hint in the 215 runs that had them;
+// real frame generation on in 94.9 % of the seconds in 35 Wukong DLSS-G runs and 82.3 % in 20 Hogwarts runs, against
+// 92.9 and 84.1 % with the one-second ratio.
 inline constexpr int64_t FRAME_GEN_SECOND_NS = 1'000'000'000;
 inline constexpr uint32_t FRAME_GEN_MIN_ENGINE_FRAMES = 10;
 inline constexpr int FRAME_GEN_SECONDS = 2;
@@ -337,20 +380,25 @@ struct FrameGenCheck {
     int64_t start_ns{0};
     uint32_t presents{0};
     uint32_t engine_frames{0};
-    int seconds{0}; // judged seconds in a row with frame generation, up to FRAME_GEN_SECONDS
+    uint32_t frames_with_extra{0}; // engine frames followed by a Present without a new one, counted once each
+    bool extra_seen{false};        // the current engine frame got one
+    int seconds{0};                // judged seconds in a row with frame generation, up to FRAME_GEN_SECONDS
 
-    // One Present at now_ns: whether it brought a new engine frame, whether UEVR saw a stall at it, and whether UEVR is
-    // loading. True when `on` changed.
-    bool on_present(int64_t now_ns, bool new_engine_frame, bool stall, bool loading) {
+    // One Present at now_ns: whether it brought a new engine frame and whether UEVR saw a stall at it (StallClock).
+    // True when `on` changed.
+    bool on_present(int64_t now_ns, bool new_engine_frame, bool stall) {
         if (stall) {
             restart(now_ns);
-            seconds = 0;
         }
 
         ++presents;
 
         if (new_engine_frame) {
             ++engine_frames;
+            extra_seen = false;
+        } else if (!extra_seen) {
+            ++frames_with_extra;
+            extra_seen = true;
         }
 
         if (now_ns - start_ns < FRAME_GEN_SECOND_NS) {
@@ -359,9 +407,10 @@ struct FrameGenCheck {
 
         const auto was = on;
 
-        if (loading) {
-            seconds = 0;
-        } else if (engine_frames >= FRAME_GEN_MIN_ENGINE_FRAMES && presents * 2 >= engine_frames * 3) {
+        const auto ratio = presents * 2 >= engine_frames * 3;
+        const auto spread = frames_with_extra * 3 >= engine_frames;
+
+        if (engine_frames >= FRAME_GEN_MIN_ENGINE_FRAMES && ratio && spread) {
             seconds = (std::min)(seconds + 1, FRAME_GEN_SECONDS);
             on = on || seconds >= FRAME_GEN_SECONDS;
         } else {
@@ -377,6 +426,7 @@ struct FrameGenCheck {
         start_ns = now_ns;
         presents = 0;
         engine_frames = 0;
+        frames_with_extra = 0;
     }
 };
 

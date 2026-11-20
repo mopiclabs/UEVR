@@ -8843,33 +8843,17 @@ bool VR::should_skip_duplicate_present(VRRuntime* runtime) {
 // VR_AutoRes, after consume_events: what AutoResController needs from VR, then its steps.
 void VR::update_autores() {
     const auto now = std::chrono::steady_clock::now();
-    const auto stall_before = m_last_engine_stall;
+    const auto ns = [](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+    };
 
-    // Loading: in the last 3 s the engine stopped producing frames (250 ms, as should_skip_duplicate_present counts it),
-    // or the game stopped presenting (a synchronous load, which refreshes the frame advance before this runs) for 250 ms
-    // and four times its usual interval, so a game that is merely that slow still counts as running.
-    if (m_autores_last_present.time_since_epoch().count() != 0) {
-        const auto gap = std::chrono::duration<float>(now - m_autores_last_present).count();
-
-        if (gap > std::max(0.25f, 4.0f * m_autores_present_interval)) {
-            m_last_engine_stall = now;
-        }
-
-        m_autores_present_interval = 0.9f * m_autores_present_interval + 0.1f * gap;
-    }
-
-    if (now - m_last_engine_frame_advance > std::chrono::milliseconds{250}) {
-        m_last_engine_stall = now;
-    }
-
-    m_autores_last_present = now;
-    const auto loading = m_last_engine_stall.time_since_epoch().count() != 0 && now - m_last_engine_stall < std::chrono::seconds{3};
-
-    // Frame generation (AutoResPolicy.hpp FrameGenCheck): a stall seen at this Present starts its second over.
+    // Loading: a stall (the engine or the Presents) in the last 3 s (AutoResPolicy.hpp StallClock). Frame generation
+    // (FrameGenCheck): a stall seen at this Present starts its second over.
+    const auto stall = m_autores_stall.on_present(ns(now), ns(m_last_engine_frame_advance));
+    const auto loading = m_autores_stall.loading(ns(now));
     const auto new_engine_frame = m_frame_count != m_autores_last_frame_count;
     m_autores_last_frame_count = m_frame_count;
-    m_autores_frame_generation.on_present(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
-        new_engine_frame, m_last_engine_stall != stall_before, loading);
+    m_autores_frame_generation.on_present(ns(now), new_engine_frame, stall);
 
     m_autores_controller.on_present(*m_openxr, *m_cvar_manager, AutoResController::Inputs{
         .enabled = m_autores->value(),
