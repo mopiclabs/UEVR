@@ -1,6 +1,7 @@
 #include "mods/vr/AutoResPolicy.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 // The app side of automatic resolution (AutoResPolicy.hpp): the ladder, the edges and the step order.
@@ -411,6 +412,117 @@ static void test_step_strikes() {
     expect(!u.verdict(true, 200.0), "minutes later another misread is a first again, not the second");
 }
 
+// Frame generation (FrameGenCheck), fed as VR::update_autores feeds it: UEVR's stall (no new engine frame for 250 ms)
+// and loading (a stall in the last 3 s). It also counts the seconds the ratio alone, the check before 2026-11-20, read
+// as frame generation, to show a trace is one that fooled it.
+struct FrameGenFeed {
+    static constexpr int64_t MS = 1'000'000;
+
+    ar::FrameGenCheck check{};
+    int64_t now{1'000'000 * MS};
+    int64_t last_frame{now};
+    int64_t last_stall{-1};
+    int changes{0};
+    size_t step{0};
+    int64_t old_start{0};
+    uint32_t old_presents{0};
+    uint32_t old_frames{0};
+    int old_seconds{0};
+
+    void present(int64_t dt, bool new_frame) {
+        now += dt;
+
+        if (new_frame) {
+            last_frame = now;
+        }
+
+        const auto stall = now - last_frame > 250 * MS;
+
+        if (stall) {
+            last_stall = now;
+        }
+
+        const auto loading = last_stall >= 0 && now - last_stall < 3000 * MS;
+        changes += check.on_present(now, new_frame, stall, loading) ? 1 : 0;
+
+        ++old_presents;
+        old_frames += new_frame ? 1 : 0;
+
+        if (now - old_start >= 1000 * MS) {
+            old_seconds += old_frames >= 10 && old_presents * 2 >= old_frames * 3 ? 1 : 0;
+            old_start = now;
+            old_presents = old_frames = 0;
+        }
+    }
+
+    // Presents at `hz` for `seconds`; `pattern` per Present, repeating: 'N' brings a new engine frame, 'd' does not.
+    void run(double seconds, int hz, const char* pattern) {
+        const auto n = static_cast<int>(seconds * hz + 0.5);
+        const auto len = std::strlen(pattern);
+
+        for (int i = 0; i < n; ++i) {
+            present(1000 * MS / hz, pattern[step++ % len] == 'N');
+        }
+    }
+};
+
+static void test_frame_generation() {
+    {
+        FrameGenFeed f{};
+        f.run(10.0, 60, "N");
+        expect(!f.check.on && f.changes == 0, "frame generation: a Present per engine frame is none");
+    }
+
+    {
+        FrameGenFeed f{};
+        f.run(1.5, 120, "Nd");
+        expect(!f.check.on, "frame generation: one second of two Presents per engine frame is not enough");
+        f.run(1.0, 120, "Nd");
+        expect(f.check.on, "frame generation: two seconds in a row are");
+        f.run(5.0, 120, "NNdd");
+        expect(f.check.on && f.changes == 1, "frame generation: 1 and 3 Presents per engine frame in turn is still 2:1");
+        f.run(3.0, 60, "d");
+        expect(f.check.on, "frame generation: a loading screen does not turn it off");
+        f.run(5.0, 120, "Nd");
+        expect(f.check.on && f.changes == 1, "frame generation: and it goes on after the load");
+        f.run(2.5, 60, "N");
+        expect(!f.check.on && f.changes == 2, "frame generation: a judged second without it turns it off");
+    }
+
+    // TEKKEN 8 after a stage select (2026-11-20): UEVR holds its submits for 250 ms while the game presents 7-32 times,
+    // then a loading screen presents at 51-60 Hz with the engine frame put, then the fight; sometimes a second hold with
+    // 60-73 Presents. Every phase of the second against the load.
+    auto fooled_old = 0;
+
+    for (int phase = 0; phase < 20; ++phase) {
+        FrameGenFeed f{};
+        f.run(2.0 + phase * 0.05, 60, "N");
+        f.run(0.25, 128, "d");
+        f.run(4.0, 55, "d");
+        f.run(2.0, 60, "N");
+        f.run(0.25, 292, "d");
+        f.run(5.0, 60, "N");
+        fooled_old += f.old_seconds > 0 ? 1 : 0;
+        expect(!f.check.on && f.changes == 0, "frame generation: TEKKEN's stage load is none, at any phase");
+    }
+
+    expect(fooled_old >= 10, "frame generation: the TEKKEN trace fooled the one-second check");
+
+    // A burst of Presents without a stall (the engine back within 250 ms) passes the ratio for one second only.
+    auto fooled_old_burst = 0;
+
+    for (int phase = 0; phase < 20; ++phase) {
+        FrameGenFeed f{};
+        f.run(3.0 + phase * 0.05, 60, "N");
+        f.run(0.2, 150, "d");
+        f.run(5.0, 60, "N");
+        fooled_old_burst += f.old_seconds > 0 ? 1 : 0;
+        expect(!f.check.on && f.changes == 0, "frame generation: one mixed second is not frame generation");
+    }
+
+    expect(fooled_old_burst >= 5, "frame generation: the burst fooled the one-second check");
+}
+
 int main() {
     test_ladder();
     test_frame_bound();
@@ -423,6 +535,7 @@ int main() {
     test_internal_recovery();
     test_anchor_gate();
     test_step_strikes();
+    test_frame_generation();
 
     if (failures == 0) {
         std::printf("autores-policy-tests: all passed\n");

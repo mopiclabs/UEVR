@@ -318,6 +318,68 @@ struct FrameBoundJudge {
     }
 };
 
+// Frame generation, hinted as CPU BOOST ("FG on, freeze adjustments", design v1 §3-2): the game presents half again as
+// often as its engine makes frames (at least 10) over a second, in FRAME_GEN_SECONDS judged seconds in a row; off at the
+// first judged second without it. A load reads like it and must not: Presents without a new engine frame pile up while
+// the engine stalls (UEVR's 250 ms submit hold, a loading screen whose engine frame stays put), and a second that mixes
+// them with normal frames passes the ratio once (TEKKEN 8 after every stage select, 2026-11-20; every game measured had
+// such hints, 0.6-1.7 a run, each off a second later, and each one restarted the runtime's 10 s count before a step up).
+// So a stall at a Present starts the second over, a second that ends while loading (a stall in the last 3 s) is not
+// judged and keeps the verdict, and one second is not enough (aram, 2026-11-20: both). Replayed over the harness runs'
+// Presents: no hint left in the 211 runs that had them; real frame generation (55 runs, Wukong DLSS-G and Hogwarts) is on
+// in 86-99 % of the seconds, against 84-93 % before (loading screens no longer turn it off).
+inline constexpr int64_t FRAME_GEN_SECOND_NS = 1'000'000'000;
+inline constexpr uint32_t FRAME_GEN_MIN_ENGINE_FRAMES = 10;
+inline constexpr int FRAME_GEN_SECONDS = 2;
+
+struct FrameGenCheck {
+    bool on{false};
+    int64_t start_ns{0};
+    uint32_t presents{0};
+    uint32_t engine_frames{0};
+    int seconds{0}; // judged seconds in a row with frame generation, up to FRAME_GEN_SECONDS
+
+    // One Present at now_ns: whether it brought a new engine frame, whether UEVR saw a stall at it, and whether UEVR is
+    // loading. True when `on` changed.
+    bool on_present(int64_t now_ns, bool new_engine_frame, bool stall, bool loading) {
+        if (stall) {
+            restart(now_ns);
+            seconds = 0;
+        }
+
+        ++presents;
+
+        if (new_engine_frame) {
+            ++engine_frames;
+        }
+
+        if (now_ns - start_ns < FRAME_GEN_SECOND_NS) {
+            return false;
+        }
+
+        const auto was = on;
+
+        if (loading) {
+            seconds = 0;
+        } else if (engine_frames >= FRAME_GEN_MIN_ENGINE_FRAMES && presents * 2 >= engine_frames * 3) {
+            seconds = (std::min)(seconds + 1, FRAME_GEN_SECONDS);
+            on = on || seconds >= FRAME_GEN_SECONDS;
+        } else {
+            seconds = 0;
+            on = false;
+        }
+
+        restart(now_ns);
+        return on != was;
+    }
+
+    void restart(int64_t now_ns) {
+        start_ns = now_ns;
+        presents = 0;
+        engine_frames = 0;
+    }
+};
+
 // Which upscaler sets the game's input resolution, found while the session runs (CVarManager's probe). The probe tries
 // every 2 s for the first 2 minutes, then every 10 s, for the whole session. A game may make its DLSS mode readable only
 // at its title or main menu (TEKKEN 8 Demo, about 30 s after the start, 2026-11-12), so finding nothing in the first 15
