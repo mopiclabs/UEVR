@@ -749,6 +749,8 @@ bool D3D12Hook::hook() {
 
         // EXPERIMENT (exp/right-eye-cost): compute PSO shader identities for the pass markers
         uevr::pass_markers::hook_compute_creation(device);
+        // EXPERIMENT (exp/right-eye-cost): PSOs the game's disk cache loads through ID3D12PipelineLibrary
+        uevr::pass_markers::hook_pipeline_library(device);
 
         add_unique_pointer_hook(
             command_list,

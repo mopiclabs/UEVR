@@ -650,6 +650,112 @@ inline void hook_compute_creation(ID3D12Device* device) {
     spdlog::info("[PassMarkers] Hooked CreateComputePipelineState (vtable {:x})", (uintptr_t)vtable);
 }
 
+// The game's D3D12 PSO disk cache (UE D3D12RHI, Saved\D3DDriverByteCodeBlob_*.ushaderprecache) loads PSOs it cached on
+// an earlier launch through ID3D12PipelineLibrary::LoadGraphicsPipeline / LoadComputePipeline / LoadPipeline, which
+// never reach the device's Create*PipelineState hooks: those PSOs stayed unnamed ("PSO made before injection"). Hook
+// the pipeline-library class's vtable slots 9, 10 and 13, found from an empty library made here, and record the
+// shaders of each successful load like a creation.
+namespace detail {
+struct LibraryHooks {
+    bool tried{false};
+    std::unique_ptr<PointerHook> graphics{}, compute{}, stream{};
+    std::atomic<void*> graphics_original{}, compute_original{}, stream_original{};
+    std::atomic<uint64_t> loads{0};
+};
+inline LibraryHooks& library_hooks() {
+    static LibraryHooks h{};
+    return h;
+}
+
+inline HRESULT STDMETHODCALLTYPE library_load_graphics(ID3D12PipelineLibrary* library, LPCWSTR name,
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc, REFIID riid, void** pipeline_state)
+{
+    using Fn = decltype(&library_load_graphics);
+    const auto result = ((Fn)library_hooks().graphics_original.load(std::memory_order_acquire))(library, name, desc, riid, pipeline_state);
+    if (SUCCEEDED(result) && desc != nullptr && pipeline_state != nullptr && *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState))
+    {
+        if (const auto n = library_hooks().loads.fetch_add(1, std::memory_order_relaxed) + 1; n == 1 || n % 500 == 0) {
+            spdlog::info("[PassMarkers] ID3D12PipelineLibrary loads recorded: {}", n);
+        }
+        const std::pair<char, D3D12_SHADER_BYTECODE> stages[]{{'V', desc->VS}, {'P', desc->PS}, {'G', desc->GS},
+            {'H', desc->HS}, {'D', desc->DS}};
+        on_pso_created(*pipeline_state, stages, std::size(stages));
+    }
+    return result;
+}
+
+inline HRESULT STDMETHODCALLTYPE library_load_compute(ID3D12PipelineLibrary* library, LPCWSTR name,
+    const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid, void** pipeline_state)
+{
+    using Fn = decltype(&library_load_compute);
+    const auto result = ((Fn)library_hooks().compute_original.load(std::memory_order_acquire))(library, name, desc, riid, pipeline_state);
+    if (SUCCEEDED(result) && desc != nullptr && pipeline_state != nullptr && *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState))
+    {
+        if (const auto n = library_hooks().loads.fetch_add(1, std::memory_order_relaxed) + 1; n == 1 || n % 500 == 0) {
+            spdlog::info("[PassMarkers] ID3D12PipelineLibrary loads recorded: {}", n);
+        }
+        const std::pair<char, D3D12_SHADER_BYTECODE> stage{'C', desc->CS};
+        on_pso_created(*pipeline_state, &stage, 1);
+    }
+    return result;
+}
+
+inline HRESULT STDMETHODCALLTYPE library_load_pipeline(ID3D12PipelineLibrary1* library, LPCWSTR name,
+    const D3D12_PIPELINE_STATE_STREAM_DESC* desc, REFIID riid, void** pipeline_state)
+{
+    using Fn = decltype(&library_load_pipeline);
+    const auto result = ((Fn)library_hooks().stream_original.load(std::memory_order_acquire))(library, name, desc, riid, pipeline_state);
+    if (SUCCEEDED(result) && desc != nullptr && pipeline_state != nullptr && *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState))
+    {
+        if (const auto n = library_hooks().loads.fetch_add(1, std::memory_order_relaxed) + 1; n == 1 || n % 500 == 0) {
+            spdlog::info("[PassMarkers] ID3D12PipelineLibrary loads recorded: {}", n);
+        }
+        on_pso_stream_created(*pipeline_state, desc);
+    }
+    return result;
+}
+} // namespace detail
+
+// D3D12Hook's hook setup, next to hook_compute_creation.
+inline void hook_pipeline_library(ID3D12Device* device) {
+    using namespace detail;
+    auto& h = library_hooks();
+    if (device == nullptr || h.tried) {
+        return;
+    }
+    h.tried = true;
+    ID3D12Device1* device1{};
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))) || device1 == nullptr) {
+        spdlog::info("[PassMarkers] No ID3D12Device1: pipeline library loads not hooked");
+        return;
+    }
+    ID3D12PipelineLibrary* library{};
+    const auto hr = device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&library));
+    device1->Release();
+    if (FAILED(hr) || library == nullptr) {
+        spdlog::info("[PassMarkers] CreatePipelineLibrary failed ({:x}): pipeline library loads not hooked", (uint32_t)hr);
+        return;
+    }
+    auto** vtable = *(void***)library;
+    h.graphics_original.store(vtable[9], std::memory_order_release);
+    h.graphics = std::make_unique<PointerHook>(&vtable[9], (void*)&library_load_graphics);
+    h.compute_original.store(vtable[10], std::memory_order_release);
+    h.compute = std::make_unique<PointerHook>(&vtable[10], (void*)&library_load_compute);
+    ID3D12PipelineLibrary1* library1{};
+    if (SUCCEEDED(library->QueryInterface(IID_PPV_ARGS(&library1))) && library1 != nullptr) {
+        auto** vtable1 = *(void***)library1;
+        h.stream_original.store(vtable1[13], std::memory_order_release);
+        h.stream = std::make_unique<PointerHook>(&vtable1[13], (void*)&library_load_pipeline);
+        library1->Release();
+    }
+    library->Release();
+    spdlog::info("[PassMarkers] Hooked ID3D12PipelineLibrary loads (vtable {:x}, LoadPipeline {})", (uintptr_t)vtable,
+        h.stream != nullptr ? "yes" : "no");
+}
+
 // PreRenderViewFamily_RenderThread: where each family's render starts on the render thread.
 inline void on_family_render(uint32_t frame_count, uintptr_t render_target) {
     using namespace detail;
