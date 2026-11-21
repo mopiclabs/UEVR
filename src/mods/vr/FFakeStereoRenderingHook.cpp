@@ -28089,6 +28089,70 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                     }
                     SPDLOG_INFO("[Experiment][GdfProbe] {} same-class pointer pairs in the two view states (L {:x}, R {:x})",
                         found, (uintptr_t)primary.state, (uintptr_t)secondary.state);
+
+                    // Probe 2: each eye's view state on its own (a field may be null in the other eye), up to 256 KB:
+                    // every named object it points to, and nameless objects (exe vtable) whose first 32 KB point to
+                    // objects named like global distance field data. Where each scan stopped is logged too.
+                    const auto is_obj = [exe](uintptr_t p) {
+                        if (p < 0x10000 || p > 0x7fffffffffffull || (p & 7) != 0 || IsBadReadPtr((const void*)p, 0x200)) {
+                            return false;
+                        }
+                        const auto v = *(const uintptr_t*)p;
+                        return v >= exe && v < exe + 0x40000000;
+                    };
+                    const auto gdfish = [](const std::string& s) {
+                        return s.find("istance") != std::string::npos || s.find("eightfield") != std::string::npos ||
+                            s.find("GDF") != std::string::npos || s.find("lipmap") != std::string::npos;
+                    };
+                    for (int side = 0; side < 2; ++side) {
+                        const auto* st = side == 0 ? ls : rs;
+                        const char* eye = side == 0 ? "L" : "R";
+                        std::string named{};
+                        size_t off = 0, n_named = 0, n_hits = 0;
+                        for (; off < 0x40000; off += sizeof(void*)) {
+                            if (IsBadReadPtr(st + off, 8)) {
+                                break;
+                            }
+                            const auto p = *(const uintptr_t*)(st + off);
+                            if (!is_obj(p)) {
+                                continue;
+                            }
+                            const auto name = debug_name(p);
+                            if (name != "-") {
+                                ++n_named;
+                                if (named.size() < 16000) {
+                                    named += fmt::format(" +{:x}:{}", off, name);
+                                }
+                                if (gdfish(name)) {
+                                    ++n_hits;
+                                    SPDLOG_INFO("[Experiment][GdfProbe2] {} +0x{:x} -> {:x} {} (direct)", eye, off, p, name);
+                                }
+                                continue;
+                            }
+                            size_t limit = 0;
+                            while (limit < 0x8000 && !IsBadReadPtr((const void*)(p + limit), 0x1000)) {
+                                limit += 0x1000;
+                            }
+                            std::string inner{};
+                            for (size_t i = 1; i < limit / 8; ++i) {
+                                const auto q = ((const uintptr_t*)p)[i];
+                                if (!is_obj(q)) {
+                                    continue;
+                                }
+                                const auto qn = debug_name(q);
+                                if (qn != "-" && gdfish(qn)) {
+                                    inner += fmt::format(" [+0x{:x}]{}", i * 8, qn);
+                                }
+                            }
+                            if (!inner.empty()) {
+                                ++n_hits;
+                                SPDLOG_INFO("[Experiment][GdfProbe2] {} +0x{:x} -> {:x} vtable exe+0x{:x}, holds:{}", eye, off, p,
+                                    *(const uintptr_t*)p - exe, inner);
+                            }
+                        }
+                        SPDLOG_INFO("[Experiment][GdfProbe2] {} state {:x}: scan stopped at +0x{:x}; {} named objects, {} GDF hits; named:{}",
+                            eye, (uintptr_t)st, off, n_named, n_hits, named);
+                    }
                 }
             }
 
