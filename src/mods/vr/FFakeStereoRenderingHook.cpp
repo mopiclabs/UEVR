@@ -28067,8 +28067,25 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                         for (size_t i = 0; i < 24; ++i) {
                             words += fmt::format(" {:x}/{:x}", ((const uintptr_t*)lp)[i], ((const uintptr_t*)rp)[i]);
                         }
-                        SPDLOG_INFO("[Experiment][GdfProbe] state +0x{:x}: L {:x} R {:x} vtable exe+0x{:x} name L {} R {}; qwords L/R:{}",
-                            off, lp, rp, lv - exe, debug_name(lp), debug_name(rp), words);
+                        // one level down: named objects (exe vtable) the left candidate points to in its first 64
+                        // qwords, e.g. the pooled textures of a persistent GDF data object
+                        std::string inner{};
+                        for (size_t i = 1; i < 64; ++i) {
+                            const auto q = ((const uintptr_t*)lp)[i];
+                            if (q == 0 || (q & 7) != 0 || IsBadReadPtr((const void*)q, 0x200)) {
+                                continue;
+                            }
+                            const auto qv = *(const uintptr_t*)q;
+                            if (qv < exe || qv > exe + 0x40000000) {
+                                continue;
+                            }
+                            const auto name = debug_name(q);
+                            if (name != "-") {
+                                inner += fmt::format(" [{}]{}", i, name);
+                            }
+                        }
+                        SPDLOG_INFO("[Experiment][GdfProbe] state +0x{:x}: L {:x} R {:x} vtable exe+0x{:x} name L {} R {}; inner L:{}; qwords L/R:{}",
+                            off, lp, rp, lv - exe, debug_name(lp), debug_name(rp), inner.empty() ? std::string{" -"} : inner, words);
                     }
                     SPDLOG_INFO("[Experiment][GdfProbe] {} same-class pointer pairs in the two view states (L {:x}, R {:x})",
                         found, (uintptr_t)primary.state, (uintptr_t)secondary.state);
