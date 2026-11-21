@@ -119,8 +119,13 @@ def find_outputs(recs, presents):
 
 def assign_families(recs, presents, eye, full):
     """Per record: 'L', 'R' or 'T', and per record the frame index (present segment). In a frame (present to
-    present), a family ends at the first full-width bind after an eye-output bind: the first such end closes L, the
-    last closes R; records after R's end are T. A frame with one end (right eye skipped) has L and T only."""
+    present), a family ends at the first single-target bind of another target of the eye output's format after an
+    eye-output bind: the first such end closes L, the last closes R; records after R's end are T. A frame with one end
+    (right eye skipped) has L and T only.
+    At OpenXR resolution scale 1.0 that bind is the double-wide target for both families (its size equals the display
+    output's). At other scales only the left family copies into the double-wide (2 x eye width); the right family's
+    eye-output bind is followed by the display-size output (3840x2160 on a 4K Mopic panel). Until 2026-11-22 only the
+    double-wide bind counted, so at scales other than 1.0 the right eye fell into T."""
     fam = ["T"] * len(recs)
     seg = [-1] * len(recs)
     j = 0
@@ -136,9 +141,11 @@ def assign_families(recs, presents, eye, full):
         seen_eye = False
         for i in idx:
             r = recs[i]
-            if r.kind == KIND_OMSET and r.nrt == 1 and r.rt == eye:
+            if r.kind != KIND_OMSET or r.nrt != 1 or not r.rt:
+                continue
+            if r.rt == eye:
                 seen_eye = True
-            elif r.kind == KIND_OMSET and r.nrt == 1 and r.rt == full and seen_eye:
+            elif seen_eye and r.rt[2] == eye[2]:
                 ends.append(i)
                 seen_eye = False
         l_end = ends[0] if ends else None
