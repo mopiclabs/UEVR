@@ -33373,6 +33373,26 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
             } else {
                 g_hook->m_last_rotation = *view_rotation;
             }
+
+            // EXPERIMENT (exp/right-eye-cost): the rendered left eye's pose every 10 s against the game camera's
+            // rotation before UEVR, to compare framing with the flat reference (VR.cpp logs the game camera there)
+            if (vr->get_experiment_pass_markers_seconds() > 0) {
+                static auto next_pose_log = std::chrono::steady_clock::now();
+                if (const auto now_pose = std::chrono::steady_clock::now(); now_pose >= next_pose_log) {
+                    next_pose_log = now_pose + std::chrono::seconds{10};
+                    if (has_double_precision) {
+                        const auto pre = g_hook->m_last_pre_rotation_double;
+                        const auto* loc = (const double*)view_location;
+                        SPDLOG_INFO("[Experiment] eye 0 view loc {:.1f} {:.1f} {:.1f} rot p {:.2f} y {:.2f} r {:.2f}; game rot p {:.2f} y {:.2f} r {:.2f}",
+                            loc[0], loc[1], loc[2], rot_d->pitch, rot_d->yaw, rot_d->roll, pre.pitch, pre.yaw, pre.roll);
+                    } else {
+                        const auto pre = g_hook->m_last_pre_rotation;
+                        const auto* loc = (const float*)view_location;
+                        SPDLOG_INFO("[Experiment] eye 0 view loc {:.1f} {:.1f} {:.1f} rot p {:.2f} y {:.2f} r {:.2f}; game rot p {:.2f} y {:.2f} r {:.2f}",
+                            loc[0], loc[1], loc[2], view_rotation->pitch, view_rotation->yaw, view_rotation->roll, pre.pitch, pre.yaw, pre.roll);
+                    }
+                }
+            }
         }
 
         // Modify Player Control Rotation

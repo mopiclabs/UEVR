@@ -5051,8 +5051,12 @@ void VR::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
                 if (auto* pcm = get_primary_player_camera_manager(engine); pcm != nullptr) {
                     const auto fov = read_game_fov(pcm);
                     const auto def = read_default_fov(pcm);
-                    SPDLOG_INFO("[Experiment] game camera FOV {} (default {}), HMD active {}", fov ? *fov : -1.0f,
-                        def ? *def : -1.0f, is_hmd_active());
+                    const auto loc = read_game_camera_location(pcm);
+                    const auto rot = read_game_camera_rotation(pcm);
+                    SPDLOG_INFO("[Experiment] game camera FOV {} (default {}), HMD active {}, loc {:.1f} {:.1f} {:.1f}, rot {:.2f} {:.2f} {:.2f}",
+                        fov ? *fov : -1.0f, def ? *def : -1.0f, is_hmd_active(),
+                        loc ? loc->x : 0.0f, loc ? loc->y : 0.0f, loc ? loc->z : 0.0f,
+                        rot ? rot->x : 0.0f, rot ? rot->y : 0.0f, rot ? rot->z : 0.0f);
                 }
             } catch (...) {
             }
