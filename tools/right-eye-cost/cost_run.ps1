@@ -27,6 +27,7 @@ param(
     [switch]$SteamOnline,
     [switch]$EyeSampler,
     [int]$EyeFullMax = 60,            # eyesampler.py --full-max: whole-display (binocular) frames per run
+    [double]$EyeHz = 0,               # eyesampler.py --hz (0 = its default, 120); 1 Hz is enough for the R/L luma check
     [double]$EyeFullEvery = 3,        # eyesampler.py --full-every: one whole-display frame every N s (the harness's binocular analysis grows faster than the frame count: 60 frames ~80 s, 219 frames ~24 min)
     [switch]$Sampler,
     [switch]$GpuSampler,              # gpu_proc_sampler.ps1 alongside: per-process GPU engine utilisation (cells\gpu-<label>-<time>.csv)
@@ -228,7 +229,7 @@ try {
         $a = @("-ExecutionPolicy", "Bypass", "-File", "$tools\run-test.ps1", "-Game", $Game, "-Runs", "1",
             "-EngineDir", $engine, "-Label", $label, "-Recipe", $rec)
         if ($k -eq "flat") { $a += "-NoInject" } else { $a += @("-Dll", $Dll, "-Set", $setAll) }
-        if ($EyeSampler) { $a += @("-EyeSampler", "-EyeSamplerArgs", "--full-every $EyeFullEvery --full-max $EyeFullMax") }
+        if ($EyeSampler) { $a += @("-EyeSampler", "-EyeSamplerArgs", ("--full-every $EyeFullEvery --full-max $EyeFullMax" + $(if ($EyeHz -gt 0) { " --hz $EyeHz" } else { "" }))) }
         if ($SteamOnline) { $a += "-SteamOnline" }
         if ($SaveFile -ne "") { $a += @("-SaveFile", $SaveFile) }
         if ($RecipeVars -ne "") { $a += @("-RecipeVars", $RecipeVars) }

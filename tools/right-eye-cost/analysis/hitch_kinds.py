@@ -1,28 +1,61 @@
-"""What the long present intervals (> 2x / 3x the run's median) look like in perf-frames.csv, play phase only: per run
-the hitch count by the dominant field of the hitch frame (game-thread tick, render-thread blocked, present call,
-none of these = GPU or elsewhere) and the median of each field on hitch frames vs all frames.
-  python hitch_kinds.py <label=run dir> [...]"""
-import csv, json, os, sys
+"""Hitches split by what dominates the hitch frame, from UEVR's perf-frames.csv (rows of kind "P", one per present;
+columns qpc_ns, tick_us, rt_blocked_us, present_us, uevr_rt_us, uevr_gt_us, ticks), play phase only (pilot-status.json
+play .. leave).
+
+A hitch is a present interval (between consecutive P rows) above 2x or 3x the median interval of the same run (or of
+the same phase with --window). Each hitch frame is classed by the largest of game tick (tick_us), render thread
+blocked (rt_blocked_us) and present call (present_us): that class if it covers more than half of the interval, else
+"other" (none dominating: GPU or elsewhere). Also prints the frame-interval list summary (frames, median, p90, p99) and
+the median of each column on hitch frames vs all frames.
+
+Whole runs:      python hitch_kinds.py <label=run dir> [...]
+Window A/B runs: python hitch_kinds.py <label=run dir> --window 10 --groups 1 --names share,refresh [--guard 2]
+                 (phase = floor(qpc s / window) % (groups + 1); intervals ending within --guard s of a window start are
+                 left out)"""
+import argparse, csv, json, os
 import numpy as np
 
-for spec in sys.argv[1:]:
+ap = argparse.ArgumentParser(); ap.add_argument("runs", nargs="+"); ap.add_argument("--window", type=int, default=0)
+ap.add_argument("--groups", type=int, default=1); ap.add_argument("--names", default=""); ap.add_argument("--guard", type=float, default=2)
+a = ap.parse_args()
+FIELDS = ["tick_us", "rt_blocked_us", "present_us", "uevr_rt_us", "uevr_gt_us", "ticks"]
+f = lambda r, k: float(r.get(k) or 0)
+
+
+def phase_of(q):
+    if a.window <= 0:
+        return 0
+    s = q / 1e9; w = int(s // a.window)
+    return None if s - w * a.window < a.guard else w % (a.groups + 1)
+
+
+for spec in a.runs:
     label, run = spec.split("=", 1)
     ph = {p["name"]: p["qpc_ns"] for p in json.load(open(os.path.join(run, "pilot-status.json"), encoding="utf-8-sig"))["phases"]}
     t0, t1 = ph["play"], ph.get("leave") or ph.get("exit") or 1 << 62
-    rows = [r for r in csv.DictReader(open(os.path.join(run, "perf-frames.csv"), encoding="utf-8", errors="replace")) if r["kind"] == "P"]
-    rows.sort(key=lambda r: int(r["qpc_ns"]))
-    f = lambda r, k: float(r.get(k) or 0)
-    iv = [((int(b["qpc_ns"]) - int(a["qpc_ns"])) / 1e6, b) for a, b in zip(rows, rows[1:]) if t0 <= int(b["qpc_ns"]) < t1]
-    med = float(np.median([v for v, _ in iv]))
-    fields = ["tick_us", "rt_blocked_us", "present_us", "uevr_rt_us", "uevr_gt_us", "ticks"]
-    allm = {k: float(np.median([f(r, k) for _, r in iv])) for k in fields}
-    for mult in (2, 3):
-        hs = [(v, r) for v, r in iv if v > mult * med]
-        kinds = {"game tick": 0, "rt blocked": 0, "present": 0, "other (GPU?)": 0}
-        for v, r in hs:
-            ms = {"game tick": f(r, "tick_us") / 1e3, "rt blocked": f(r, "rt_blocked_us") / 1e3, "present": f(r, "present_us") / 1e3}
-            k = max(ms, key=ms.get)
-            kinds[k if ms[k] > 0.5 * v else "other (GPU?)"] += 1
-        hm = {k: float(np.median([f(r, k) for _, r in hs])) if hs else float("nan") for k in fields}
-        print(f"{label} >{mult}x ({mult * med:.0f} ms): {len(hs)} | " + ", ".join(f"{k} {n}" for k, n in kinds.items())
-              + " | median on hitch / all: " + ", ".join(f"{k} {hm[k]:.0f}/{allm[k]:.0f}" for k in fields))
+    rows = sorted((r for r in csv.DictReader(open(os.path.join(run, "perf-frames.csv"), encoding="utf-8", errors="replace")) if r["kind"] == "P"),
+                  key=lambda r: int(r["qpc_ns"]))
+    by_phase = {}
+    for x, y in zip(rows, rows[1:]):
+        q = int(y["qpc_ns"])
+        if not (t0 <= q < t1):
+            continue
+        p = phase_of(q)
+        if p is not None:
+            by_phase.setdefault(p, []).append(((q - int(x["qpc_ns"])) / 1e6, y))
+    names = a.names.split(",") if a.names else []
+    for p in sorted(by_phase):
+        iv = by_phase[p]; v = np.array([d for d, _ in iv]); med = float(np.median(v))
+        pname = names[p] if p < len(names) else (str(p) if a.window > 0 else "run")
+        print(f"{label} [{pname}]: frames {len(v)}, interval median {med:.1f} ms, p90 {np.percentile(v, 90):.1f}, p99 {np.percentile(v, 99):.1f}")
+        allm = {k: float(np.median([f(r, k) for _, r in iv])) for k in FIELDS}
+        for mult in (2, 3):
+            hs = [(d, r) for d, r in iv if d > mult * med]
+            kinds = {"game tick": 0, "rt blocked": 0, "present": 0, "other (GPU or elsewhere)": 0}
+            for d, r in hs:
+                ms = {"game tick": f(r, "tick_us") / 1e3, "rt blocked": f(r, "rt_blocked_us") / 1e3, "present": f(r, "present_us") / 1e3}
+                k = max(ms, key=ms.get)
+                kinds[k if ms[k] > 0.5 * d else "other (GPU or elsewhere)"] += 1
+            hm = {k: float(np.median([f(r, k) for _, r in hs])) if hs else float("nan") for k in FIELDS}
+            print(f"   >{mult}x ({mult * med:.0f} ms): {len(hs)} ({len(hs) / (v.sum() / 60000):.1f}/min) | " + ", ".join(f"{k} {n}" for k, n in kinds.items())
+                  + " | median on hitch / all: " + ", ".join(f"{k} {hm[k]:.0f}/{allm[k]:.0f}" for k in FIELDS))

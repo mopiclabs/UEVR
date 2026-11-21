@@ -23,7 +23,7 @@ param([Parameter(Mandatory)][string]$Dll,
     [string]$EngineDir = "$env:APPDATA\MOPIC\mopichub\engines\mopic-uevr\1.0.5.1",
     [string]$OutDir = "$env:LOCALAPPDATA\right-eye-cost",
     [string]$Recipe = "",
-    [string]$Order = "rsr", [string]$Tag = "walk", [int]$MaxStartMinutes = 38, [string]$Set = "")
+    [string]$Order = "rsr", [string]$Tag = "walk", [int]$MaxStartMinutes = 38, [string]$Set = "", [double]$EyeHz = 0)
 $ErrorActionPreference = "Continue"
 $here = $PSScriptRoot
 if ($Recipe -eq "") { $Recipe = Join-Path $here "recipes\Wukong-walk-nomod.json" }
@@ -93,7 +93,7 @@ for ($i = 0; $i -lt $plan.Count; $i++) {
     $setAll = (@("VR_ExperimentRightEyeGdfShare=$($p.mode)") + $(if ($Set) { @($Set) } else { @() })) -join ";"
     try {
         & powershell -ExecutionPolicy Bypass -File (Join-Path $here "cost_run.ps1") -Harness $Harness -Dll $Dll -EngineDir $EngineDir -OutDir $OutDir `
-            -Game Wukong -Recipe $Recipe -SteamOnline -Runtime sbs -EyeSampler -EyeFullEvery 11 -EyeFullMax 60 -Arms pm `
+            -Game Wukong -Recipe $Recipe -SteamOnline -Runtime sbs -EyeSampler -EyeFullEvery 11 -EyeFullMax 60 -EyeHz $EyeHz -Arms pm `
             -LabelSuffix $p.label -Set $setAll -LatestStart $latest | Out-Host
     } finally {
         for ($w = 0; $w -lt 60 -and (Get-Process b1-Win64-Shipping -ErrorAction SilentlyContinue); $w++) { Start-Sleep 2 }
