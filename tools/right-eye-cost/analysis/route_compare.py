@@ -1,15 +1,16 @@
 """Whole runs of one route compared by route time (seconds since the pilot's play phase began): per minute of route,
-fps (perf.csv), hitches (present intervals above 2x / 3x the run's median, perf-frames.csv), right/left mean luma
+fps (perf.csv), hitches (present intervals above 2x / 3x ONE base interval for all runs: --base-ms, else the median of
+all runs pooled; until 2026-11-22 each run used its own median), right/left mean luma
 (eyes.csv) and block-ratio median / p10 (binocular frames; frames darker than 10/255 left out); then every big hitch
-(> 3x median) with its route time per run, and per run the GdfShare exchange log totals.
-  python route_compare.py <label=run dir> [<label=run dir> ...] [--minute 60] [--md out.md]"""
+(> 3x base) with its route time per run, and per run the GdfShare exchange log totals.
+  python route_compare.py <label=run dir> [<label=run dir> ...] [--minute 60] [--md out.md] [--base-ms 22]"""
 import argparse, csv, glob, json, os, re
 from collections import defaultdict
 import numpy as np
 from PIL import Image
 
 ap = argparse.ArgumentParser(); ap.add_argument("runs", nargs="+"); ap.add_argument("--minute", type=int, default=60)
-ap.add_argument("--md", default="")
+ap.add_argument("--md", default=""); ap.add_argument("--base-ms", type=float, default=0, help="hitch thresholds 2x / 3x this (default: pooled median of all runs)")
 a = ap.parse_args()
 out = []
 
@@ -54,23 +55,25 @@ for spec in a.runs:
         d["blk"][int(rt(q) // a.minute)].append((float(np.median(ratio)), float(np.percentile(ratio, 10))))
     qs = sorted(int(r["qpc_ns"]) for r in csv.DictReader(open(os.path.join(run, "perf-frames.csv"), encoding="utf-8", errors="replace"))
                 if r.get("kind") == "P")
-    iv = [(y, (y - x) / 1e6) for x, y in zip(qs, qs[1:]) if t0 <= y < t1]
-    med = float(np.median([v for _, v in iv])) if iv else 0
-    for y, v in iv:
-        k = int(rt(y) // a.minute)
-        d["frames"][k] += 1
-        if v > 2 * med:
-            d["hit2"][k] += 1
-        if v > 3 * med:
-            d["hit3"][k] += 1
-            d["big"].append((rt(y), v))
-    d["median"] = med
+    d["iv"] = [((y - t0) / 1e9, (y - x) / 1e6) for x, y in zip(qs, qs[1:]) if t0 <= y < t1]
+    d["median"] = float(np.median([v for _, v in d["iv"]])) if d["iv"] else 0
     ex = re.findall(r"\[GdfShare\] window \d+ \((\w+)\): right families (\d+), exchanged (\d+), not shared (\d+) .*?block not validated (\d+)\), not validated on the render thread (\d+)",
                     open(os.path.join(run, "log.txt"), encoding="utf-8", errors="replace").read())
     d["ex"] = [tuple(int(x) for x in e[1:]) for e in ex]
     data[label] = d
 
+base = a.base_ms if a.base_ms > 0 else float(np.median([v for d in data.values() for _, v in d["iv"]]))
+for d in data.values():
+    for s, v in d["iv"]:
+        k = int(s // a.minute)
+        d["frames"][k] += 1
+        if v > 2 * base:
+            d["hit2"][k] += 1
+        if v > 3 * base:
+            d["hit3"][k] += 1
+            d["big"].append((s, v))
 labels = list(data)
+emit(f"hitch threshold base {base:.2f} ms ({'given' if a.base_ms > 0 else 'pooled median of all runs'}): >2x {2 * base:.1f} ms, >3x {3 * base:.1f} ms")
 emit("runs: " + ", ".join(f"{l} ({data[l]['len']:.0f} s of play, median frame {data[l]['median']:.1f} ms)" for l in labels))
 for l in labels:
     ex = data[l]["ex"]
@@ -93,14 +96,14 @@ for k in mins:
     emit(f"| {k * a.minute}-{(k + 1) * a.minute} s | " + " | ".join(cells) + " |")
 emit("\ntotals:")
 for l in labels:
-    d = data[l]; mins_play = sum(d["frames"].values()) * d["median"] / 60000 if d["median"] else 1
+    d = data[l]; mins_play = sum(v for _, v in d["iv"]) / 60000 if d["iv"] else 1
     allf = [x for v in d["fps"].values() for x in v]
     lv = [x for v in d["lum"].values() for x in v]
     bl = [x for v in d["blk"].values() for x in v]
     emit(f"   {l}: fps {np.mean(allf):.2f}; hitches 2x {sum(d['hit2'].values())} ({sum(d['hit2'].values()) / max(1e-9, mins_play):.1f}/min), "
          f"3x {sum(d['hit3'].values())}; R/L luma {sum(b for _, b in lv) / sum(x for x, _ in lv) if lv else float('nan'):.3f}; "
          f"block median {np.mean([x for x, _ in bl]) if bl else float('nan'):.3f}, p10 {np.mean([y for _, y in bl]) if bl else float('nan'):.3f} ({len(bl)} frames)")
-emit("\nbig hitches (> 3x median), route time s (interval ms):")
+emit("\nbig hitches (> 3x base), route time s (interval ms):")
 for l in labels:
     emit(f"   {l}: " + ", ".join(f"{t:.0f}({v:.0f})" for t, v in data[l]["big"]))
 if a.md:

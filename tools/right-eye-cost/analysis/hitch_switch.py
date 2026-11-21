@@ -13,9 +13,11 @@ ap = argparse.ArgumentParser(); ap.add_argument("runs", nargs="+"); ap.add_argum
 ap.add_argument("--groups", type=int, default=1); ap.add_argument("--names", default="share,refresh")
 ap.add_argument("--bins", type=int, default=0, help="bins per window (default: one per second, at most 12)")
 ap.add_argument("--exclude-probe", type=float, default=0, help="leave out intervals from 6 s before to S s after each [GdfFind] probe-5 scan")
+ap.add_argument("--base-ms", type=float, default=0, help="thresholds 2x / 3x this (default: median of all given runs pooled)")
 a = ap.parse_args()
 names = a.names.split(",")
 bins = a.bins or min(a.window, 12)
+loaded = []
 for spec in a.runs:
     label, run = spec.split("=", 1)
     ph = {p["name"]: p["qpc_ns"] for p in json.load(open(os.path.join(run, "pilot-status.json"), encoding="utf-8-sig"))["phases"]}
@@ -23,13 +25,16 @@ for spec in a.runs:
     qs = sorted(int(r["qpc_ns"]) for r in csv.DictReader(open(os.path.join(run, "perf-frames.csv"), encoding="utf-8", errors="replace")) if r["kind"] == "P")
     probes = probe_qpc(run) if a.exclude_probe > 0 else []
     iv = [(y, (y - x) / 1e6) for x, y in zip(qs, qs[1:]) if t0 <= y < t1 and not (probes and near(y, probes, a.exclude_probe))]
-    med = float(np.median([v for _, v in iv]))
+    loaded.append((label, iv, len(probes)))
+med = a.base_ms if a.base_ms > 0 else float(np.median([v for _, iv, _ in loaded for _, v in iv]))
+print(f"threshold base {med:.2f} ms ({'given' if a.base_ms > 0 else 'pooled median of the given runs'}): >2x {2 * med:.1f} ms, >3x {3 * med:.1f} ms")
+for label, iv, nprobe in loaded:
     tab = {}  # (mode, bin) -> [frames, >2x, >3x]
     for y, v in iv:
         s = y / 1e9; w = int(s // a.window); m = w % (a.groups + 1)
         b = min(bins - 1, int((s - w * a.window) / a.window * bins))
         c = tab.setdefault((m, b), [0, 0, 0]); c[0] += 1; c[1] += v > 2 * med; c[2] += v > 3 * med
-    print(f"\n{label}{f' (probe scans {len(probes)} excluded, +{a.exclude_probe:g} s)' if probes else ''}: median interval {med:.1f} ms, window {a.window} s, {bins} bins (bin = {a.window / bins:g} s since the switch)")
+    print(f"\n{label}{f' (probe scans {nprobe} excluded, +{a.exclude_probe:g} s)' if nprobe else ''}: own median {float(np.median([v for _, v in iv])):.1f} ms, window {a.window} s, {bins} bins (bin = {a.window / bins:g} s since the switch)")
     for m in range(a.groups + 1):
         nm = names[m] if m < len(names) else str(m)
         row = [tab.get((m, b), [0, 0, 0]) for b in range(bins)]
