@@ -111,6 +111,11 @@ struct State {
     uint64_t declined{0};
     uint64_t not_validated{0};
     bool logged_first{false};
+    // per 10-second window (QPC), logged when the window changes: right families seen, exchanged, skipped and why
+    std::atomic<uint32_t> gt_wanted{0};         // game thread: share wanted in this frame (mode 1, or a share window)
+    std::atomic<uint32_t> gt_not_validated{0};  // game thread: wanted, but the block did not validate
+    int64_t window{-1};
+    uint32_t w_right{0}, w_exchanged{0}, w_declined{0}, w_rt_not_validated{0};
 };
 
 inline State& state() {
@@ -187,7 +192,11 @@ inline bool on_right_submission(int32_t mode, uintptr_t right_target, uintptr_t 
     auto& s = state();
     bool share = false;
     if (mode == 1 || (mode == 2 && window_shares())) {
+        ++s.gt_wanted;
         share = right_target != 0 && validated(left_state, right_state);
+        if (!share) {
+            ++s.gt_not_validated;
+        }
     }
     const auto seq = s.submitted.load() + 1;
     auto& e = s.ring[seq % kRing];
@@ -212,6 +221,24 @@ inline void on_family_render(int32_t mode, uintptr_t target) {
     if (mode == 0 || target == 0) {
         return;
     }
+    {
+        LARGE_INTEGER q{}, f{};
+        QueryPerformanceCounter(&q);
+        QueryPerformanceFrequency(&f);
+        const auto window = (int64_t)((q.QuadPart / f.QuadPart) / 10);
+        if (window != s.window) {
+            if (s.window >= 0 && s.w_right > 0) {
+                SPDLOG_INFO("[GdfShare] window {} ({}): right families {}, exchanged {}, not shared {} (game thread: wanted {}, "
+                    "block not validated {}), not validated on the render thread {}",
+                    s.window, mode == 2 ? (s.window % 2 == 0 ? "share" : "refresh") : "share", s.w_right, s.w_exchanged,
+                    s.w_declined, s.gt_wanted.load(), s.gt_not_validated.load(), s.w_rt_not_validated);
+            }
+            s.window = window;
+            s.w_right = s.w_exchanged = s.w_declined = s.w_rt_not_validated = 0;
+            s.gt_wanted = 0;
+            s.gt_not_validated = 0;
+        }
+    }
     const auto newest = s.submitted.load();
     for (uint64_t seq = s.consumed + 1; seq <= newest && seq + kRing > newest; ++seq) {
         auto& e = s.ring[seq % kRing];
@@ -219,8 +246,10 @@ inline void on_family_render(int32_t mode, uintptr_t target) {
             continue;
         }
         s.consumed = seq;
+        ++s.w_right;
         if (!e.share.load()) {
             ++s.declined;
+            ++s.w_declined;
             return;
         }
         const auto l = e.left_state.load();
@@ -229,8 +258,10 @@ inline void on_family_render(int32_t mode, uintptr_t target) {
         // validated again here: the game thread checked a frame ago
         if (anchor == 0 || !resources_ok(l, anchor) || !resources_ok(r, anchor)) {
             ++s.not_validated;
+            ++s.w_rt_not_validated;
             return;
         }
+        ++s.w_exchanged;
         exchange(l, r, anchor);
         s.swapped_left = l;
         s.swapped_right = r;
