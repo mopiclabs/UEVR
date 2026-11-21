@@ -25,6 +25,10 @@
     std::string get_experiment_second_family_cvars() const {
         return m_experiment_second_family_cvars->value();
     }
+    // EXPERIMENT (exp/right-eye-cost, default 0 = off): see vr/GdfShare.hpp.
+    int32_t get_experiment_right_eye_gdf_share() const {
+        return m_experiment_right_eye_gdf_share->value();
+    }
 
     // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
     // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).

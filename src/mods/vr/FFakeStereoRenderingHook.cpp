@@ -159,6 +159,7 @@
 #include "FFakeStereoRenderingHook.hpp"
 #include "RtSceneShare.hpp"
 #include "PassMarkers.hpp"
+#include "GdfShare.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
@@ -29959,7 +29960,13 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         gdf_change_signal::log_totals(gdf_refreshes_on_change, gdf_refreshes_backstop);
     }
 
-    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild && !second_experiment_hold.no_gdf()};
+    // EXPERIMENT: VR_ExperimentRightEyeGdfShare (vr/GdfShare.hpp): in a frame where the right eye renders with the left
+    // eye's Global Distance Field, its refresh is skipped (it would rebuild the left's field); otherwise as above.
+    const auto gdf_share_mode = vr->get_experiment_right_eye_gdf_share();
+    const bool gdf_share = gdf_share_mode != 0 && uevr::gdf_share::on_right_submission(gdf_share_mode,
+        reinterpret_cast<uintptr_t>(rtfrt), reinterpret_cast<uintptr_t>(native_left_metadata.state),
+        reinterpret_cast<uintptr_t>(native_right_metadata.state));
+    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild && !gdf_share && !second_experiment_hold.no_gdf()};
     uevr::rt_share::RightGatherCullHold second_rt_cull_hold{vr->is_experiment_right_eye_rt_share_cull_gather() &&
         uevr::rt_share::right_eye_shares_this_frame()};
 
@@ -31172,6 +31179,10 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
     const auto frame_count = *(uint32_t*)((uintptr_t)&view_family + SceneViewExtensionAnalyzer::frame_count_offset);
     uevr::rt_share::on_family_render(frame_count, reinterpret_cast<uintptr_t>(view_family.get_render_target()));
     uevr::pass_markers::on_family_render(frame_count, reinterpret_cast<uintptr_t>(view_family.get_render_target()));
+    // EXPERIMENT: VR_ExperimentRightEyeGdfShare (vr/GdfShare.hpp): exchange back after the previous family, exchange for
+    // the right eye's family.
+    uevr::gdf_share::on_family_render(vr->get_experiment_right_eye_gdf_share(),
+        reinterpret_cast<uintptr_t>(view_family.get_render_target()));
     struct NativePreRenderKey {
         uint32_t frame{};
         uintptr_t family{};

@@ -1772,6 +1772,9 @@ private:
     const ModToggle::Ptr m_experiment_secondary_exposure_state{ ModToggle::create(generate_name("ExperimentSecondaryExposureState"), false) };
     // EXPERIMENT (exp/right-eye-cost): every N seconds, 60 presents of per-pass records (vr/PassMarkers.hpp).
     const ModInt32::Ptr m_experiment_pass_markers_seconds{ ModInt32::create(generate_name("ExperimentPassMarkersSeconds"), 0) };
+    // EXPERIMENT (exp/right-eye-cost): 1 = the right eye renders with the left eye's Global Distance Field, 2 = in even
+    // 10-second windows only (vr/GdfShare.hpp).
+    const ModInt32::Ptr m_experiment_right_eye_gdf_share{ ModInt32::create(generate_name("ExperimentRightEyeGdfShare"), 0) };
     // EXPERIMENT (exp/right-eye-cost): "N,group,..." right-eye-only groups in N-second windows (ExperimentSecondFamilyHold,
     // vr/ExperimentPhase.hpp).
     const ModString::Ptr m_experiment_second_family_cvars{ ModString::create(generate_name("ExperimentSecondFamilyCvars"), "") };
@@ -2138,6 +2141,7 @@ public:
             *m_experiment_secondary_pre_exposure,
             *m_experiment_secondary_exposure_state,
             *m_experiment_pass_markers_seconds,
+            *m_experiment_right_eye_gdf_share,
             *m_experiment_second_family_cvars,
             *m_experiment_cvar_dump_seconds,
             *m_experiment_frame_cvars,
