@@ -29371,6 +29371,21 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                 held == (void*)native_left_metadata.state ? "the left eye's state" :
                 held == (void*)native_right_metadata.state ? "its own state" : held == nullptr ? "null" : "something else");
         }
+        // VR_ExperimentSecondaryExposureState: point that field at the left eye's state whatever it holds
+        if (vr->is_experiment_secondary_exposure_state_enabled() && g_hook->m_exp_secondary_exposure_offset &&
+            native_left_metadata.state != nullptr)
+        {
+            auto slot = (void**)((uintptr_t)native_right_view + *g_hook->m_exp_secondary_exposure_offset);
+            if (!IsBadWritePtr(slot, sizeof(void*)) && *slot != (void*)native_left_metadata.state) {
+                exposure_state_slot = slot;
+                exposure_state_before = *slot;
+                *slot = native_left_metadata.state;
+                SPDLOG_INFO_ONCE("[NativeStereoFix][exp] SECONDARY right eye: exposure view state field +0x{:x} {:x} -> left state {:x}",
+                    *g_hook->m_exp_secondary_exposure_offset, (uintptr_t)exposure_state_before, (uintptr_t)native_left_metadata.state);
+            } else {
+                SPDLOG_INFO_ONCE("[NativeStereoFix][exp] SECONDARY right eye: exposure view state field already holds the left state (or is not writable)");
+            }
+        }
     }
     SecondaryPreExposureHold second_pre_exposure_hold{
         vr->is_experiment_secondary_pre_exposure_enabled() && !vr->is_native_stereo_fix_same_pass_enabled(),

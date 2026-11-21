@@ -14,6 +14,9 @@
     bool is_experiment_secondary_pre_exposure_enabled() const {
         return m_experiment_secondary_pre_exposure->value();
     }
+    bool is_experiment_secondary_exposure_state_enabled() const {
+        return m_experiment_secondary_exposure_state->value();
+    }
 
     // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
     // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).
