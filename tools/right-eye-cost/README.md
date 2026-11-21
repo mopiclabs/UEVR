@@ -42,6 +42,7 @@ changes a default. Run folders stay in the mopic-test harness's `runs\`. Logs an
   - `hitch_kinds.py label=<run> ...`: hitches by the field that dominates the hitch frame (game tick, render thread blocked, present, none = GPU or elsewhere).
   - `run_categories.py label=<run> ...`: GPU ms per frame by category and family, play phase only.
   - `frame_gdf.py label=<run> ...`: per-frame GDF and unnamed-compute GPU per family, and on hitch frames.
+- Shader names for the categories: the build writes each new shader's bytecode to `%APPDATA%\UnrealVRMod\<game exe>\passmarkers\shaders\`. That folder accumulates over runs, and `cost_run.ps1` moves only the capture files, not this folder. Run `dxilnames.py "%APPDATA%\UnrealVRMod\<game exe>\passmarkers"` once to write `names.tsv` there, then copy `names.tsv` into each run's `passmarkers\`. Without it every pass falls into the shape-only or "unnamed" categories, and the GDF rows read zero.
 - Pass markers: the family split assigns L / R / T by the eye output binds. At `OpenXR_ResolutionScale` 1.417 the right eye lands in "T". `psotable.py` and `categories.py` list per PSO and per category. `sizecost.py` splits fixed per-view cost from per-pixel cost across two eye sizes.
 
 ## Gotchas
