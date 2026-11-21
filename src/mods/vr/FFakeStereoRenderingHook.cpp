@@ -28015,6 +28015,66 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                         ? fmt::format("+0x{:x}", *g_hook->m_native_stereo_exposure_state_offset) : std::string{"not identified"});
             }
 
+            // EXPERIMENT (exp/right-eye-cost, GDF share probe, log only): once, after 600 pair submissions, the pointer
+            // fields of the two eyes' FSceneViewState objects that sit at the same offset, differ, and point to
+            // objects of the same class (equal first qword, i.e. vtable) - the candidates for the view state's global
+            // distance field data (gdf-share-design.md (A)). Each candidate's first 24 qwords are logged too.
+            if (vr->get_experiment_pass_markers_seconds() > 0) {
+                static uint32_t gdf_probe_count{0};
+                if (++gdf_probe_count == 600 && primary.state != nullptr && secondary.state != nullptr) {
+                    const auto* ls = (const uint8_t*)primary.state;
+                    const auto* rs = (const uint8_t*)secondary.state;
+                    const auto exe = (uintptr_t)GetModuleHandleW(nullptr);
+                    // a pooled render target's desc / an RDG pooled buffer holds a const TCHAR* debug name: the first
+                    // pointer among the object's first 64 qwords to a printable wide string of 4+ characters
+                    const auto debug_name = [](uintptr_t obj) {
+                        for (size_t i = 1; i < 64; ++i) {
+                            const auto p = ((const uintptr_t*)obj)[i];
+                            if (p == 0 || (p & 1) != 0 || IsBadReadPtr((const void*)p, 2 * 64)) {
+                                continue;
+                            }
+                            const auto* w = (const wchar_t*)p;
+                            std::string out{};
+                            size_t n = 0;
+                            for (; n < 64 && w[n] >= 0x20 && w[n] < 0x7f; ++n) {
+                                out += (char)w[n];
+                            }
+                            if (n >= 4 && n < 64 && w[n] == 0) {
+                                return fmt::format("[{}]{}", i, out);
+                            }
+                        }
+                        return std::string{"-"};
+                    };
+                    size_t found{};
+                    for (size_t off = 0; off < 0x10000 && found < 200; off += sizeof(void*)) {
+                        if (IsBadReadPtr(ls + off, 8) || IsBadReadPtr(rs + off, 8)) {
+                            break;
+                        }
+                        const auto lp = *(const uintptr_t*)(ls + off);
+                        const auto rp = *(const uintptr_t*)(rs + off);
+                        if (lp == 0 || rp == 0 || lp == rp || (lp & 7) != 0 || (rp & 7) != 0 ||
+                            IsBadReadPtr((const void*)lp, 0x200) || IsBadReadPtr((const void*)rp, 0x200))
+                        {
+                            continue;
+                        }
+                        const auto lv = *(const uintptr_t*)lp;
+                        const auto rv = *(const uintptr_t*)rp;
+                        if (lv != rv || lv < exe || lv > exe + 0x40000000) {
+                            continue;
+                        }
+                        ++found;
+                        std::string words{};
+                        for (size_t i = 0; i < 24; ++i) {
+                            words += fmt::format(" {:x}/{:x}", ((const uintptr_t*)lp)[i], ((const uintptr_t*)rp)[i]);
+                        }
+                        SPDLOG_INFO("[Experiment][GdfProbe] state +0x{:x}: L {:x} R {:x} vtable exe+0x{:x} name L {} R {}; qwords L/R:{}",
+                            off, lp, rp, lv - exe, debug_name(lp), debug_name(rp), words);
+                    }
+                    SPDLOG_INFO("[Experiment][GdfProbe] {} same-class pointer pairs in the two view states (L {:x}, R {:x})",
+                        found, (uintptr_t)primary.state, (uintptr_t)secondary.state);
+                }
+            }
+
             ++selected_family_count;
             selected_family = family;
             native_left_view = primary_view;
