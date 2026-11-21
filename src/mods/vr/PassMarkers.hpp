@@ -58,8 +58,9 @@ namespace detail {
 constexpr uint32_t kCaptureFrames = 60;
 constexpr uint32_t kMaxPayload = 256;
 constexpr size_t kMaxBytes = 128ull * 1024 * 1024;
-constexpr uint32_t kQueryCapacity = 1u << 18;
-constexpr uint32_t kQueryBlock = 1024;
+// UE5 records hundreds of small lists per frame (Wukong: 1024-query blocks ran out after ~256 lists, 2026-11-21)
+constexpr uint32_t kQueryCapacity = 1u << 20;
+constexpr uint32_t kQueryBlock = 64;
 constexpr uint32_t kNoQuery = 0xffffffffu;
 constexpr uint32_t kReadbackDelayPresents = 30;
 
