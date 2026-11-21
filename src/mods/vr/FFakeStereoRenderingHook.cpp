@@ -180,6 +180,17 @@
 FFakeStereoRenderingHook* g_hook = nullptr;
 uint32_t g_frame_count{};
 
+// EXPERIMENT (exp/right-eye-cost, GDF probe 2): one SEH-guarded 8-byte read; a fault (memory freed or decommitted
+// after the VirtualQuery check) returns false instead of crashing the game. No C++ objects here, so __try is allowed.
+static bool exp_gdf_probe_read(uintptr_t address, uintptr_t* out) {
+    __try {
+        *out = *(const volatile uintptr_t*)address;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 static_assert(static_cast<int32_t>(VR::NATIVE_STEREO) ==
     static_cast<int32_t>(uevr::vr_compatibility::RenderingMethod::NativeStereo));
 static_assert(static_cast<int32_t>(VR::SYNCHRONIZED) ==
@@ -28015,127 +28026,154 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                         ? fmt::format("+0x{:x}", *g_hook->m_native_stereo_exposure_state_offset) : std::string{"not identified"});
             }
 
-            // EXPERIMENT (exp/right-eye-cost, GDF share probe, log only): once, after 600 pair submissions, the pointer
-            // fields of the two eyes' FSceneViewState objects that sit at the same offset, differ, and point to
-            // objects of the same class (equal first qword, i.e. vtable) - the candidates for the view state's global
-            // distance field data (gdf-share-design.md (A)). Each candidate's first 24 qwords are logged too.
+            // EXPERIMENT (exp/right-eye-cost, GDF share probe 2, log only): once, after 600 pair submissions, each eye's
+            // FSceneViewState on its own (a field may be null in the other eye), up to 256 KB.
+            //   Pass A: every named object (exe vtable; pooled render target desc / RDG buffer debug name) it points to.
+            //   Pass B: nameless objects it points to whose first 32 KB point to objects named like global distance
+            //   field data (a persistent GDF data object keeps its textures past a large clipmap-state array).
+            // Every read goes through a VirtualQuery check (committed, readable, no guard page) and an SEH-guarded read
+            // (exp_gdf_probe_read), so memory freed meanwhile fails the read instead of the game. A failed read of the
+            // view state ends that eye's scan; a failed read inside an object ends that object's scan. Pass A stops after
+            // 600 k reads, pass B after 2 M (both eyes together). Probe 1 (fd3da9ed: same-class pointer pairs) found no
+            // GDF field.
             if (vr->get_experiment_pass_markers_seconds() > 0) {
                 static uint32_t gdf_probe_count{0};
                 if (++gdf_probe_count == 600 && primary.state != nullptr && secondary.state != nullptr) {
-                    const auto* ls = (const uint8_t*)primary.state;
-                    const auto* rs = (const uint8_t*)secondary.state;
                     const auto exe = (uintptr_t)GetModuleHandleW(nullptr);
-                    // a pooled render target's desc / an RDG pooled buffer holds a const TCHAR* debug name: the first
-                    // pointer among the object's first 64 qwords to a printable wide string of 4+ characters
-                    const auto debug_name = [](uintptr_t obj) {
+                    size_t budget{};
+                    bool budget_hit{false};
+                    uintptr_t region_base[8]{}, region_end[8]{};
+                    size_t region_next{};
+                    const auto readable = [&](uintptr_t a) {
+                        for (size_t i = 0; i < 8; ++i) {
+                            if (a >= region_base[i] && a + 8 <= region_end[i]) {
+                                return true;
+                            }
+                        }
+                        MEMORY_BASIC_INFORMATION mbi{};
+                        if (VirtualQuery((const void*)a, &mbi, sizeof(mbi)) != sizeof(mbi)) {
+                            return false;
+                        }
+                        const auto prot = mbi.Protect & 0xff;
+                        const bool ok = mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0 &&
+                            (prot == PAGE_READONLY || prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
+                             prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY);
+                        if (!ok) {
+                            return false;
+                        }
+                        region_base[region_next] = (uintptr_t)mbi.BaseAddress;
+                        region_end[region_next] = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+                        region_next = (region_next + 1) % 8;
+                        return a + 8 <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+                    };
+                    const auto rd = [&](uintptr_t a, uintptr_t& v) {
+                        if (budget == 0) {
+                            budget_hit = true;
+                            return false;
+                        }
+                        --budget;
+                        return readable(a) && exp_gdf_probe_read(a, &v);
+                    };
+                    const auto plausible = [](uintptr_t p) { return p >= 0x10000 && p <= 0x7fffffffffffull && (p & 7) == 0; };
+                    const auto is_obj = [&](uintptr_t p) {
+                        uintptr_t vt{};
+                        return plausible(p) && rd(p, vt) && vt >= exe && vt < exe + 0x40000000;
+                    };
+                    // the first of the object's qwords 1..63 that points to a printable wide string of 4..63 characters
+                    const auto debug_name = [&](uintptr_t obj) -> std::string {
                         for (size_t i = 1; i < 64; ++i) {
-                            const auto p = ((const uintptr_t*)obj)[i];
-                            if (p == 0 || (p & 1) != 0 || IsBadReadPtr((const void*)p, 2 * 64)) {
+                            uintptr_t p{};
+                            if (!rd(obj + i * 8, p)) {
+                                break;
+                            }
+                            if (p < 0x10000 || p > 0x7fffffffffffull || (p & 1) != 0) {
                                 continue;
                             }
-                            const auto* w = (const wchar_t*)p;
                             std::string out{};
-                            size_t n = 0;
-                            for (; n < 64 && w[n] >= 0x20 && w[n] < 0x7f; ++n) {
-                                out += (char)w[n];
+                            bool ok = true, ended = false;
+                            for (size_t c = 0; c < 64 && ok && !ended; c += 4) {
+                                uintptr_t w4{};
+                                if (!rd(p + c * 2, w4)) {
+                                    ok = false;
+                                    break;
+                                }
+                                for (int k = 0; k < 4; ++k) {
+                                    const auto ch = (uint16_t)(w4 >> (16 * k));
+                                    if (ch == 0) {
+                                        ended = true;
+                                        break;
+                                    }
+                                    if (ch < 0x20 || ch >= 0x7f) {
+                                        ok = false;
+                                        break;
+                                    }
+                                    out += (char)ch;
+                                }
                             }
-                            if (n >= 4 && n < 64 && w[n] == 0) {
+                            if (ok && ended && out.size() >= 4) {
                                 return fmt::format("[{}]{}", i, out);
                             }
                         }
                         return std::string{"-"};
                     };
-                    size_t found{};
-                    for (size_t off = 0; off < 0x10000 && found < 200; off += sizeof(void*)) {
-                        if (IsBadReadPtr(ls + off, 8) || IsBadReadPtr(rs + off, 8)) {
-                            break;
-                        }
-                        const auto lp = *(const uintptr_t*)(ls + off);
-                        const auto rp = *(const uintptr_t*)(rs + off);
-                        if (lp == 0 || rp == 0 || lp == rp || (lp & 7) != 0 || (rp & 7) != 0 ||
-                            IsBadReadPtr((const void*)lp, 0x200) || IsBadReadPtr((const void*)rp, 0x200))
-                        {
-                            continue;
-                        }
-                        const auto lv = *(const uintptr_t*)lp;
-                        const auto rv = *(const uintptr_t*)rp;
-                        if (lv != rv || lv < exe || lv > exe + 0x40000000) {
-                            continue;
-                        }
-                        ++found;
-                        std::string words{};
-                        for (size_t i = 0; i < 24; ++i) {
-                            words += fmt::format(" {:x}/{:x}", ((const uintptr_t*)lp)[i], ((const uintptr_t*)rp)[i]);
-                        }
-                        // one level down: named objects (exe vtable) the left candidate points to in its first 64
-                        // qwords, e.g. the pooled textures of a persistent GDF data object
-                        std::string inner{};
-                        for (size_t i = 1; i < 64; ++i) {
-                            const auto q = ((const uintptr_t*)lp)[i];
-                            if (q == 0 || (q & 7) != 0 || IsBadReadPtr((const void*)q, 0x200)) {
-                                continue;
-                            }
-                            const auto qv = *(const uintptr_t*)q;
-                            if (qv < exe || qv > exe + 0x40000000) {
-                                continue;
-                            }
-                            const auto name = debug_name(q);
-                            if (name != "-") {
-                                inner += fmt::format(" [{}]{}", i, name);
-                            }
-                        }
-                        SPDLOG_INFO("[Experiment][GdfProbe] state +0x{:x}: L {:x} R {:x} vtable exe+0x{:x} name L {} R {}; inner L:{}; qwords L/R:{}",
-                            off, lp, rp, lv - exe, debug_name(lp), debug_name(rp), inner.empty() ? std::string{" -"} : inner, words);
-                    }
-                    SPDLOG_INFO("[Experiment][GdfProbe] {} same-class pointer pairs in the two view states (L {:x}, R {:x})",
-                        found, (uintptr_t)primary.state, (uintptr_t)secondary.state);
-
-                    // Probe 2: each eye's view state on its own (a field may be null in the other eye), up to 256 KB:
-                    // every named object it points to, and nameless objects (exe vtable) whose first 32 KB point to
-                    // objects named like global distance field data. Where each scan stopped is logged too.
-                    const auto is_obj = [exe](uintptr_t p) {
-                        if (p < 0x10000 || p > 0x7fffffffffffull || (p & 7) != 0 || IsBadReadPtr((const void*)p, 0x200)) {
-                            return false;
-                        }
-                        const auto v = *(const uintptr_t*)p;
-                        return v >= exe && v < exe + 0x40000000;
-                    };
                     const auto gdfish = [](const std::string& s) {
                         return s.find("istance") != std::string::npos || s.find("eightfield") != std::string::npos ||
                             s.find("GDF") != std::string::npos || s.find("lipmap") != std::string::npos;
                     };
+                    const uintptr_t states[2]{(uintptr_t)primary.state, (uintptr_t)secondary.state};
+                    std::vector<std::pair<size_t, uintptr_t>> nameless[2]{};
+
+                    budget = 600000;
+                    budget_hit = false;
                     for (int side = 0; side < 2; ++side) {
-                        const auto* st = side == 0 ? ls : rs;
                         const char* eye = side == 0 ? "L" : "R";
                         std::string named{};
-                        size_t off = 0, n_named = 0, n_hits = 0;
+                        size_t off = 0, n_objs = 0, n_named = 0, n_hits = 0;
+                        const char* stop = "256 KB";
                         for (; off < 0x40000; off += sizeof(void*)) {
-                            if (IsBadReadPtr(st + off, 8)) {
+                            uintptr_t p{};
+                            if (!rd(states[side] + off, p)) {
+                                stop = budget_hit ? "read budget" : "unreadable";
                                 break;
                             }
-                            const auto p = *(const uintptr_t*)(st + off);
                             if (!is_obj(p)) {
                                 continue;
                             }
+                            ++n_objs;
                             const auto name = debug_name(p);
-                            if (name != "-") {
-                                ++n_named;
-                                if (named.size() < 16000) {
-                                    named += fmt::format(" +{:x}:{}", off, name);
-                                }
-                                if (gdfish(name)) {
-                                    ++n_hits;
-                                    SPDLOG_INFO("[Experiment][GdfProbe2] {} +0x{:x} -> {:x} {} (direct)", eye, off, p, name);
-                                }
+                            if (name == "-") {
+                                nameless[side].emplace_back(off, p);
                                 continue;
                             }
-                            size_t limit = 0;
-                            while (limit < 0x8000 && !IsBadReadPtr((const void*)(p + limit), 0x1000)) {
-                                limit += 0x1000;
+                            ++n_named;
+                            if (named.size() < 16000) {
+                                named += fmt::format(" +{:x}:{}", off, name);
                             }
+                            if (gdfish(name)) {
+                                ++n_hits;
+                                SPDLOG_INFO("[Experiment][GdfProbe2] {} +0x{:x} -> {:x} {} (direct)", eye, off, p, name);
+                            }
+                        }
+                        SPDLOG_INFO("[Experiment][GdfProbe2] A {} state {:x}: stopped at +0x{:x} ({}); {} objects, {} named, {} GDF-named, {} nameless; reads left {}; named:{}",
+                            eye, states[side], off, stop, n_objs, n_named, n_hits, nameless[side].size(), budget, named);
+                    }
+
+                    budget = 2000000;
+                    budget_hit = false;
+                    for (int side = 0; side < 2 && !budget_hit; ++side) {
+                        const char* eye = side == 0 ? "L" : "R";
+                        size_t scanned = 0, n_hits = 0;
+                        for (const auto& [off, p] : nameless[side]) {
+                            if (budget_hit) {
+                                break;
+                            }
+                            ++scanned;
                             std::string inner{};
-                            for (size_t i = 1; i < limit / 8; ++i) {
-                                const auto q = ((const uintptr_t*)p)[i];
+                            for (size_t i = 1; i < 0x8000 / 8; ++i) {
+                                uintptr_t q{};
+                                if (!rd(p + i * 8, q)) {
+                                    break;
+                                }
                                 if (!is_obj(q)) {
                                     continue;
                                 }
@@ -28146,12 +28184,13 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                             }
                             if (!inner.empty()) {
                                 ++n_hits;
-                                SPDLOG_INFO("[Experiment][GdfProbe2] {} +0x{:x} -> {:x} vtable exe+0x{:x}, holds:{}", eye, off, p,
-                                    *(const uintptr_t*)p - exe, inner);
+                                uintptr_t vt{};
+                                exp_gdf_probe_read(p, &vt);
+                                SPDLOG_INFO("[Experiment][GdfProbe2] B {} +0x{:x} -> {:x} vtable exe+0x{:x}, holds:{}", eye, off, p, vt - exe, inner);
                             }
                         }
-                        SPDLOG_INFO("[Experiment][GdfProbe2] {} state {:x}: scan stopped at +0x{:x}; {} named objects, {} GDF hits; named:{}",
-                            eye, (uintptr_t)st, off, n_named, n_hits, named);
+                        SPDLOG_INFO("[Experiment][GdfProbe2] B {}: {} of {} nameless objects scanned, {} hold GDF-named objects; reads left {}{}",
+                            eye, scanned, nameless[side].size(), n_hits, budget, budget_hit ? " (read budget hit)" : "");
                     }
                 }
             }
