@@ -4,12 +4,15 @@ the present intervals and hitches (> 2x / 3x the run's median interval) in each 
 as hitches per 1000 frames, so a switching artifact (hitches bunched right after a switch) shows apart from a
 steady difference between the modes.
   python hitch_switch.py <label=run dir> [...] --window 10 [--groups 1 --names share,refresh --bins 10]"""
-import argparse, csv, json, os
+import argparse, csv, json, os, sys
 import numpy as np
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from probe_times import probe_qpc, near
 
 ap = argparse.ArgumentParser(); ap.add_argument("runs", nargs="+"); ap.add_argument("--window", type=int, required=True)
 ap.add_argument("--groups", type=int, default=1); ap.add_argument("--names", default="share,refresh")
 ap.add_argument("--bins", type=int, default=0, help="bins per window (default: one per second, at most 12)")
+ap.add_argument("--exclude-probe", type=float, default=0, help="leave out intervals from 6 s before to S s after each [GdfFind] probe-5 scan")
 a = ap.parse_args()
 names = a.names.split(",")
 bins = a.bins or min(a.window, 12)
@@ -18,14 +21,15 @@ for spec in a.runs:
     ph = {p["name"]: p["qpc_ns"] for p in json.load(open(os.path.join(run, "pilot-status.json"), encoding="utf-8-sig"))["phases"]}
     t0, t1 = ph["play"], ph.get("leave") or ph.get("exit") or 1 << 62
     qs = sorted(int(r["qpc_ns"]) for r in csv.DictReader(open(os.path.join(run, "perf-frames.csv"), encoding="utf-8", errors="replace")) if r["kind"] == "P")
-    iv = [(y, (y - x) / 1e6) for x, y in zip(qs, qs[1:]) if t0 <= y < t1]
+    probes = probe_qpc(run) if a.exclude_probe > 0 else []
+    iv = [(y, (y - x) / 1e6) for x, y in zip(qs, qs[1:]) if t0 <= y < t1 and not (probes and near(y, probes, a.exclude_probe))]
     med = float(np.median([v for _, v in iv]))
     tab = {}  # (mode, bin) -> [frames, >2x, >3x]
     for y, v in iv:
         s = y / 1e9; w = int(s // a.window); m = w % (a.groups + 1)
         b = min(bins - 1, int((s - w * a.window) / a.window * bins))
         c = tab.setdefault((m, b), [0, 0, 0]); c[0] += 1; c[1] += v > 2 * med; c[2] += v > 3 * med
-    print(f"\n{label}: median interval {med:.1f} ms, window {a.window} s, {bins} bins (bin = {a.window / bins:g} s since the switch)")
+    print(f"\n{label}{f' (probe scans {len(probes)} excluded, +{a.exclude_probe:g} s)' if probes else ''}: median interval {med:.1f} ms, window {a.window} s, {bins} bins (bin = {a.window / bins:g} s since the switch)")
     for m in range(a.groups + 1):
         nm = names[m] if m < len(names) else str(m)
         row = [tab.get((m, b), [0, 0, 0]) for b in range(bins)]

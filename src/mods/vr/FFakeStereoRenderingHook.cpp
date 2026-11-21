@@ -28043,7 +28043,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             // update index, +0x2b40..+0x2b80 textures and buffers; offsets from the static look, for this experiment
             // only) - and for each qword that points to an object (exe vtable) its vtable, debug name and first 16
             // qwords. Every read is VirtualQuery-checked and SEH-guarded; no scanning, so no stall.
-            if (vr->get_experiment_pass_markers_seconds() > 0) {
+            if (vr->get_experiment_gdf_probes()) {
                 static uint32_t gdf_dump_count{0};
                 ++gdf_dump_count;
                 if ((gdf_dump_count == 600 || gdf_dump_count == 1200 || gdf_dump_count == 2400) && primary.state != nullptr &&
@@ -28132,7 +28132,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             // first 64 KB of each eye's view state whose name mentions a distance field or a heightfield, with its offset,
             // and the count of named objects: whether a game keeps a per-view Global Distance Field and where, without
             // assuming a layout. Only the named-object pass (fast in probe 2), VirtualQuery-checked SEH-guarded reads.
-            if (vr->get_experiment_pass_markers_seconds() > 0) {
+            if (vr->get_experiment_gdf_probes()) {
                 static uint32_t gdf_find_count{0};
                 ++gdf_find_count;
                 if ((gdf_find_count == 1200 || gdf_find_count == 2400 || gdf_find_count == 4800 || gdf_find_count == 9600 ||

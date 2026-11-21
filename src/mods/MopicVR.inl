@@ -29,6 +29,10 @@
     int32_t get_experiment_right_eye_gdf_share() const {
         return m_experiment_right_eye_gdf_share->value();
     }
+    // EXPERIMENT (exp/right-eye-cost, default false): GDF probes 4 and 5 (log only; probe 5 stalls the game thread).
+    bool get_experiment_gdf_probes() const {
+        return m_experiment_gdf_probes->value();
+    }
 
     // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
     // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).

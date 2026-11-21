@@ -12,11 +12,14 @@ Whole runs:      python hitch_kinds.py <label=run dir> [...]
 Window A/B runs: python hitch_kinds.py <label=run dir> --window 10 --groups 1 --names share,refresh [--guard 2]
                  (phase = floor(qpc s / window) % (groups + 1); intervals ending within --guard s of a window start are
                  left out)"""
-import argparse, csv, json, os
+import argparse, csv, json, os, sys
 import numpy as np
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from probe_times import probe_qpc, near
 
 ap = argparse.ArgumentParser(); ap.add_argument("runs", nargs="+"); ap.add_argument("--window", type=int, default=0)
 ap.add_argument("--groups", type=int, default=1); ap.add_argument("--names", default=""); ap.add_argument("--guard", type=float, default=2)
+ap.add_argument("--exclude-probe", type=float, default=0, help="leave out intervals from 6 s before to S s after each [GdfFind] probe-5 scan (log.txt)")
 a = ap.parse_args()
 FIELDS = ["tick_us", "rt_blocked_us", "present_us", "uevr_rt_us", "uevr_gt_us", "ticks"]
 f = lambda r, k: float(r.get(k) or 0)
@@ -35,10 +38,11 @@ for spec in a.runs:
     t0, t1 = ph["play"], ph.get("leave") or ph.get("exit") or 1 << 62
     rows = sorted((r for r in csv.DictReader(open(os.path.join(run, "perf-frames.csv"), encoding="utf-8", errors="replace")) if r["kind"] == "P"),
                   key=lambda r: int(r["qpc_ns"]))
+    probes = probe_qpc(run) if a.exclude_probe > 0 else []
     by_phase = {}
     for x, y in zip(rows, rows[1:]):
         q = int(y["qpc_ns"])
-        if not (t0 <= q < t1):
+        if not (t0 <= q < t1) or (probes and near(q, probes, a.exclude_probe)):
             continue
         p = phase_of(q)
         if p is not None:
@@ -47,7 +51,7 @@ for spec in a.runs:
     for p in sorted(by_phase):
         iv = by_phase[p]; v = np.array([d for d, _ in iv]); med = float(np.median(v))
         pname = names[p] if p < len(names) else (str(p) if a.window > 0 else "run")
-        print(f"{label} [{pname}]: frames {len(v)}, interval median {med:.1f} ms, p90 {np.percentile(v, 90):.1f}, p99 {np.percentile(v, 99):.1f}")
+        print(f"{label} [{pname}]{f' (probe scans {len(probes)} excluded, +{a.exclude_probe:g} s)' if probes else ''}: frames {len(v)}, interval median {med:.1f} ms, p90 {np.percentile(v, 90):.1f}, p99 {np.percentile(v, 99):.1f}")
         allm = {k: float(np.median([f(r, k) for _, r in iv])) for k in FIELDS}
         for mult in (2, 3):
             hs = [(d, r) for d, r in iv if d > mult * med]

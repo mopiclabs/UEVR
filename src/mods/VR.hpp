@@ -1773,8 +1773,11 @@ private:
     // EXPERIMENT (exp/right-eye-cost): every N seconds, 60 presents of per-pass records (vr/PassMarkers.hpp).
     const ModInt32::Ptr m_experiment_pass_markers_seconds{ ModInt32::create(generate_name("ExperimentPassMarkersSeconds"), 0) };
     // EXPERIMENT (exp/right-eye-cost): 1 = the right eye renders with the left eye's Global Distance Field, 2 = in even
-    // 10-second windows only (vr/GdfShare.hpp).
+    // 10-second windows only, N >= 10 = N-second windows, 3 = as 1 with the update index kept (vr/GdfShare.hpp).
     const ModInt32::Ptr m_experiment_right_eye_gdf_share{ ModInt32::create(generate_name("ExperimentRightEyeGdfShare"), 0) };
+    // EXPERIMENT (exp/right-eye-cost): GDF probes 4 and 5 (log only). Probe 5 stalls the game thread 1-6 s per scan at
+    // pair submissions 1200 / 2400 / 4800 / 9600 / 19200; up to 28dedeef both ran whenever pass markers were on.
+    const ModToggle::Ptr m_experiment_gdf_probes{ ModToggle::create(generate_name("ExperimentGdfProbes"), false) };
     // EXPERIMENT (exp/right-eye-cost): "N,group,..." right-eye-only groups in N-second windows (ExperimentSecondFamilyHold,
     // vr/ExperimentPhase.hpp).
     const ModString::Ptr m_experiment_second_family_cvars{ ModString::create(generate_name("ExperimentSecondFamilyCvars"), "") };
@@ -2142,6 +2145,7 @@ public:
             *m_experiment_secondary_exposure_state,
             *m_experiment_pass_markers_seconds,
             *m_experiment_right_eye_gdf_share,
+            *m_experiment_gdf_probes,
             *m_experiment_second_family_cvars,
             *m_experiment_cvar_dump_seconds,
             *m_experiment_frame_cvars,
