@@ -1777,6 +1777,8 @@ private:
     const ModString::Ptr m_experiment_second_family_cvars{ ModString::create(generate_name("ExperimentSecondFamilyCvars"), "") };
     // EXPERIMENT (exp/right-eye-cost): every N seconds, all console variables to cvardump\ (vr/ExperimentCvarDump.hpp).
     const ModInt32::Ptr m_experiment_cvar_dump_seconds{ ModInt32::create(generate_name("ExperimentCvarDumpSeconds"), 0) };
+    // EXPERIMENT (exp/right-eye-cost): whole-frame cvar groups in N-second windows (vr/ExperimentFrameCvars.hpp).
+    const ModString::Ptr m_experiment_frame_cvars{ ModString::create(generate_name("ExperimentFrameCvars"), "") };
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
     const ModToggle::Ptr m_native_stereo_fix_second_lumen_surface_cache_freeze{ ModToggle::create(generate_name("NativeStereoFixSecondLumenSurfaceCacheFreeze"), true) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 15) };
@@ -2138,6 +2140,7 @@ public:
             *m_experiment_pass_markers_seconds,
             *m_experiment_second_family_cvars,
             *m_experiment_cvar_dump_seconds,
+            *m_experiment_frame_cvars,
             *m_native_stereo_fix_lumen_origin_refresh_frames,
             *m_native_stereo_fix_second_lumen_surface_cache_freeze,
             *m_native_stereo_fix_second_gdf_refresh_frames,

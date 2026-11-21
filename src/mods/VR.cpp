@@ -67,6 +67,7 @@
 #include "vr/PerfLog.hpp"
 #include "vr/PassMarkers.hpp"
 #include "vr/ExperimentCvarDump.hpp"
+#include "vr/ExperimentFrameCvars.hpp"
 
 namespace {
 bool is_stalker2_executable_cached();
@@ -5033,6 +5034,11 @@ void VR::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
     const bool hitch_diagnostics_enabled = m_enable_hitch_diagnostics->value();
 
     tick_autores_frame_bound_detect(engine, delta); // Mopic: VR_AutoResFrameBoundDetect (next to update_autores)
+
+    // EXPERIMENT (exp/right-eye-cost): whole-frame cvar windows (both eyes / the flat render)
+    if (const auto& frame_cvars = m_experiment_frame_cvars->value(); !frame_cvars.empty() || uevr::frame_cvars::state().groups.size() > 0) {
+        uevr::frame_cvars::process(frame_cvars);
+    }
 
     // EXPERIMENT (exp/right-eye-cost): cvar dumps, and the game camera's FOV every 10 s while they are on (the flat
     // reference renders with it; the VR eyes use the runtime's projection instead)
