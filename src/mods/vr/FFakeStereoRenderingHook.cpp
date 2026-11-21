@@ -28193,7 +28193,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                     for (int side = 0; side < 2; ++side) {
                         const auto st = (uintptr_t)(side == 0 ? primary.state : secondary.state);
                         std::string found{};
-                        size_t off = 0, named = 0;
+                        size_t off = 0, named = 0, anchor_off = 0;
                         for (; off < 0x10000; off += sizeof(void*)) {
                             uintptr_t p{}, vt{};
                             if (!rd(st + off, p)) {
@@ -28207,6 +28207,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                                 continue;
                             }
                             ++named;
+                            if (anchor_off == 0 && name.find("GlobalDistanceField.PageAtlas") != std::string::npos) {
+                                anchor_off = off;
+                            }
                             if (name.find("istance") != std::string::npos || name.find("eightfield") != std::string::npos ||
                                 name.find("GDF") != std::string::npos || name.find("lipmap") != std::string::npos)
                             {
@@ -28217,6 +28220,28 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                         }
                         SPDLOG_INFO("[Experiment][GdfFind] #{} {} state {:x}: stopped at +0x{:x}, {} named objects; distance-field ones:{}",
                             gdf_find_count, side == 0 ? "L" : "R", st, off, named, found.empty() ? std::string{" none"} : found);
+                        // The raw qwords around the PageAtlas field (anchor -0x300..+0x80), object pointers named: to match a
+                        // game's GDF block layout against Wukong UE5.0's offline (exp/right-eye-cost, applicability runs).
+                        if (anchor_off != 0) {
+                            const size_t from = anchor_off >= 0x300 ? anchor_off - 0x300 : 0;
+                            std::string raw{};
+                            for (size_t o = from; o < anchor_off + 0x80; o += sizeof(void*)) {
+                                uintptr_t v{}, vt{};
+                                if (!rd(st + o, v)) {
+                                    raw += fmt::format(" +{:x}:?", o);
+                                    continue;
+                                }
+                                raw += fmt::format(" +{:x}:{:x}", o, v);
+                                if ((v & 7) == 0 && rd(v, vt) && vt >= exe && vt < exe + 0x40000000) {
+                                    const auto n = wide_name(v);
+                                    if (n != "-") {
+                                        raw += "=" + n;
+                                    }
+                                }
+                            }
+                            SPDLOG_INFO("[Experiment][GdfAnchor] #{} {} state {:x}: PageAtlas field +0x{:x}; qwords +0x{:x}..+0x{:x}:{}",
+                                gdf_find_count, side == 0 ? "L" : "R", st, anchor_off, from, anchor_off + 0x80, raw);
+                        }
                     }
                 }
             }
