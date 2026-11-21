@@ -36,6 +36,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -458,6 +459,197 @@ inline void on_set_pipeline_state(ID3D12GraphicsCommandList* list, ID3D12Pipelin
     }
 }
 
+// --- shader identities: which shaders each PSO was made from, to name passes offline (tools/dxilnames.py) ---
+// While VR_ExperimentPassMarkersSeconds > 0 (set_configured, from the config load), every PSO creation writes
+// "pso<TAB>stage<TAB>hash<TAB>size" to passmarkers/psos.tsv and each shader's bytecode once to
+// passmarkers/shaders/<hash>.bin (FNV-1a 64 of the bytecode). Creations before the folder is known (the first present)
+// wait in memory (capped).
+namespace detail {
+struct Shaders {
+    std::atomic<bool> configured{false};
+    std::mutex mtx{};
+    std::unordered_map<uint64_t, bool> written{};
+    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> pending{};
+    size_t pending_bytes{0};
+    std::vector<std::string> pending_lines{};
+    std::filesystem::path dir{};
+    std::ofstream index{};
+    std::unique_ptr<PointerHook> compute_hook{};
+    std::atomic<void*> compute_original{};
+    uint64_t psos{0};
+    uint64_t shaders{0};
+};
+
+inline Shaders& shaders() {
+    static Shaders s{};
+    return s;
+}
+
+inline uint64_t fnv1a(const void* data, size_t size) {
+    uint64_t h = 1469598103934665603ull;
+    const auto* p = (const uint8_t*)data;
+    for (size_t i = 0; i < size; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+inline void write_shader_file(const std::filesystem::path& dir, uint64_t hash, const void* data, size_t size) {
+    char name[32]{};
+    snprintf(name, sizeof(name), "%016llx.bin", (unsigned long long)hash);
+    std::ofstream out{dir / name, std::ios::binary};
+    out.write((const char*)data, (std::streamsize)size);
+}
+
+template <typename T>
+struct alignas(void*) StreamSubobject {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+    T payload;
+};
+
+inline size_t stream_subobject_size(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type) {
+    switch (type) {
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE: return sizeof(StreamSubobject<ID3D12RootSignature*>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS:
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: return sizeof(StreamSubobject<D3D12_SHADER_BYTECODE>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT: return sizeof(StreamSubobject<D3D12_STREAM_OUTPUT_DESC>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND: return sizeof(StreamSubobject<D3D12_BLEND_DESC>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK: return sizeof(StreamSubobject<UINT>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER: return sizeof(StreamSubobject<D3D12_RASTERIZER_DESC>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL: return sizeof(StreamSubobject<D3D12_DEPTH_STENCIL_DESC>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT: return sizeof(StreamSubobject<D3D12_INPUT_LAYOUT_DESC>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
+        return sizeof(StreamSubobject<D3D12_INDEX_BUFFER_STRIP_CUT_VALUE>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+        return sizeof(StreamSubobject<D3D12_PRIMITIVE_TOPOLOGY_TYPE>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS: return sizeof(StreamSubobject<D3D12_RT_FORMAT_ARRAY>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT: return sizeof(StreamSubobject<DXGI_FORMAT>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC: return sizeof(StreamSubobject<DXGI_SAMPLE_DESC>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK: return sizeof(StreamSubobject<UINT>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO: return sizeof(StreamSubobject<D3D12_CACHED_PIPELINE_STATE>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS: return sizeof(StreamSubobject<D3D12_PIPELINE_STATE_FLAGS>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1: return sizeof(StreamSubobject<D3D12_DEPTH_STENCIL_DESC1>);
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING: return sizeof(StreamSubobject<D3D12_VIEW_INSTANCING_DESC>);
+    default: return 0;
+    }
+}
+
+inline char stage_letter(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type) {
+    switch (type) {
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS: return 'V';
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS: return 'P';
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS: return 'C';
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS: return 'M';
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS: return 'A';
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS: return 'G';
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS: return 'H';
+    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DS: return 'D';
+    default: return 0;
+    }
+}
+} // namespace detail
+
+// VR::on_config_load: shader identities are kept while the pass markers are configured on.
+inline void set_configured(bool on) {
+    detail::shaders().configured.store(on, std::memory_order_release);
+}
+
+// After a successful PSO creation: (stage letter, bytecode) pairs.
+inline void on_pso_created(void* pso, const std::pair<char, D3D12_SHADER_BYTECODE>* stages, size_t count) {
+    using namespace detail;
+    auto& s = shaders();
+    if (!s.configured.load(std::memory_order_acquire) || pso == nullptr) {
+        return;
+    }
+    std::scoped_lock _{s.mtx};
+    ++s.psos;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& [stage, code] = stages[i];
+        if (code.pShaderBytecode == nullptr || code.BytecodeLength == 0) {
+            continue;
+        }
+        const auto hash = fnv1a(code.pShaderBytecode, code.BytecodeLength);
+        char line[96]{};
+        snprintf(line, sizeof(line), "%llx\t%c\t%016llx\t%zu\n", (unsigned long long)(uintptr_t)pso, stage,
+            (unsigned long long)hash, (size_t)code.BytecodeLength);
+        const bool fresh = s.written.emplace(hash, true).second;
+        if (fresh) {
+            ++s.shaders;
+        }
+        if (!s.dir.empty()) {
+            s.index << line;
+            if (fresh) {
+                write_shader_file(s.dir, hash, code.pShaderBytecode, code.BytecodeLength);
+            }
+        } else {
+            s.pending_lines.emplace_back(line);
+            if (fresh && s.pending_bytes + code.BytecodeLength < 256ull * 1024 * 1024) {
+                const auto* p = (const uint8_t*)code.pShaderBytecode;
+                s.pending.emplace_back(hash, std::vector<uint8_t>(p, p + code.BytecodeLength));
+                s.pending_bytes += code.BytecodeLength;
+            }
+        }
+    }
+}
+
+inline void on_pso_stream_created(void* pso, const D3D12_PIPELINE_STATE_STREAM_DESC* desc) {
+    using namespace detail;
+    if (!shaders().configured.load(std::memory_order_acquire) || desc == nullptr || desc->pPipelineStateSubobjectStream == nullptr) {
+        return;
+    }
+    std::pair<char, D3D12_SHADER_BYTECODE> stages[8]{};
+    size_t count{};
+    const auto* base = (const uint8_t*)desc->pPipelineStateSubobjectStream;
+    for (size_t off = 0; off + sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE) <= desc->SizeInBytes && count < 8;) {
+        const auto type = *(const D3D12_PIPELINE_STATE_SUBOBJECT_TYPE*)(base + off);
+        const auto size = stream_subobject_size(type);
+        if (size == 0 || off + size > desc->SizeInBytes) {
+            break;
+        }
+        if (const auto letter = stage_letter(type); letter != 0) {
+            stages[count++] = {letter, ((const StreamSubobject<D3D12_SHADER_BYTECODE>*)(base + off))->payload};
+        }
+        off += size;
+    }
+    on_pso_created(pso, stages, count);
+}
+
+namespace detail {
+inline HRESULT STDMETHODCALLTYPE create_compute_pipeline_state(ID3D12Device* device,
+    const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc, REFIID riid, void** pipeline_state)
+{
+    using Fn = decltype(&create_compute_pipeline_state);
+    const auto result = ((Fn)shaders().compute_original.load(std::memory_order_acquire))(device, desc, riid, pipeline_state);
+    if (SUCCEEDED(result) && desc != nullptr && pipeline_state != nullptr && *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState))
+    {
+        const std::pair<char, D3D12_SHADER_BYTECODE> stage{'C', desc->CS};
+        on_pso_created(*pipeline_state, &stage, 1);
+    }
+    return result;
+}
+} // namespace detail
+
+// D3D12Hook's hook setup: ID3D12Device::CreateComputePipelineState (slot 11) of the device class's vtable.
+inline void hook_compute_creation(ID3D12Device* device) {
+    using namespace detail;
+    auto& s = shaders();
+    if (device == nullptr || s.compute_hook != nullptr) {
+        return;
+    }
+    auto** vtable = *(void***)device;
+    s.compute_original.store(vtable[11], std::memory_order_release);
+    s.compute_hook = std::make_unique<PointerHook>(&vtable[11], (void*)&create_compute_pipeline_state);
+    spdlog::info("[PassMarkers] Hooked CreateComputePipelineState (vtable {:x})", (uintptr_t)vtable);
+}
+
 // PreRenderViewFamily_RenderThread: where each family's render starts on the render thread.
 inline void on_family_render(uint32_t frame_count, uintptr_t render_target) {
     using namespace detail;
@@ -485,6 +677,31 @@ inline void on_present(int32_t seconds, const std::filesystem::path& persistent_
         s.dir = persistent_dir / "passmarkers";
         std::error_code ec{};
         std::filesystem::create_directories(s.dir, ec);
+        // the shader identities collected so far go to disk; later ones are written as they come
+        auto& sh = shaders();
+        std::scoped_lock _{sh.mtx};
+        const auto shader_dir = s.dir / "shaders";
+        std::filesystem::create_directories(shader_dir, ec);
+        sh.index.open(s.dir / "psos.tsv", std::ios::app);
+        for (const auto& line : sh.pending_lines) {
+            sh.index << line;
+        }
+        for (const auto& [hash, bytes] : sh.pending) {
+            write_shader_file(shader_dir, hash, bytes.data(), bytes.size());
+        }
+        spdlog::info("[PassMarkers] Shader identities so far: {} PSOs, {} shaders ({} written now)", sh.psos, sh.shaders,
+            sh.pending.size());
+        sh.pending_lines.clear();
+        sh.pending.clear();
+        sh.pending_bytes = 0;
+        sh.dir = shader_dir;
+    }
+    {
+        auto& sh = shaders();
+        if (sh.index.is_open()) {
+            std::scoped_lock _{sh.mtx};
+            sh.index.flush();
+        }
     }
 
     if (g.read_in != 0 && --g.read_in == 0) {

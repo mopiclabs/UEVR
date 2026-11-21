@@ -3174,6 +3174,15 @@ std::optional<std::string> VR::initialize_openxr() {
     m_openxr.reset();
     m_openxr = std::make_shared<runtimes::OpenXR>();
 
+    // EXPERIMENT (exp/right-eye-cost): with experiment-no-runtime.txt next to config.txt, no runtime starts and the
+    // game renders flat with UEVR loaded (its hooks, cvars and perf log), as a same-frame-source flat reference.
+    if (std::error_code ec{}; std::filesystem::exists(Framework::get_persistent_dir() / "experiment-no-runtime.txt", ec)) {
+        spdlog::warn("[VR][Experiment] experiment-no-runtime.txt present: not starting OpenXR (flat reference run)");
+        m_openxr->loaded = false;
+        m_openxr->error = "Experiment: no runtime (flat reference)";
+        return std::nullopt;
+    }
+
     spdlog::info("[VR] Initializing OpenXR");
 
     if (GetModuleHandleW(L"openxr_loader.dll") == nullptr) {
@@ -7938,6 +7947,8 @@ void VR::on_config_load(const utility::Config& cfg, bool set_defaults) {
     for (IModValue& option : m_options) {
         option.config_load(cfg, set_defaults);
     }
+    // EXPERIMENT (exp/right-eye-cost): PSO shader identities only while the pass markers are on
+    uevr::pass_markers::set_configured(m_experiment_pass_markers_seconds->value() > 0);
     // A profile without this new key must not inherit an enabled experiment
     // from an earlier in-process configuration reload.
     m_native_openxr_wait_only->value() = uevr::openxr_wait::load_setting(

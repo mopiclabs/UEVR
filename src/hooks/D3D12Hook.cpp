@@ -747,6 +747,9 @@ bool D3D12Hook::hook() {
             );
         }
 
+        // EXPERIMENT (exp/right-eye-cost): compute PSO shader identities for the pass markers
+        uevr::pass_markers::hook_compute_creation(device);
+
         add_unique_pointer_hook(
             command_list,
             SET_PIPELINE_STATE_VTABLE_INDEX,
@@ -1162,6 +1165,14 @@ HRESULT WINAPI D3D12Hook::create_graphics_pipeline_state(
     const auto result = original(device, desc, riid, pipeline_state);
     note_pipeline_state_creation(create_start);
 
+    if (SUCCEEDED(result) && pipeline_state != nullptr && *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState) && desc != nullptr)
+    {
+        const std::pair<char, D3D12_SHADER_BYTECODE> stages[]{{'V', desc->VS}, {'P', desc->PS}, {'G', desc->GS},
+            {'H', desc->HS}, {'D', desc->DS}};
+        uevr::pass_markers::on_pso_created(*pipeline_state, stages, std::size(stages));
+    }
+
     auto& shader_registry = render::ShaderOverrideRegistry::get();
     if (shader_registry.should_track_d3d12_pipelines() &&
         SUCCEEDED(result) &&
@@ -1197,6 +1208,12 @@ HRESULT WINAPI D3D12Hook::create_pipeline_state(
     const auto create_start = std::chrono::steady_clock::now();
     const auto result = original(device, desc, riid, pipeline_state);
     note_pipeline_state_creation(create_start);
+
+    if (SUCCEEDED(result) && pipeline_state != nullptr && *pipeline_state != nullptr &&
+        riid == __uuidof(ID3D12PipelineState) && desc != nullptr)
+    {
+        uevr::pass_markers::on_pso_stream_created(*pipeline_state, desc);
+    }
 
     auto& shader_registry = render::ShaderOverrideRegistry::get();
     if (shader_registry.should_track_d3d12_pipelines() &&
