@@ -48,6 +48,8 @@ changes a default. Run folders stay in the mopic-test harness's `runs\`. Logs an
 ## Gotchas
 
 - Walk route saves: see the header of `walk_block.ps1`. Hash-check the save files before every run, and put them back after it.
-- Big binocular frame counts make the harness's post-run analysis very slow: 219 frames took ~24 min, 60 frames 1.5-6.5 min. Keep `-EyeFullMax` near 60 and space the frames with `-EyeFullEvery`.
+- The harness's post-run binocular analysis is slow: about 6.6 s per frame on blade18 since 2026-11-22 (1.3 s the evening before, cause not found). 219 frames took 24 min; 60 frames took 6.7 min.
+  - `cost_run.ps1 -DeferBinocular` (on in `walk_block.ps1`) holds the frames out of the run (`hold_frames.ps1`) and puts them back afterwards, so the block's time is game time.
+  - Analyze them after the block with the harness's `analysis\binocular.py analyze <run>`, or read them directly with `route_compare.py` / `eyes_ratio.py`.
 - A run stopped mid key-press can leave a modifier logically down. The pilot's Esc then becomes Ctrl+Esc, and every launch fails with "could not bring the game window to the foreground". `cost_run.ps1` refuses to start with a modifier down and releases the recipe keys after a run.
 - The service's stdout can hold license text: never print or share `service-logs\` whole.

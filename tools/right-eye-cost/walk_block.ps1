@@ -74,6 +74,11 @@ function SnapDiff($a, $b, $when) {
 }
 
 if ($expectMap.Count -eq 0) { Write-Host "-Expect names no files"; exit 5 }
+# The harness's perf report reads every earlier run's result.json (its build comparison). On blade18 that step took
+# 145-168 s on the first run of two blocks and 3-4 s otherwise (cold file cache suspected, not proven): read them
+# once here, before the block's clock starts.
+$pre = Measure-Command { Get-ChildItem $runs -Directory | ForEach-Object { $p = Join-Path $_.FullName "result.json"; if (Test-Path $p) { [void][IO.File]::ReadAllBytes($p) } } }
+Note "pre-read the harness's earlier result.json files in $([math]::Round($pre.TotalSeconds, 1)) s"
 $blockStart = Get-Date
 $latest = $blockStart.AddMinutes($MaxStartMinutes).ToString("HH:mm")
 Note "block start $($blockStart.ToString('HH:mm:ss')); order $Order; no run starts after $latest (block start + $MaxStartMinutes min, rounded down)"
@@ -93,7 +98,7 @@ for ($i = 0; $i -lt $plan.Count; $i++) {
     $setAll = (@("VR_ExperimentRightEyeGdfShare=$($p.mode)") + $(if ($Set) { @($Set) } else { @() })) -join ";"
     try {
         & powershell -ExecutionPolicy Bypass -File (Join-Path $here "cost_run.ps1") -Harness $Harness -Dll $Dll -EngineDir $EngineDir -OutDir $OutDir `
-            -Game Wukong -Recipe $Recipe -SteamOnline -Runtime sbs -EyeSampler -EyeFullEvery 11 -EyeFullMax 60 -EyeHz $EyeHz -Arms pm `
+            -Game Wukong -Recipe $Recipe -SteamOnline -Runtime sbs -EyeSampler -EyeFullEvery 11 -EyeFullMax 60 -EyeHz $EyeHz -DeferBinocular -Arms pm `
             -LabelSuffix $p.label -Set $setAll -LatestStart $latest | Out-Host
     } finally {
         for ($w = 0; $w -lt 60 -and (Get-Process b1-Win64-Shipping -ErrorAction SilentlyContinue); $w++) { Start-Sleep 2 }

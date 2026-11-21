@@ -27,6 +27,7 @@ param(
     [switch]$SteamOnline,
     [switch]$EyeSampler,
     [int]$EyeFullMax = 60,            # eyesampler.py --full-max: whole-display (binocular) frames per run
+    [switch]$DeferBinocular,          # hold the binocular frames out of the harness's post-run analysis (hold_frames.ps1); analyze after the block
     [double]$EyeHz = 0,               # eyesampler.py --hz (0 = its default, 120); 1 Hz is enough for the R/L luma check
     [double]$EyeFullEvery = 3,        # eyesampler.py --full-every: one whole-display frame every N s (the harness's binocular analysis grows faster than the frame count: 60 frames ~80 s, 219 frames ~24 min)
     [switch]$Sampler,
@@ -239,6 +240,14 @@ try {
         $noRuntimeFile = "$env:APPDATA\UnrealVRMod\$procName\experiment-no-runtime.txt"
         if ($k -eq "nort") { Set-Content -Path $noRuntimeFile -Value "right-eye-cost flat reference $stamp" -Encoding ascii; Note "  $noRuntimeFile created for this run" }
         $line = "& powershell " + (($a | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join " ") + " *>&1 | Out-File -Encoding utf8 -FilePath '$runOut'"
+        $holdStop = $null
+        if ($DeferBinocular -and $EyeSampler) {
+            $holdStop = Join-Path $OutDir ("hold-{0}-{1}.stop" -f $stamp, $label)
+            Remove-Item $holdStop, "$holdStop.done" -ErrorAction SilentlyContinue
+            Start-Process -FilePath "powershell" -ArgumentList @("-ExecutionPolicy", "Bypass", "-File", "`"$(Join-Path $PSScriptRoot 'hold_frames.ps1')`"",
+                "-RunsDir", "`"$tools\runs`"", "-Match", "`"*-$Game-$label-r1`"", "-HoldDir", "`"$(Join-Path $OutDir 'binocular-held')`"",
+                "-StopFile", "`"$holdStop`"", "-After", (Get-Date).AddSeconds(-5).ToString("s")) -WindowStyle Hidden | Out-Null
+        }
         try { Invoke-Expression $line } finally {
             if (Test-Path $noRuntimeFile) { Remove-Item $noRuntimeFile -Force; Note "  $noRuntimeFile removed" }
             # A pilot stopped mid key-press leaves that key logically down (18:54 incident: left Ctrl). Release the keys
@@ -250,6 +259,17 @@ try {
         if ($samplerProc -and -not $samplerProc.WaitForExit(30000)) { Note "sampler still running after the run, stopped it"; try { $samplerProc.Kill() } catch { } }
         if ($gpuOut) { Set-Content -Path "$gpuOut.stop" -Value "stop" -Encoding ascii }
         $last = Get-ChildItem "$tools\runs" -Directory | Where-Object { $_.Name -like "*-$Game-$label-r1" } | Sort-Object Name | Select-Object -Last 1
+        if ($holdStop) {
+            Set-Content -Path $holdStop -Value "stop" -Encoding ascii
+            for ($w = 0; $w -lt 30 -and -not (Test-Path "$holdStop.done"); $w++) { Start-Sleep 2 }
+            $held = $(if ($last) { Join-Path (Join-Path $OutDir "binocular-held") $last.Name } else { $null })
+            if ($held -and (Test-Path $held)) {
+                $back = @(Get-ChildItem $held -Filter *.png)
+                New-Item -ItemType Directory -Force (Join-Path $last.FullName "binocular") | Out-Null
+                $back | Move-Item -Destination (Join-Path $last.FullName "binocular") -Force
+                Note "  binocular frames held out of the harness analysis and put back: $($back.Count) (analyze after the block: analysis\binocular.py analyze <run>)"
+            } else { Note "  binocular hold: nothing held ($(if (Test-Path "$holdStop.done") { Get-Content "$holdStop.done" } else { 'mover did not finish' }))" }
+        }
         if ($cell -and $last) { Set-Content -Path "$cell\rundir.txt" -Value $last.FullName -Encoding ascii }
         if ($last -and (Test-Path "$($last.FullName)\summary.txt")) {
             Note ("  -> " + $last.Name + "  " + (Get-Content "$($last.FullName)\summary.txt" -TotalCount 1))
