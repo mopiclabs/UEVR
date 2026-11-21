@@ -275,6 +275,14 @@ struct ListHooks {
     std::atomic<bool> csm_probe{false};
     std::mutex csm_mtx{};
     std::unordered_map<ID3D12Resource*, uint64_t> csm_binds{};
+    // CSM share (VR_ExperimentRightEyeCsmShare, vr/CsmShare.hpp): while active, after the frame's first bind of the eye
+    // output (the right family's turn), the CSM atlas's depth-only draws, clears and discards are skipped so the atlas
+    // keeps the left family's depth (both families render into one atlas resource).
+    std::atomic<bool> csm_active{false};
+    std::atomic<uint32_t> csm_eye_w{0}, csm_eye_h{0};
+    std::atomic<bool> csm_eye_seen{false};
+    std::atomic<ID3D12Resource*> csm_atlas{nullptr};
+    std::atomic<uint32_t> csm_skipped_draws{0}, csm_skipped_clears{0}, csm_skipped_discards{0}, csm_eye_binds{0};
 };
 
 inline ListHooks& list_hooks() {
@@ -284,6 +292,8 @@ inline ListHooks& list_hooks() {
 
 inline thread_local uint32_t t_calls[kClassCount]{};
 inline thread_local uint32_t t_ticks[kClassCount]{};
+// CSM share: the command list (recorded on this thread) whose current depth-only target is the right family's CSM atlas
+inline thread_local ID3D12GraphicsCommandList* t_csm_skip_list{nullptr};
 
 inline void record_list(uint32_t kind, ID3D12GraphicsCommandList* list, const uint32_t* extra, uint32_t extra_count) {
     LARGE_INTEGER qpc{};
@@ -310,6 +320,12 @@ inline void record_list(uint32_t kind, ID3D12GraphicsCommandList* list, const ui
 template <size_t Slot, uint32_t Class, typename... Args>
 void STDMETHODCALLTYPE timed_call(ID3D12GraphicsCommandList* list, Args... args) {
     using Fn = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, Args...);
+    if constexpr (Class == kDraw || Class == kIndirect) {
+        if (t_csm_skip_list == list && list != nullptr) {
+            list_hooks().csm_skipped_draws.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
     LARGE_INTEGER before{}, after{};
     QueryPerformanceCounter(&before);
     ((Fn)list_hooks().original[Slot].load(std::memory_order_acquire))(list, args...);
@@ -330,6 +346,31 @@ inline TargetInfo find_target(uint64_t handle) {
 inline void STDMETHODCALLTYPE om_set_render_targets(ID3D12GraphicsCommandList* list, UINT count,
     const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, BOOL single_range, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv)
 {
+    {
+        auto& h = list_hooks();
+        if (h.csm_active.load(std::memory_order_relaxed)) {
+            bool skip = false;
+            if (count == 1 && rtvs != nullptr && rtvs[0].ptr != 0) {
+                const auto rt = find_target(rtvs[0].ptr);
+                if (rt.width != 0 && rt.width == h.csm_eye_w.load(std::memory_order_relaxed) &&
+                    rt.height == h.csm_eye_h.load(std::memory_order_relaxed))
+                {
+                    if (!h.csm_eye_seen.exchange(true, std::memory_order_relaxed)) {
+                        h.csm_eye_binds.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            } else if (count == 0 && dsv != nullptr && dsv->ptr != 0 && h.csm_eye_seen.load(std::memory_order_relaxed)) {
+                const auto ds = find_target(dsv->ptr);
+                if (ds.resource != nullptr && is_csm_atlas(ds)) {
+                    h.csm_atlas.store(ds.resource, std::memory_order_relaxed);
+                    skip = true;
+                }
+            }
+            t_csm_skip_list = skip ? list : nullptr;
+        } else {
+            t_csm_skip_list = nullptr;
+        }
+    }
     if (count == 0 && dsv != nullptr && dsv->ptr != 0 && list_hooks().csm_probe.load(std::memory_order_relaxed)) {
         const auto ds = find_target(dsv->ptr);
         if (ds.resource != nullptr && is_csm_atlas(ds)) {
@@ -350,6 +391,38 @@ inline void STDMETHODCALLTYPE om_set_render_targets(ID3D12GraphicsCommandList* l
     using Fn = decltype(&om_set_render_targets);
     ((Fn)list_hooks().original[kOMSetRenderTargets].load(std::memory_order_acquire))(list, count, rtvs, single_range,
         dsv);
+}
+
+// CSM share: the right family's clear / discard of the CSM atlas are skipped (the atlas keeps the left's depth).
+constexpr size_t kClearDepthStencilView = 47;
+constexpr size_t kDiscardResource = 51;
+inline void STDMETHODCALLTYPE clear_depth_stencil_view(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE dsv,
+    D3D12_CLEAR_FLAGS flags, FLOAT depth, UINT8 stencil, UINT rect_count, const D3D12_RECT* rects)
+{
+    auto& h = list_hooks();
+    if (h.csm_active.load(std::memory_order_relaxed) && h.csm_eye_seen.load(std::memory_order_relaxed) && dsv.ptr != 0) {
+        const auto ds = find_target(dsv.ptr);
+        if (ds.resource != nullptr && is_csm_atlas(ds)) {
+            h.csm_skipped_clears.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    using Fn = decltype(&clear_depth_stencil_view);
+    ((Fn)h.original[kClearDepthStencilView].load(std::memory_order_acquire))(list, dsv, flags, depth, stencil, rect_count,
+        rects);
+}
+inline void STDMETHODCALLTYPE discard_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* resource,
+    const D3D12_DISCARD_REGION* region)
+{
+    auto& h = list_hooks();
+    if (h.csm_active.load(std::memory_order_relaxed) && h.csm_eye_seen.load(std::memory_order_relaxed) && resource != nullptr &&
+        resource == h.csm_atlas.load(std::memory_order_relaxed))
+    {
+        h.csm_skipped_discards.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    using Fn = decltype(&discard_resource);
+    ((Fn)h.original[kDiscardResource].load(std::memory_order_acquire))(list, resource, region);
 }
 
 inline HRESULT STDMETHODCALLTYPE close_list(ID3D12GraphicsCommandList* list) {
@@ -431,6 +504,24 @@ inline void on_create_view(ID3D12Resource* resource, D3D12_CPU_DESCRIPTOR_HANDLE
         view_format != 0 ? view_format : (uint32_t)desc.Format, resource};
 }
 
+// CSM share (vr/CsmShare.hpp): game thread, every frame: whether the skip is active (the right view's shadow view
+// matrices were aligned to the left's this frame) and the eye output size; present thread: a new frame begins.
+inline void set_csm_share(bool active, uint32_t eye_w, uint32_t eye_h) {
+    auto& h = detail::list_hooks();
+    h.csm_eye_w.store(eye_w, std::memory_order_relaxed);
+    h.csm_eye_h.store(eye_h, std::memory_order_relaxed);
+    h.csm_active.store(active, std::memory_order_relaxed);
+}
+inline void csm_share_present() {
+    detail::list_hooks().csm_eye_seen.store(false, std::memory_order_relaxed);
+}
+inline std::string take_csm_share_counts() {
+    auto& h = detail::list_hooks();
+    return fmt::format("frames with an eye-output bind {}, skipped atlas draws {}, clears {}, discards {}",
+        h.csm_eye_binds.exchange(0), h.csm_skipped_draws.exchange(0), h.csm_skipped_clears.exchange(0),
+        h.csm_skipped_discards.exchange(0));
+}
+
 // CSM probe (VR_ExperimentCsmProbe): turn the counting on or off, and take (and reset) the counts as " resource:binds".
 inline void set_csm_probe(bool on) {
     detail::list_hooks().csm_probe.store(on, std::memory_order_relaxed);
@@ -471,6 +562,8 @@ inline void on_set_pipeline_state(ID3D12GraphicsCommandList* list, ID3D12Pipelin
             hook_slot(vtable, 59, (void*)&timed_call<59, kIndirect, ID3D12CommandSignature*, UINT, ID3D12Resource*,
                 UINT64, ID3D12Resource*, UINT64>);
             hook_slot(vtable, kOMSetRenderTargets, (void*)&om_set_render_targets);
+        hook_slot(vtable, kClearDepthStencilView, (void*)&clear_depth_stencil_view);
+        hook_slot(vtable, kDiscardResource, (void*)&discard_resource);
             ID3D12GraphicsCommandList4* list4{};
             const auto has_rt = SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&list4))) && list4 != nullptr;
             if (has_rt) {

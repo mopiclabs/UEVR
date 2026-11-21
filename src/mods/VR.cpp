@@ -8962,6 +8962,7 @@ void VR::on_present() {
 
     m_present_thread_id = GetCurrentThreadId();
     update_perf_state();
+    uevr::pass_markers::csm_share_present();  // EXPERIMENT (exp/right-eye-cost, vr/CsmShare.hpp): a new frame begins
     if (const auto pass_marker_seconds = m_experiment_pass_markers_seconds->value(); pass_marker_seconds > 0) {
         const auto& pm_d3d12_hook = g_framework->get_d3d12_hook();
         uevr::pass_markers::on_present(pass_marker_seconds, Framework::get_persistent_dir(),

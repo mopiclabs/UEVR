@@ -1781,6 +1781,9 @@ private:
     // EXPERIMENT (exp/right-eye-cost): CSM probe (log only): CSM atlas binds per D3D12 resource every 600 pairs (needs pass
     // markers on), and both eyes' FSceneView memory at pairs 2400 / 4800 (to find ShadowViewMatrices offline).
     const ModToggle::Ptr m_experiment_csm_probe{ ModToggle::create(generate_name("ExperimentCsmProbe"), false) };
+    // EXPERIMENT (exp/right-eye-cost): 1 = right eye's shadow cascades aligned to the left's, 2 = aligned + the right
+    // family reuses the left's CSM depth (skips its own), N >= 10 = A/B in N-second windows (vr/CsmShare.hpp).
+    const ModInt32::Ptr m_experiment_right_eye_csm_share{ ModInt32::create(generate_name("ExperimentRightEyeCsmShare"), 0) };
     // EXPERIMENT (exp/right-eye-cost): "N,group,..." right-eye-only groups in N-second windows (ExperimentSecondFamilyHold,
     // vr/ExperimentPhase.hpp).
     const ModString::Ptr m_experiment_second_family_cvars{ ModString::create(generate_name("ExperimentSecondFamilyCvars"), "") };
@@ -2150,6 +2153,7 @@ public:
             *m_experiment_right_eye_gdf_share,
             *m_experiment_gdf_probes,
             *m_experiment_csm_probe,
+            *m_experiment_right_eye_csm_share,
             *m_experiment_second_family_cvars,
             *m_experiment_cvar_dump_seconds,
             *m_experiment_frame_cvars,

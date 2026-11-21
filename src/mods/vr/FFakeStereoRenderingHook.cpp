@@ -160,6 +160,7 @@
 #include "RtSceneShare.hpp"
 #include "PassMarkers.hpp"
 #include "GdfShare.hpp"
+#include "CsmShare.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
@@ -28250,6 +28251,16 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             // binds per D3D12 resource (PassMarkers' OMSetRenderTargets detour; pass markers must be on): one resource =
             // both families render into the same atlas, two = an atlas each. At pairs 2400 and 4800 the raw qwords of
             // both eyes' FSceneView (0x2400 bytes), to find FViewMatrices / ShadowViewMatrices offline by diffing the eyes.
+            // EXPERIMENT (exp/right-eye-cost, VR_ExperimentRightEyeCsmShare, vr/CsmShare.hpp): align the right view's shadow
+            // view matrices to the left's here (game thread, before the right family is submitted); the RHI-side skip of
+            // the right family's CSM depth is active only in frames where this alignment happened (and not in mode 1).
+            {
+                const auto csm_mode = vr->get_experiment_right_eye_csm_share();
+                uevr::csm_share::g_rhi_counts = &uevr::pass_markers::take_csm_share_counts;
+                const bool csm_aligned = csm_mode != 0 && primary_view != nullptr && secondary_view != nullptr &&
+                    uevr::csm_share::align(csm_mode, (uintptr_t)primary_view, (uintptr_t)secondary_view);
+                uevr::pass_markers::set_csm_share(csm_aligned && csm_mode != 1, vr->get_hmd_width(), vr->get_hmd_height());
+            }
             uevr::pass_markers::set_csm_probe(vr->get_experiment_csm_probe());
             if (vr->get_experiment_csm_probe() && primary_view != nullptr && secondary_view != nullptr) {
                 static uint32_t csm_probe_count{0};

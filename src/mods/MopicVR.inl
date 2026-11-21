@@ -37,6 +37,10 @@
     bool get_experiment_csm_probe() const {
         return m_experiment_csm_probe->value();
     }
+    // EXPERIMENT (exp/right-eye-cost, default 0 = off): see vr/CsmShare.hpp.
+    int32_t get_experiment_right_eye_csm_share() const {
+        return m_experiment_right_eye_csm_share->value();
+    }
 
     // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
     // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).
