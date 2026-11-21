@@ -16,6 +16,7 @@
 #include "Framework.hpp"
 #include "mods/GameSpecific.hpp"
 #include "mods/vr/PerfLog.hpp"
+#include "mods/vr/PassMarkers.hpp"
 #include "render/D3D12Diagnostics.hpp"
 #include "render/ShaderOverrideRegistry.hpp"
 
@@ -1231,6 +1232,7 @@ void WINAPI D3D12Hook::create_render_target_view(
     }
 
     render::D3D12Diagnostics::get().register_rtv_descriptor("D3D12Hook::CreateRenderTargetView", resource, descriptor);
+    uevr::pass_markers::on_create_view(resource, descriptor, desc != nullptr ? (uint32_t)desc->Format : 0);
 }
 
 void WINAPI D3D12Hook::create_depth_stencil_view(
@@ -1250,6 +1252,7 @@ void WINAPI D3D12Hook::create_depth_stencil_view(
     }
 
     render::D3D12Diagnostics::get().register_dsv_descriptor("D3D12Hook::CreateDepthStencilView", resource, descriptor);
+    uevr::pass_markers::on_create_view(resource, descriptor, desc != nullptr ? (uint32_t)desc->Format : 0);
 }
 
 void WINAPI D3D12Hook::set_pipeline_state(ID3D12GraphicsCommandList* command_list, ID3D12PipelineState* pipeline_state) {
@@ -1280,6 +1283,8 @@ void WINAPI D3D12Hook::set_pipeline_state(ID3D12GraphicsCommandList* command_lis
     if (original == nullptr) {
         return;
     }
+
+    uevr::pass_markers::on_set_pipeline_state(command_list, pipeline_state);
 
     auto& shader_registry = render::ShaderOverrideRegistry::get();
     if (!shader_registry.should_track_d3d12_pipelines()) {

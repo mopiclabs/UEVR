@@ -18,6 +18,14 @@
         return m_experiment_secondary_exposure_state->value();
     }
 
+    // EXPERIMENT (exp/right-eye-cost, default off): see vr/PassMarkers.hpp and ExperimentSecondFamilyHold.
+    int32_t get_experiment_pass_markers_seconds() const {
+        return m_experiment_pass_markers_seconds->value();
+    }
+    std::string get_experiment_second_family_cvars() const {
+        return m_experiment_second_family_cvars->value();
+    }
+
     // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
     // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).
     int32_t get_native_stereo_fix_lumen_origin_refresh_frames() const {

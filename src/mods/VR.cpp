@@ -65,6 +65,7 @@
 #include "GameSpecific.hpp"
 #include "vr/KtjLOpenXRFactory.hpp"
 #include "vr/PerfLog.hpp"
+#include "vr/PassMarkers.hpp"
 
 namespace {
 bool is_stalker2_executable_cached();
@@ -8895,6 +8896,11 @@ void VR::on_present() {
 
     m_present_thread_id = GetCurrentThreadId();
     update_perf_state();
+    if (const auto pass_marker_seconds = m_experiment_pass_markers_seconds->value(); pass_marker_seconds > 0) {
+        const auto& pm_d3d12_hook = g_framework->get_d3d12_hook();
+        uevr::pass_markers::on_present(pass_marker_seconds, Framework::get_persistent_dir(),
+            g_framework->is_dx12() && pm_d3d12_hook != nullptr ? pm_d3d12_hook->get_command_queue() : nullptr);
+    }
 
     utility::ScopeGuard _guard {[&]() {
         if (!is_using_afr() || (m_render_frame_count + 1) % 2 == m_left_eye_interval) {

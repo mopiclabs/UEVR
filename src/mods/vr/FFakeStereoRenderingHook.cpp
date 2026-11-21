@@ -158,6 +158,7 @@
 
 #include "FFakeStereoRenderingHook.hpp"
 #include "RtSceneShare.hpp"
+#include "PassMarkers.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
@@ -26339,6 +26340,192 @@ private:
     bool m_held{false};
 };
 
+// EXPERIMENT (VR_ExperimentSecondFamilyCvars, "N,group,group,..."; a group is "name=value+name=value", "skip" or
+// "nogdf"; ported from exp/nsf-right-cost, 2026-11-04): in-run A/B of the right eye's render. Windows of N seconds of
+// QPC time take turns: window w is phase w % (groups + 1); phase 0 changes nothing and phase k applies group k to the
+// right eye's render only. Cvars are held at their values around the second submission and put back (so only
+// render-thread-safe cvars apply to that render alone); "skip" leaves the right eye's render out (its last image is
+// sent again; the ray tracing scene share is off for that frame, see skip_phase); "nogdf" drops that frame's
+// right-eye Global Distance Field rebuild.
+class ExperimentSecondFamilyHold {
+public:
+    explicit ExperimentSecondFamilyHold(const std::string& spec) {
+        auto& parsed = parse(spec);
+        const auto phase = phase_of(parsed);
+        if (phase == 0) {
+            return;
+        }
+
+        auto& group = parsed.groups[(size_t)phase - 1];
+        m_skip = group.skip;
+        m_no_gdf = group.no_gdf;
+
+        for (auto& item : group.items) {
+            if (item.cvar == nullptr) {
+                continue;
+            }
+
+            try {
+                Held held{item.cvar, std::to_wstring(item.cvar->GetFloat()), s_set_by_code};
+                const auto wanted = std::stof(item.value);
+                item.cvar->Set(item.value.c_str());
+                if (item.cvar->GetFloat() != wanted) {
+                    held.set_by = s_set_by_console;
+                    item.cvar->Set(item.value.c_str(), held.set_by);
+                }
+
+                if (!item.logged) {
+                    item.logged = true;
+                    SPDLOG_INFO("[NativeStereoFix][Experiment] Group {}: holding {} at {} (was {}, now {}) for the right eye's render",
+                        phase, utility::narrow(item.name), utility::narrow(item.value), utility::narrow(held.before), item.cvar->GetFloat());
+                }
+
+                m_held.push_back(std::move(held));
+            } catch (...) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix][Experiment] Setting a right-eye cvar threw");
+            }
+        }
+    }
+
+    ~ExperimentSecondFamilyHold() {
+        for (auto it = m_held.rbegin(); it != m_held.rend(); ++it) {
+            try {
+                it->cvar->Set(it->before.c_str(), it->set_by);
+            } catch (...) {
+            }
+        }
+    }
+
+    // Before the left eye's submission: whether this frame's phase skips the right eye's render (then the left eye
+    // must not start a ray tracing scene share that waits for a right eye).
+    static bool skip_phase(const std::string& spec) {
+        auto& parsed = parse(spec);
+        const auto phase = phase_of(parsed);
+        return phase != 0 && parsed.groups[(size_t)phase - 1].skip;
+    }
+
+    bool skip() const { return m_skip; }
+    bool no_gdf() const { return m_no_gdf; }
+
+    ExperimentSecondFamilyHold(const ExperimentSecondFamilyHold&) = delete;
+    ExperimentSecondFamilyHold& operator=(const ExperimentSecondFamilyHold&) = delete;
+
+private:
+    static constexpr uint32_t s_set_by_code = 0x8000000;
+    static constexpr uint32_t s_set_by_console = 0x9000000;
+
+    struct Item {
+        std::wstring name;
+        std::wstring value;
+        sdk::IConsoleVariable* cvar{};
+        bool logged{false};
+    };
+
+    struct Group {
+        std::vector<Item> items;
+        bool skip{false};
+        bool no_gdf{false};
+    };
+
+    struct Parsed {
+        std::string spec;
+        int64_t window_seconds{};
+        std::vector<Group> groups;
+    };
+
+    struct Held {
+        sdk::IConsoleVariable* cvar{};
+        std::wstring before;
+        uint32_t set_by{};
+    };
+
+    static int64_t phase_of(const Parsed& parsed) {
+        if (parsed.groups.empty() || parsed.window_seconds <= 0) {
+            return 0;
+        }
+        LARGE_INTEGER qpc{}, frequency{};
+        QueryPerformanceCounter(&qpc);
+        QueryPerformanceFrequency(&frequency);
+        return (qpc.QuadPart / frequency.QuadPart / parsed.window_seconds) % (int64_t)(parsed.groups.size() + 1);
+    }
+
+    static std::vector<std::string> split(const std::string& text, const char* separators) {
+        std::vector<std::string> parts{};
+        for (size_t start = 0; start <= text.size();) {
+            const auto end = std::min(text.find_first_of(separators, start), text.size());
+            if (end > start) {
+                parts.emplace_back(text.substr(start, end - start));
+            }
+            start = end + 1;
+        }
+        return parts;
+    }
+
+    static Parsed& parse(const std::string& spec) {
+        static Parsed parsed{};
+        if (spec == parsed.spec) {
+            return parsed;
+        }
+
+        parsed = Parsed{spec};
+        const auto tokens = split(spec, ",;");
+        if (tokens.empty()) {
+            return parsed;
+        }
+
+        try {
+            parsed.window_seconds = std::stoll(tokens[0]);
+        } catch (...) {
+            SPDLOG_WARN("[NativeStereoFix][Experiment] Right-eye groups \"{}\": the first item must be the window in seconds", spec);
+            return parsed;
+        }
+
+        const auto console_manager = sdk::FConsoleManager::get();
+        for (size_t i = 1; i < tokens.size(); ++i) {
+            Group group{};
+            for (const auto& entry : split(tokens[i], "+")) {
+                if (entry == "skip") {
+                    group.skip = true;
+                    continue;
+                }
+                if (entry == "nogdf") {
+                    group.no_gdf = true;
+                    continue;
+                }
+                if (entry == "secondary") {
+                    // VR::is_native_stereo_fix_same_pass_enabled reads it (vr/ExperimentPhase.hpp)
+                    SPDLOG_INFO("[NativeStereoFix][Experiment] Group {}: Same Stereo Pass off (right eye SECONDARY)", i);
+                    continue;
+                }
+
+                const auto equals = entry.find('=');
+                if (equals == std::string::npos || console_manager == nullptr) {
+                    SPDLOG_WARN("[NativeStereoFix][Experiment] Ignoring \"{}\" (want name=value, skip, nogdf or secondary)", entry);
+                    continue;
+                }
+
+                Item item{utility::widen(entry.substr(0, equals)), utility::widen(entry.substr(equals + 1))};
+                auto* object = console_manager->find(item.name.c_str());
+                item.cvar = object != nullptr && object->AsCommand() == nullptr ? static_cast<sdk::IConsoleVariable*>(object) : nullptr;
+                SPDLOG_INFO("[NativeStereoFix][Experiment] Group {}: {} = {}: {}", i, utility::narrow(item.name),
+                    utility::narrow(item.value), item.cvar != nullptr ? "found" : "not found");
+                group.items.push_back(std::move(item));
+            }
+
+            SPDLOG_INFO("[NativeStereoFix][Experiment] Group {}: {} cvars{}{}", i, group.items.size(),
+                group.skip ? ", skip the right eye's render" : "", group.no_gdf ? ", no distance field rebuild" : "");
+            parsed.groups.push_back(std::move(group));
+        }
+
+        SPDLOG_INFO("[NativeStereoFix][Experiment] {} s windows, {} groups + a plain phase", parsed.window_seconds, parsed.groups.size());
+        return parsed;
+    }
+
+    std::vector<Held> m_held{};
+    bool m_skip{false};
+    bool m_no_gdf{false};
+};
+
 // VR_NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames: a change signal for the right eye's distance field
 // rebuild (see VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames). FScene::AddPrimitive, RemovePrimitive and
 // UpdatePrimitiveTransform, the game-thread entries every primitive that appears, disappears or moves goes through, are
@@ -29201,7 +29388,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // EXPERIMENT: VR_ExperimentRightEyeRTShare (see RtSceneShare.hpp). Both families' render targets identify them on
     // the render thread.
     if (const auto rt_share_mode = vr->get_experiment_right_eye_rt_share(); rt_share_mode != 0 && !use_hellblade_paired_renderer_transaction) {
-        uevr::rt_share::on_left_submission(rt_share_mode,
+        // EXPERIMENT: a frame whose right-eye render is skipped (VR_ExperimentSecondFamilyCvars) shares nothing.
+        const auto skip_right = ExperimentSecondFamilyHold::skip_phase(vr->get_experiment_second_family_cvars());
+        uevr::rt_share::on_left_submission(skip_right ? 0 : rt_share_mode,
             reinterpret_cast<uintptr_t>(view_family->get_render_target()), reinterpret_cast<uintptr_t>(rtfrt));
     }
 
@@ -29264,7 +29453,11 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         }
     }
 
-    if (auto* scene = reinterpret_cast<sdk::FScene*>(view_family_scene); scene != nullptr) {
+    // EXPERIMENT: VR_ExperimentSecondFamilyCvars (see ExperimentSecondFamilyHold). A skipped right-eye render must not
+    // take back the frame number the first render advanced.
+    ExperimentSecondFamilyHold second_experiment_hold{vr->get_experiment_second_family_cvars()};
+
+    if (auto* scene = reinterpret_cast<sdk::FScene*>(view_family_scene); scene != nullptr && !second_experiment_hold.skip()) {
         scene->decrement_frame_count();
     }
 
@@ -29454,7 +29647,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         gdf_change_signal::log_totals(gdf_refreshes_on_change, gdf_refreshes_backstop);
     }
 
-    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild};
+    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild && !second_experiment_hold.no_gdf()};
     uevr::rt_share::RightGatherCullHold second_rt_cull_hold{vr->is_experiment_right_eye_rt_share_cull_gather() &&
         uevr::rt_share::right_eye_shares_this_frame()};
 
@@ -29538,7 +29731,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                     "Dune secondary pass could not be restored after its renderer call");
                 return;
             }
-        } else {
+        } else if (!second_experiment_hold.skip()) {
             render_secondary_view();
         }
     }
@@ -30666,6 +30859,7 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
 
     const auto frame_count = *(uint32_t*)((uintptr_t)&view_family + SceneViewExtensionAnalyzer::frame_count_offset);
     uevr::rt_share::on_family_render(frame_count, reinterpret_cast<uintptr_t>(view_family.get_render_target()));
+    uevr::pass_markers::on_family_render(frame_count, reinterpret_cast<uintptr_t>(view_family.get_render_target()));
     struct NativePreRenderKey {
         uint32_t frame{};
         uintptr_t family{};

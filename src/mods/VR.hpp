@@ -37,6 +37,7 @@
 #include "vr/GamepadRecovery.hpp"
 #include "vr/NativeOpenXRAsyncWorker.hpp"
 #include "vr/NativeOpenXRWaitOnly.hpp"
+#include "vr/ExperimentPhase.hpp"
 
 #undef max
 #include <tracy/Tracy.hpp>
@@ -705,6 +706,12 @@ public:
     bool is_native_stereo_fix_same_pass_enabled() const {
         if (should_force_native_stereo_fix_same_pass()) {
             return true;
+        }
+
+        // EXPERIMENT (exp/right-eye-cost): a "secondary" group of VR_ExperimentSecondFamilyCvars turns Same Stereo Pass
+        // off in its windows (the right eye renders as the SECONDARY view, alone).
+        if (uevr::exp_phase::current_group_has(m_experiment_second_family_cvars->value(), "secondary")) {
+            return false;
         }
 
         return m_native_stereo_fix_same_pass->value();
@@ -1763,6 +1770,11 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), true) };
     const ModToggle::Ptr m_experiment_secondary_pre_exposure{ ModToggle::create(generate_name("ExperimentSecondaryPreExposure"), false) };
     const ModToggle::Ptr m_experiment_secondary_exposure_state{ ModToggle::create(generate_name("ExperimentSecondaryExposureState"), false) };
+    // EXPERIMENT (exp/right-eye-cost): every N seconds, 60 presents of per-pass records (vr/PassMarkers.hpp).
+    const ModInt32::Ptr m_experiment_pass_markers_seconds{ ModInt32::create(generate_name("ExperimentPassMarkersSeconds"), 0) };
+    // EXPERIMENT (exp/right-eye-cost): "N,group,..." right-eye-only groups in N-second windows (ExperimentSecondFamilyHold,
+    // vr/ExperimentPhase.hpp).
+    const ModString::Ptr m_experiment_second_family_cvars{ ModString::create(generate_name("ExperimentSecondFamilyCvars"), "") };
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
     const ModToggle::Ptr m_native_stereo_fix_second_lumen_surface_cache_freeze{ ModToggle::create(generate_name("NativeStereoFixSecondLumenSurfaceCacheFreeze"), true) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 15) };
@@ -2121,6 +2133,8 @@ public:
             *m_native_stereo_fix_share_exposure,
             *m_experiment_secondary_pre_exposure,
             *m_experiment_secondary_exposure_state,
+            *m_experiment_pass_markers_seconds,
+            *m_experiment_second_family_cvars,
             *m_native_stereo_fix_lumen_origin_refresh_frames,
             *m_native_stereo_fix_second_lumen_surface_cache_freeze,
             *m_native_stereo_fix_second_gdf_refresh_frames,
