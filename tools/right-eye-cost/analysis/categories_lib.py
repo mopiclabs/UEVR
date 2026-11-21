@@ -39,6 +39,17 @@ def size_of(shape, prefix):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
+def csm_atlas(shape):
+    """A cascaded-shadow-map atlas: a depth-only target 'DS WxH f..' whose width is 2-8 cascades of its height
+    (Wukong: 4096x1024 on blade18 at 4 cascades, 3072x1024 on blade14 at 3). Until 2026-11-22 only 4096x1024 matched,
+    so other cascade counts fell to the name rule (EmitShadowMap etc.) and the shape's passes went elsewhere."""
+    m = re.match(r"DS (\d+)x(\d+) f\d+$", shape)
+    if not m:
+        return False
+    w, h = int(m.group(1)), int(m.group(2))
+    return h >= 256 and w % h == 0 and 2 <= w // h <= 8
+
+
 def smaller_than_int(shape):
     sz = size_of(shape, r"[12]RT ")
     iw = int(INT.split("x")[0]) if INT else 0
@@ -48,7 +59,7 @@ def smaller_than_int(shape):
 # (category, eye-dependent?, rule on (name, shape))
 RULES = [
     ("GDF refresh (heightfield/page compose)", "no: world-space clipmaps around the camera", lambda n, s: n and re.search(r"Heightfield|ComposeHeightfields|GlobalDistanceField|CopyDistanceFieldAtlas", n)),
-    ("CSM shadow depth (incl. Nanite shadow raster)", "barely: cascades from the camera, eyes 6 cm apart", lambda n, s: "4096x1024" in s or (n and re.search(r"EmitShadowMap|ShadowObjectCull|CullObjectsForShadow", n))),
+    ("CSM shadow depth (incl. Nanite shadow raster)", "barely: cascades from the camera, eyes 6 cm apart", lambda n, s: "4096x1024" in s or csm_atlas(s) or (n and re.search(r"EmitShadowMap|ShadowObjectCull|CullObjectsForShadow", n))),
     ("Nanite raster / cull (no target)", "yes for the main view; shadow views no", lambda n, s: n and re.search(r"HWRasterize|MicropolyRasterize|PersistentClusterCull|InstanceCull|NodeAndClusterCull|RasterBin", n)),
     ("Distance-field shadowing (screen)", "yes (per pixel)", lambda n, s: n and re.search(r"DistanceFieldShadowing", n)),
     ("Lumen screen probes / reflections", "yes (screen-space probes)", lambda n, s: n and re.search(r"ScreenProbe|Reflection(Trace|Resolve|Temporal|Clear|Generate)|ScreenSpaceBentNormal|LumenReflection", n)),

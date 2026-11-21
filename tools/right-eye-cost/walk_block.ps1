@@ -23,7 +23,8 @@ param([Parameter(Mandatory)][string]$Dll,
     [string]$EngineDir = "$env:APPDATA\MOPIC\mopichub\engines\mopic-uevr\1.0.5.1",
     [string]$OutDir = "$env:LOCALAPPDATA\right-eye-cost",
     [string]$Recipe = "",
-    [string]$Order = "rsr", [string]$Tag = "walk", [int]$MaxStartMinutes = 38, [string]$Set = "", [double]$EyeHz = 0)
+    [string]$Order = "rsr", [string]$Tag = "walk", [int]$MaxStartMinutes = 38, [string]$Set = "", [double]$EyeHz = 0,
+    [int]$FirstIndex = 1)   # label number of the first run (gdfwalk<N><mode>), to continue a block's numbering
 $ErrorActionPreference = "Continue"
 $here = $PSScriptRoot
 if ($Recipe -eq "") { $Recipe = Join-Path $here "recipes\Wukong-walk-nomod.json" }
@@ -90,7 +91,7 @@ foreach ($f in $expectMap.Keys) { Copy-Item (Join-Path $SaveDir $f) $aside -Forc
 Note "copied aside to $($aside): $(($expectMap.Keys | ForEach-Object { "$_ $(H8 (Join-Path $aside $_))" }) -join ', ')"
 
 $modes = @{ r = @{ mode = 0; name = "refresh" }; s = @{ mode = 1; name = "share" }; i = @{ mode = 3; name = "shareidx" } }
-$plan = @(); $n = 1
+$plan = @(); $n = $FirstIndex
 foreach ($c in $Order.ToCharArray()) { $m = $modes["$c"]; if (-not $m) { Note "unknown mode '$c' in -Order"; exit 5 }; $plan += @{ mode = $m.mode; label = "gdfwalk$n$($m.name)" }; $n++ }
 for ($i = 0; $i -lt $plan.Count; $i++) {
     $p = $plan[$i]
