@@ -10,6 +10,11 @@
         return m_native_stereo_fix_share_exposure->value();
     }
 
+    // EXPERIMENT (exp/samepass-exposure, default off): see SecondaryPreExposureHold.
+    bool is_experiment_secondary_pre_exposure_enabled() const {
+        return m_experiment_secondary_pre_exposure->value();
+    }
+
     // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
     // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).
     int32_t get_native_stereo_fix_lumen_origin_refresh_frames() const {

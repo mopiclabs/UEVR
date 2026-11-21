@@ -26069,6 +26069,136 @@ private:
 // value back (see VR_NativeStereoFixSecondLumenSurfaceCacheFreeze). Render-thread safe like
 // r.LumenScene.UpdateViewOrigin. A game setting can outrank SetByCode, so a refused write is retried at console
 // priority, as for frame generation.
+// EXPERIMENT (exp/samepass-exposure, not for merge): with Same Stereo Pass off the right eye renders alone as a
+// SECONDARY view. Its auto exposure state is the left eye's, but it keeps its own pre-exposure (upstream's Bodycam fix
+// 18f59449 copies the PRIMARY's into the SECONDARY for the same reason). This holds r.EyeAdaptation.PreExposureOverride
+// at the left eye's pre-exposure for the right eye's render. Where FSceneViewState keeps its pre-exposure is found at
+// run time: the override is set to a marker for a few right-eye renders and the right eye's state is searched for it.
+class SecondaryPreExposureHold {
+public:
+    SecondaryPreExposureHold(bool hold, const void* left_state, const void* right_state) {
+        if (!hold || left_state == nullptr || right_state == nullptr || (m_cvar = find_cvar()) == nullptr) {
+            return;
+        }
+        try {
+            m_before = m_cvar->GetFloat();
+            if (m_before > 0.0f) {
+                SPDLOG_WARN_ONCE("[NativeStereoFix][exp] r.EyeAdaptation.PreExposureOverride is already {}; not holding it", m_before);
+                return;
+            }
+
+            float value{};
+            if (!s_offset) {
+                if (s_probe_frames > 0) {
+                    const auto found = find_float(right_state, s_marker);
+                    std::string text{};
+                    for (const auto off : found) {
+                        text += fmt::format(" +0x{:x}", off);
+                    }
+                    SPDLOG_INFO("[NativeStereoFix][exp] Pre-exposure marker search, render {}: found at{}", s_probe_frames,
+                        text.empty() ? std::string{" nothing"} : text);
+                    if (!found.empty()) {
+                        s_offset = found.front();
+                    }
+                }
+                if (!s_offset) {
+                    if (++s_probe_frames > 12) {
+                        SPDLOG_WARN_ONCE("[NativeStereoFix][exp] Pre-exposure marker never showed up in the right eye's state; giving up");
+                        return;
+                    }
+                    value = s_marker;
+                }
+            }
+            if (s_offset) {
+                const auto p = (const uint8_t*)left_state + *s_offset;
+                if (IsBadReadPtr(p, sizeof(float))) {
+                    return;
+                }
+                value = *(const float*)p;
+                if (!std::isfinite(value) || value <= 0.0f || value > 65536.0f) {
+                    SPDLOG_WARNING_EVERY_N_SEC(2, "[NativeStereoFix][exp] Left eye's pre-exposure reads {}; not holding", value);
+                    return;
+                }
+                const auto right = *(const float*)((const uint8_t*)right_state + *s_offset);
+                SPDLOG_INFO_EVERY_N_SEC(5, "[NativeStereoFix][exp] Right eye's render uses the left eye's pre-exposure {} (its own was {}, state +0x{:x})",
+                    value, right, *s_offset);
+            }
+
+            const auto text = wide_float(value);
+            m_cvar->Set(text.c_str());
+            if (std::bit_cast<uint32_t>(m_cvar->GetFloat()) != std::bit_cast<uint32_t>(value)) {
+                m_set_by = s_set_by_console;
+                m_cvar->Set(text.c_str(), m_set_by);
+            }
+            m_held = true;
+        } catch (...) {
+            SPDLOG_WARN_ONCE("[NativeStereoFix][exp] Setting r.EyeAdaptation.PreExposureOverride threw");
+        }
+    }
+
+    ~SecondaryPreExposureHold() {
+        if (!m_held) {
+            return;
+        }
+        try {
+            m_cvar->Set(wide_float(m_before).c_str(), m_set_by);
+        } catch (...) {
+        }
+    }
+
+    SecondaryPreExposureHold(const SecondaryPreExposureHold&) = delete;
+    SecondaryPreExposureHold& operator=(const SecondaryPreExposureHold&) = delete;
+
+private:
+    static constexpr uint32_t s_set_by_console = 0x9000000;
+    static constexpr float s_marker = 0.0137174211f;
+    static inline std::optional<size_t> s_offset{};
+    static inline int s_probe_frames{0};
+
+    static std::wstring wide_float(float value) {
+        const auto s = fmt::format("{:.9g}", value);
+        return std::wstring(s.begin(), s.end());
+    }
+
+    static std::vector<size_t> find_float(const void* base, float value) {
+        std::vector<size_t> out{};
+        const auto bits = std::bit_cast<uint32_t>(value);
+        for (size_t off = 0; off < 0x20000; off += sizeof(float)) {
+            const auto p = (const uint8_t*)base + off;
+            if (off == 0 || (((uintptr_t)p) & 0xfff) == 0) {
+                if (IsBadReadPtr(p, 0x1000 - (((uintptr_t)p) & 0xfff))) {
+                    break;
+                }
+            }
+            if (*(const uint32_t*)p == bits) {
+                out.push_back(off);
+            }
+        }
+        return out;
+    }
+
+    static sdk::IConsoleVariable* find_cvar() {
+        static sdk::IConsoleVariable* cvar{};
+        static bool looked_up{false};
+        if (!looked_up) {
+            looked_up = true;
+            if (const auto console_manager = sdk::FConsoleManager::get(); console_manager != nullptr) {
+                auto* object = console_manager->find(L"r.EyeAdaptation.PreExposureOverride");
+                if (object != nullptr && object->AsCommand() == nullptr) {
+                    cvar = static_cast<sdk::IConsoleVariable*>(object);
+                }
+            }
+            SPDLOG_INFO("[NativeStereoFix][exp] r.EyeAdaptation.PreExposureOverride {}", cvar != nullptr ? "found" : "not found");
+        }
+        return cvar;
+    }
+
+    sdk::IConsoleVariable* m_cvar{};
+    float m_before{};
+    uint32_t m_set_by{0x8000000};
+    bool m_held{false};
+};
+
 class LumenSurfaceCacheFreezeHold {
 public:
     explicit LumenSurfaceCacheFreezeHold(bool hold) {
@@ -27683,6 +27813,15 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                 if (left_fields == right_fields && left_fields.size() == 3 && left_fields[2] >= 0x1000) {
                     g_hook->m_native_stereo_exposure_state_offset = left_fields[2];
                 }
+                // EXPERIMENT (exp/samepass-exposure): a SECONDARY right view lacks the third field; remember where it is
+                if (left_fields.size() == 3 && left_fields[2] >= 0x1000 && right_fields.size() == 2 &&
+                    right_fields[0] == left_fields[0] && right_fields[1] == left_fields[1])
+                {
+                    g_hook->m_exp_secondary_exposure_offset = left_fields[2];
+                    const auto held = *(void* const*)((const uint8_t*)secondary_view + left_fields[2]);
+                    SPDLOG_INFO("[NativeStereoFix][exp] Right view's +0x{:x} holds {:x} (left state {:x}, right state {:x})",
+                        left_fields[2], (uintptr_t)held, (uintptr_t)primary.state, (uintptr_t)secondary.state);
+                }
                 SPDLOG_INFO("[NativeStereoFix] Scene state fields: left view at{}, right view at{}; exposure view state field {}",
                     text(left_fields), text(right_fields),
                     g_hook->m_native_stereo_exposure_state_offset
@@ -29220,6 +29359,22 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             *exposure_state_slot = exposure_state_before;
         }
     }};
+
+    // EXPERIMENT (exp/samepass-exposure): Same Stereo Pass off -> the right eye is a SECONDARY view rendered alone.
+    if (exposure_state_slot == nullptr && !vr->is_native_stereo_fix_same_pass_enabled() && native_right_view != nullptr) {
+        static auto logged = 0;
+        if (logged < 3 && g_hook->m_exp_secondary_exposure_offset) {
+            ++logged;
+            const auto held = *(void**)((uintptr_t)native_right_view + *g_hook->m_exp_secondary_exposure_offset);
+            SPDLOG_INFO("[NativeStereoFix][exp] Right (SECONDARY) view's exposure view state field +0x{:x} holds {:x}: {}",
+                *g_hook->m_exp_secondary_exposure_offset, (uintptr_t)held,
+                held == (void*)native_left_metadata.state ? "the left eye's state" :
+                held == (void*)native_right_metadata.state ? "its own state" : held == nullptr ? "null" : "something else");
+        }
+    }
+    SecondaryPreExposureHold second_pre_exposure_hold{
+        vr->is_experiment_secondary_pre_exposure_enabled() && !vr->is_native_stereo_fix_same_pass_enabled(),
+        native_left_metadata.state, native_right_metadata.state};
 
     // The same Lumen view-origin hold for the second submission (see VR_NativeStereoFixLumenOriginRefreshFrames above).
     LumenViewOriginHold second_hold{hold_lumen_origin};

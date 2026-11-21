@@ -1761,6 +1761,7 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_same_pass{ ModToggle::create(generate_name("NativeStereoFixSamePass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_preserve_secondary_pass{ ModToggle::create(generate_name("NativeStereoFixPreserveSecondaryPass"), true) };
     const ModToggle::Ptr m_native_stereo_fix_share_exposure{ ModToggle::create(generate_name("NativeStereoFixShareExposure"), true) };
+    const ModToggle::Ptr m_experiment_secondary_pre_exposure{ ModToggle::create(generate_name("ExperimentSecondaryPreExposure"), false) };
     const ModInt32::Ptr m_native_stereo_fix_lumen_origin_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixLumenOriginRefreshFrames"), 30) };
     const ModToggle::Ptr m_native_stereo_fix_second_lumen_surface_cache_freeze{ ModToggle::create(generate_name("NativeStereoFixSecondLumenSurfaceCacheFreeze"), true) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 15) };
@@ -2117,6 +2118,7 @@ public:
             *m_native_stereo_fix_same_pass,
             *m_native_stereo_fix_preserve_secondary_pass,
             *m_native_stereo_fix_share_exposure,
+            *m_experiment_secondary_pre_exposure,
             *m_native_stereo_fix_lumen_origin_refresh_frames,
             *m_native_stereo_fix_second_lumen_surface_cache_freeze,
             *m_native_stereo_fix_second_gdf_refresh_frames,

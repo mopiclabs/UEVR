@@ -1955,6 +1955,7 @@ private:
     int32_t m_skip_next_adjust_view_rect_count{1};
     // FSceneView offset of the view state its auto exposure comes from, found at run time (VR_NativeStereoFixShareExposure)
     std::optional<size_t> m_native_stereo_exposure_state_offset{};
+    std::optional<size_t> m_exp_secondary_exposure_offset{};  // EXPERIMENT (exp/samepass-exposure)
     uint32_t m_slate_draw_window_thread_id{0};
 
     // Synchronized AFR
