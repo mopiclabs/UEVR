@@ -1,7 +1,8 @@
 #pragma once
 
 // EXPERIMENT (exp/right-eye-cost, VR_ExperimentRightEyeGdfShare, default 0 = off; 1 = share whenever the block is
-// validated; 2 = in-run A/B: share in even 10-second windows of QPC time, today's refresh in odd ones).
+// validated; 2 = in-run A/B: share in even 10-second windows of QPC time, today's refresh in odd ones; N >= 10: the
+// same A/B with N-second windows).
 //
 // The Native Stereo Fix renders the right eye as a second view family with a view state of its own, and each view
 // state keeps its own Global Distance Field (clipmap states, update index, camera vectors, page atlas, coverage atlas,
@@ -177,11 +178,21 @@ inline void exchange(uintptr_t a, uintptr_t b, size_t anchor) {
     }
 }
 
-inline bool window_shares() {
+// Mode 2: A/B in 10-second windows; mode N >= 10: A/B in N-second windows (share in even windows of QPC time).
+inline bool is_ab(int32_t mode) {
+    return mode == 2 || mode >= 10;
+}
+inline int64_t window_seconds(int32_t mode) {
+    return mode >= 10 ? mode : 10;
+}
+inline int64_t window_index(int32_t mode) {
     LARGE_INTEGER q{}, f{};
     QueryPerformanceCounter(&q);
     QueryPerformanceFrequency(&f);
-    return ((q.QuadPart / f.QuadPart) / 10) % 2 == 0;
+    return (q.QuadPart / f.QuadPart) / window_seconds(mode);
+}
+inline bool window_shares(int32_t mode) {
+    return window_index(mode) % 2 == 0;
 }
 } // namespace detail
 
@@ -191,7 +202,7 @@ inline bool on_right_submission(int32_t mode, uintptr_t right_target, uintptr_t 
     using namespace detail;
     auto& s = state();
     bool share = false;
-    if (mode == 1 || (mode == 2 && window_shares())) {
+    if (mode == 1 || (is_ab(mode) && window_shares(mode))) {
         ++s.gt_wanted;
         share = right_target != 0 && validated(left_state, right_state);
         if (!share) {
@@ -222,15 +233,12 @@ inline void on_family_render(int32_t mode, uintptr_t target) {
         return;
     }
     {
-        LARGE_INTEGER q{}, f{};
-        QueryPerformanceCounter(&q);
-        QueryPerformanceFrequency(&f);
-        const auto window = (int64_t)((q.QuadPart / f.QuadPart) / 10);
+        const auto window = window_index(mode);
         if (window != s.window) {
             if (s.window >= 0 && s.w_right > 0) {
                 SPDLOG_INFO("[GdfShare] window {} ({}): right families {}, exchanged {}, not shared {} (game thread: wanted {}, "
                     "block not validated {}), not validated on the render thread {}",
-                    s.window, mode == 2 ? (s.window % 2 == 0 ? "share" : "refresh") : "share", s.w_right, s.w_exchanged,
+                    s.window, is_ab(mode) ? (s.window % 2 == 0 ? "share" : "refresh") : "share", s.w_right, s.w_exchanged,
                     s.w_declined, s.gt_wanted.load(), s.gt_not_validated.load(), s.w_rt_not_validated);
             }
             s.window = window;

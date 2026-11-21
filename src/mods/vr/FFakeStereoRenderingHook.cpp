@@ -28127,6 +28127,100 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                 }
             }
 
+            // EXPERIMENT (exp/right-eye-cost, GDF probe 5, log only, any game): at pair submissions 1200, 2400, 4800, 9600
+            // and 19200 (some of them in the world, whenever it loads), every named object (exe vtable, debug name) in the
+            // first 64 KB of each eye's view state whose name mentions a distance field or a heightfield, with its offset,
+            // and the count of named objects: whether a game keeps a per-view Global Distance Field and where, without
+            // assuming a layout. Only the named-object pass (fast in probe 2), VirtualQuery-checked SEH-guarded reads.
+            if (vr->get_experiment_pass_markers_seconds() > 0) {
+                static uint32_t gdf_find_count{0};
+                ++gdf_find_count;
+                if ((gdf_find_count == 1200 || gdf_find_count == 2400 || gdf_find_count == 4800 || gdf_find_count == 9600 ||
+                     gdf_find_count == 19200) && primary.state != nullptr && secondary.state != nullptr)
+                {
+                    const auto exe = (uintptr_t)GetModuleHandleW(nullptr);
+                    const auto rd = [](uintptr_t a, uintptr_t& v) {
+                        MEMORY_BASIC_INFORMATION mbi{};
+                        if (a < 0x10000 || a > 0x7fffffffffffull || VirtualQuery((const void*)a, &mbi, sizeof(mbi)) != sizeof(mbi)) {
+                            return false;
+                        }
+                        const auto prot = mbi.Protect & 0xff;
+                        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+                            !(prot == PAGE_READONLY || prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
+                              prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY) ||
+                            a + 8 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize)
+                        {
+                            return false;
+                        }
+                        return exp_gdf_probe_read(a, &v);
+                    };
+                    const auto wide_name = [&](uintptr_t obj) -> std::string {
+                        for (size_t i = 1; i < 64; ++i) {
+                            uintptr_t p{};
+                            if (!rd(obj + i * 8, p)) {
+                                break;
+                            }
+                            if (p < 0x10000 || p > 0x7fffffffffffull || (p & 1) != 0) {
+                                continue;
+                            }
+                            std::string out{};
+                            bool ok = true, ended = false;
+                            for (size_t c = 0; c < 64 && ok && !ended; c += 4) {
+                                uintptr_t w4{};
+                                if (!rd(p + c * 2, w4)) {
+                                    ok = false;
+                                    break;
+                                }
+                                for (int k = 0; k < 4; ++k) {
+                                    const auto ch = (uint16_t)(w4 >> (16 * k));
+                                    if (ch == 0) {
+                                        ended = true;
+                                        break;
+                                    }
+                                    if (ch < 0x20 || ch >= 0x7f) {
+                                        ok = false;
+                                        break;
+                                    }
+                                    out += (char)ch;
+                                }
+                            }
+                            if (ok && ended && out.size() >= 4) {
+                                return fmt::format("[{}]{}", i, out);
+                            }
+                        }
+                        return std::string{"-"};
+                    };
+                    for (int side = 0; side < 2; ++side) {
+                        const auto st = (uintptr_t)(side == 0 ? primary.state : secondary.state);
+                        std::string found{};
+                        size_t off = 0, named = 0;
+                        for (; off < 0x10000; off += sizeof(void*)) {
+                            uintptr_t p{}, vt{};
+                            if (!rd(st + off, p)) {
+                                break;
+                            }
+                            if ((p & 7) != 0 || !rd(p, vt) || vt < exe || vt >= exe + 0x40000000) {
+                                continue;
+                            }
+                            const auto name = wide_name(p);
+                            if (name == "-") {
+                                continue;
+                            }
+                            ++named;
+                            if (name.find("istance") != std::string::npos || name.find("eightfield") != std::string::npos ||
+                                name.find("GDF") != std::string::npos || name.find("lipmap") != std::string::npos)
+                            {
+                                if (found.size() < 6000) {
+                                    found += fmt::format(" +{:x}:{}", off, name);
+                                }
+                            }
+                        }
+                        SPDLOG_INFO("[Experiment][GdfFind] #{} {} state {:x}: stopped at +0x{:x}, {} named objects; distance-field ones:{}",
+                            gdf_find_count, side == 0 ? "L" : "R", st, off, named, found.empty() ? std::string{" none"} : found);
+                    }
+                }
+            }
+
             // Probes 2 and 3 (below) are off in this build: their scans stalled the game thread (17 s, then 1 s).
             constexpr bool run_gdf_probe_2_3 = false;
             if (vr->get_experiment_pass_markers_seconds() > 0) {
