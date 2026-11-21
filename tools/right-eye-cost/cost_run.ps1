@@ -105,7 +105,10 @@ function Wait-Idle([string]$what) {
     Note "still busy after 20 min before $what : $((Get-Busy) -join ' | '); stopping"
     return $false
 }
-function Get-RunningAppId { try { [int](Get-ItemProperty "HKCU:\Software\Valve\Steam" -ErrorAction Stop).RunningAppID } catch { -1 } }
+. (Join-Path $PSScriptRoot "steam_state.ps1")
+# RunningAppID from both registry views (steam_state.ps1): either nonzero = busy; the game-process list (Get-Busy) stays
+# the primary evidence
+function Get-RunningAppId { Get-SteamRunningAppId }
 function Wait-SteamClear([string]$what) {
     for ($i = 0; $i -lt 24; $i++) {
         $id = Get-RunningAppId
@@ -248,6 +251,9 @@ try {
                 "-RunsDir", "`"$tools\runs`"", "-Match", "`"*-$Game-$label-r1`"", "-HoldDir", "`"$(Join-Path $OutDir 'binocular-held')`"",
                 "-StopFile", "`"$holdStop`"", "-After", (Get-Date).AddSeconds(-5).ToString("s")) -WindowStyle Hidden | Out-Null
         }
+        # both Steam registry views once during play (steam_state.ps1 -WatchProcess), into the campaign log
+        Start-Process -FilePath "powershell" -ArgumentList @("-ExecutionPolicy", "Bypass", "-File", "`"$(Join-Path $PSScriptRoot 'steam_state.ps1')`"",
+            "-SteamWatchProcess", $procName, "-SteamWatchLog", "`"$log`"", "-SteamWatchDelay", "240", "-SteamWatchTimeout", "900") -WindowStyle Hidden | Out-Null
         try { Invoke-Expression $line } finally {
             if (Test-Path $noRuntimeFile) { Remove-Item $noRuntimeFile -Force; Note "  $noRuntimeFile removed" }
             # A pilot stopped mid key-press leaves that key logically down (18:54 incident: left Ctrl). Release the keys
@@ -306,7 +312,7 @@ try {
                 Note "  cvar dumps: $($dumps.Count) -> $dest"
             }
         }
-        Note "  service after the game: $(Get-SvcText); RunningAppID $(Get-RunningAppId)"
+        Note "  service after the game: $(Get-SvcText); Steam after exit: $(Format-SteamState (Get-SteamState))"
         if ($Runtime -ne "game") {
             $e = Invoke-Runtime "stop"
             if ($e -ne 0) { Note "a service I did not start is left after $what; stopping (report it, don't end it)"; $rc = 5; break }

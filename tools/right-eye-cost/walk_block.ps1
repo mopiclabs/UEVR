@@ -33,6 +33,7 @@ $runs = Join-Path $Harness "runs"
 $aside = Join-Path $OutDir "save-restore\before-$Tag-$(Get-Date -Format yyyyMMdd-HHmmss)"
 $expectMap = @{}
 foreach ($kv in ($Expect -split ";" | Where-Object { $_ -match "=" })) { $k, $v = $kv -split "=", 2; $expectMap[$k.Trim()] = $v.Trim().ToUpper() }
+. (Join-Path $PSScriptRoot "steam_state.ps1")
 function Note($m) { $l = "$(Get-Date -Format s) [$Tag] $m"; Write-Host $l; Add-Content -Path $log -Value $l -Encoding utf8 }
 function H8($p) { (Get-FileHash $p -Algorithm SHA256).Hash.Substring(0, 8) }
 Add-Type -Namespace WalkBlock -Name K -MemberDefinition '[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int v); [DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint p);'
@@ -41,7 +42,7 @@ function KeyCheck($when) {
     $fpid = [uint32]0; [void][WalkBlock.K]::GetWindowThreadProcessId([WalkBlock.K]::GetForegroundWindow(), [ref]$fpid)
     $fg = (Get-Process -Id $fpid -ErrorAction SilentlyContinue).ProcessName
     $games = @(Get-Process b1-Win64-Shipping -ErrorAction SilentlyContinue).Count
-    Note "key check $($when): keys down $(if ($down) { $down -join ',' } else { 'none' }); foreground $fg; RunningAppID $((Get-ItemProperty 'HKCU:\Software\Valve\Steam').RunningAppID); game processes $games"
+    Note "key check $($when): keys down $(if ($down) { $down -join ',' } else { 'none' }); foreground $fg; RunningAppID $(Get-SteamRunningAppId) (both registry views); game processes $games"
     return (-not $down) -and ($fg -notin @('SearchHost', 'StartMenuExperienceHost')) -and $games -eq 0
 }
 function FocusStop {

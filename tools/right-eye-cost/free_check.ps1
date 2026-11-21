@@ -31,7 +31,8 @@ foreach ($g in "b1-Win64-Shipping", "SandFall-Win64-Shipping", "Polaris-Win64-Sh
         if ($on.Count) { $left += "$g : $($on -join ',')" }
     }
 }
-$rid = (Get-ItemProperty HKCU:\Software\Valve\Steam).RunningAppID
+. (Join-Path $PSScriptRoot "steam_state.ps1")
+$rid = Get-SteamRunningAppId   # either registry view nonzero -> that id (steam_state.ps1)
 Write-Host ("FREE CHECK {0}: processes {1}; service stop exit {2}; RunningAppID {3}; Hub client {4}; engine UEVRBackend.dll {5}, pdb {6}; experiment keys left on: {7}" -f
     (Get-Date -Format "HH:mm:ss"), $(if ($procs.Count) { ($procs | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ", " } else { "none" }),
     $svcExit, $rid, (Get-Hash8 $client), (Get-Hash8 "$EngineDir\UEVRBackend.dll"), (Get-Hash8 "$EngineDir\UEVRBackend.pdb"), $(if ($left.Count) { $left -join " | " } else { "none" }))
@@ -41,4 +42,5 @@ if ($SaveDir -and (Test-Path $SaveDir)) {
 }
 Add-Type -Namespace FreeKeys -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);' -ErrorAction SilentlyContinue
 $down = @(1..254 | Where-Object { ([FreeKeys.U]::GetAsyncKeyState($_) -band 0x8000) -ne 0 } | ForEach-Object { "0x{0:X2}" -f $_ })
+Write-Host ("STEAM: " + (Format-SteamState (Get-SteamState)))
 Write-Host ("KEYS DOWN: " + $(if ($down.Count) { $down -join " " } else { "none" }))

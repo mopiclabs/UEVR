@@ -15,6 +15,8 @@ changes a default. Run folders stay in the mopic-test harness's `runs\`. Logs an
 | `runtime.ps1` | starts / stops the Hub-installed OpenXR service for SBS per-eye captures (`-Runtime sbs`) |
 | `free_check.ps1` | end-of-block check: engine DLL restored from a backup, service stopped, processes, RunningAppID, keys, saves |
 | `firstframe_watch.ps1` | waits for a run's first in-play binocular frame (confirm the right save loaded) |
+| `hold_frames.ps1` | holds binocular frames out of the harness's post-run analysis during a run (`cost_run.ps1 -DeferBinocular`) |
+| `steam_state.ps1` | Steam's registry state through both readers (see Gotchas) |
 | `exitwatch.py`, `gpu_proc_sampler.ps1` | side samplers `cost_run.ps1` starts |
 | `recipes\Wukong-walk-nomod.json` | the harness's Wukong-save route without modifier keys, play_s 150 (~11 min). `{HARNESS}` is resolved by `cost_run.ps1` |
 | `analysis\*.py` | analysis (Python 3 with numpy and Pillow, e.g. the harness's `.venv`) |
@@ -46,6 +48,9 @@ changes a default. Run folders stay in the mopic-test harness's `runs\`. Logs an
 - Pass markers: the family split assigns L / R / T by the eye output binds. At `OpenXR_ResolutionScale` 1.417 the right eye lands in "T". `psotable.py` and `categories.py` list per PSO and per category. `sizecost.py` splits fixed per-view cost from per-pixel cost across two eye sizes.
 
 ## Gotchas
+
+- `-EngineDir` defaults to the Hub's own engine folder (`%APPDATA%\MOPIC\mopichub\engines\mopic-uevr\1.0.5.1`), which is the dev engine folder on the PC these scripts came from. On any other PC, pass your own copy of an engine folder, so that a run never writes into a Hub-managed engine folder.
+- Steam's `HKCU\Software\Valve\Steam` reads differently depending on the reader. Inside an MSIX-packaged app's shell, `Get-ItemProperty` can read the package's private hive: RunningAppID 0 while a game runs. WMI `StdRegProv` read a stale ActiveProcess pid 0 on another PC. `steam_state.ps1` reads both views, and either nonzero RunningAppID counts as busy. The game-process list stays the primary evidence. `cost_run.ps1` logs both views once during play and once after exit. ActiveUser is logged only as set / 0.
 
 - Walk route saves: see the header of `walk_block.ps1`. Hash-check the save files before every run, and put them back after it.
 - The harness's post-run binocular analysis is slow: about 6.6 s per frame on blade18 since 2026-11-22 (1.3 s the evening before, cause not found). 219 frames took 24 min; 60 frames took 6.7 min.
