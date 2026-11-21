@@ -66,6 +66,7 @@
 #include "vr/KtjLOpenXRFactory.hpp"
 #include "vr/PerfLog.hpp"
 #include "vr/PassMarkers.hpp"
+#include "vr/ExperimentCvarDump.hpp"
 
 namespace {
 bool is_stalker2_executable_cached();
@@ -5033,6 +5034,25 @@ void VR::on_pre_engine_tick(sdk::UGameEngine* engine, float delta) {
 
     tick_autores_frame_bound_detect(engine, delta); // Mopic: VR_AutoResFrameBoundDetect (next to update_autores)
 
+    // EXPERIMENT (exp/right-eye-cost): cvar dumps, and the game camera's FOV every 10 s while they are on (the flat
+    // reference renders with it; the VR eyes use the runtime's projection instead)
+    if (const auto dump_seconds = m_experiment_cvar_dump_seconds->value(); dump_seconds > 0) {
+        uevr::cvar_dump::process(dump_seconds);
+        static auto next_fov_log = std::chrono::steady_clock::now();
+        if (now >= next_fov_log) {
+            next_fov_log = now + std::chrono::seconds{10};
+            try {
+                if (auto* pcm = get_primary_player_camera_manager(engine); pcm != nullptr) {
+                    const auto fov = read_game_fov(pcm);
+                    const auto def = read_default_fov(pcm);
+                    SPDLOG_INFO("[Experiment] game camera FOV {} (default {}), HMD active {}", fov ? *fov : -1.0f,
+                        def ? *def : -1.0f, is_hmd_active());
+                }
+            } catch (...) {
+            }
+        }
+    }
+
     m_cvar_manager->on_pre_engine_tick(engine, delta);
     if (!hitch_diagnostics_enabled) {
         if (m_hitch_diagnostics_enabled_last_frame) {
@@ -7678,21 +7698,46 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
     if (!is_using_afr()) {
         const auto is_hzbo_frozen_by_cvm = m_cvar_manager != nullptr && m_cvar_manager->is_hzbo_frozen_and_enabled();
 
+        // EXPERIMENT (exp/right-eye-cost): VR_ExperimentSecondFamilyCvars groups "hzbon" / "icon" leave r.HZBOcclusion /
+        // r.InstanceCulling.OcclusionCull at the game's own value in their windows (both eyes), for an in-run A/B of
+        // these two overrides; the game's value is the one seen before the first override.
+        static std::optional<int> exp_hzb_game_value{};
+        static std::optional<int> exp_ic_game_value{};
+        const auto& exp_spec = m_experiment_second_family_cvars->value();
+        const bool exp_hzb_on = uevr::exp_phase::current_group_has(exp_spec, "hzbon");
+        const bool exp_ic_on = uevr::exp_phase::current_group_has(exp_spec, "icon");
+
         // Forcefully disable r.HZBOcclusion, it doesn't work with native stereo mode (sometimes)
         // Except when the user sets it to 1 with the CVar Manager, we need to respect that
         if (m_disable_hzbocclusion->value() && !is_hzbo_frozen_by_cvm) {
             const auto r_hzb_occlusion_value = sdk::get_cvar_int(L"Renderer", L"r.HZBOcclusion");
+            if (r_hzb_occlusion_value && *r_hzb_occlusion_value != 0 && !exp_hzb_game_value) {
+                exp_hzb_game_value = *r_hzb_occlusion_value;
+                SPDLOG_INFO("[Experiment] r.HZBOcclusion game value {}", *exp_hzb_game_value);
+            }
 
-            // Only set it once, otherwise we'll be spamming a Set call every frame
-            if (r_hzb_occlusion_value && *r_hzb_occlusion_value != 0) {
+            if (exp_hzb_on) {
+                if (r_hzb_occlusion_value && *r_hzb_occlusion_value == 0 && exp_hzb_game_value) {
+                    sdk::set_cvar_int(L"Renderer", L"r.HZBOcclusion", *exp_hzb_game_value);
+                }
+            } else if (r_hzb_occlusion_value && *r_hzb_occlusion_value != 0) {
+                // Only set it once, otherwise we'll be spamming a Set call every frame
                 sdk::set_cvar_int(L"Renderer", L"r.HZBOcclusion", 0);
             }
         }
 
         if (m_disable_instance_culling->value()) {
             const auto r_instance_culling_value = sdk::get_cvar_int(L"Renderer", L"r.InstanceCulling.OcclusionCull");
+            if (r_instance_culling_value && *r_instance_culling_value != 0 && !exp_ic_game_value) {
+                exp_ic_game_value = *r_instance_culling_value;
+                SPDLOG_INFO("[Experiment] r.InstanceCulling.OcclusionCull game value {}", *exp_ic_game_value);
+            }
 
-            if (r_instance_culling_value && *r_instance_culling_value != 0) {
+            if (exp_ic_on) {
+                if (r_instance_culling_value && *r_instance_culling_value == 0 && exp_ic_game_value) {
+                    sdk::set_cvar_int(L"Renderer", L"r.InstanceCulling.OcclusionCull", *exp_ic_game_value);
+                }
+            } else if (r_instance_culling_value && *r_instance_culling_value != 0) {
                 sdk::set_cvar_int(L"Renderer", L"r.InstanceCulling.OcclusionCull", 0);
             }
         }
