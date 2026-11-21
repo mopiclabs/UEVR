@@ -28037,9 +28037,100 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             // view state ends that eye's scan; a failed read inside an object ends that object's scan. Pass A stops after
             // 600 k reads, pass B after 2 M (both eyes together). Probe 1 (fd3da9ed: same-class pointer pairs) found no
             // GDF field.
+            // EXPERIMENT (exp/right-eye-cost, GDF probe 4, log only): at pair submissions 600, 1200 and 2400, the raw
+            // qwords of each eye's FSceneViewState at +0x2a80..+0x2c80 - the block the exe's GDF update uses (+0x2b00
+            // update index, +0x2b40..+0x2b80 textures and buffers; offsets from the static look, for this experiment
+            // only) - and for each qword that points to an object (exe vtable) its vtable, debug name and first 16
+            // qwords. Every read is VirtualQuery-checked and SEH-guarded; no scanning, so no stall.
+            if (vr->get_experiment_pass_markers_seconds() > 0) {
+                static uint32_t gdf_dump_count{0};
+                ++gdf_dump_count;
+                if ((gdf_dump_count == 600 || gdf_dump_count == 1200 || gdf_dump_count == 2400) && primary.state != nullptr &&
+                    secondary.state != nullptr)
+                {
+                    const auto exe = (uintptr_t)GetModuleHandleW(nullptr);
+                    const auto rd = [](uintptr_t a, uintptr_t& v) {
+                        MEMORY_BASIC_INFORMATION mbi{};
+                        if (a < 0x10000 || VirtualQuery((const void*)a, &mbi, sizeof(mbi)) != sizeof(mbi)) {
+                            return false;
+                        }
+                        const auto prot = mbi.Protect & 0xff;
+                        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+                            !(prot == PAGE_READONLY || prot == PAGE_READWRITE || prot == PAGE_WRITECOPY ||
+                              prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE || prot == PAGE_EXECUTE_WRITECOPY) ||
+                            a + 8 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize)
+                        {
+                            return false;
+                        }
+                        return exp_gdf_probe_read(a, &v);
+                    };
+                    const auto wide_name = [&](uintptr_t obj) -> std::string {
+                        for (size_t i = 1; i < 64; ++i) {
+                            uintptr_t p{};
+                            if (!rd(obj + i * 8, p)) {
+                                break;
+                            }
+                            if (p < 0x10000 || p > 0x7fffffffffffull || (p & 1) != 0) {
+                                continue;
+                            }
+                            std::string out{};
+                            bool ok = true, ended = false;
+                            for (size_t c = 0; c < 64 && ok && !ended; c += 4) {
+                                uintptr_t w4{};
+                                if (!rd(p + c * 2, w4)) {
+                                    ok = false;
+                                    break;
+                                }
+                                for (int k = 0; k < 4; ++k) {
+                                    const auto ch = (uint16_t)(w4 >> (16 * k));
+                                    if (ch == 0) {
+                                        ended = true;
+                                        break;
+                                    }
+                                    if (ch < 0x20 || ch >= 0x7f) {
+                                        ok = false;
+                                        break;
+                                    }
+                                    out += (char)ch;
+                                }
+                            }
+                            if (ok && ended && out.size() >= 4) {
+                                return fmt::format("[{}]{}", i, out);
+                            }
+                        }
+                        return std::string{"-"};
+                    };
+                    for (int side = 0; side < 2; ++side) {
+                        const auto st = (uintptr_t)(side == 0 ? primary.state : secondary.state);
+                        const char* eye = side == 0 ? "L" : "R";
+                        std::string raw{};
+                        for (size_t off = 0x2a80; off < 0x2c80; off += 8) {
+                            uintptr_t v{};
+                            raw += rd(st + off, v) ? fmt::format(" +{:x}:{:x}", off, v) : fmt::format(" +{:x}:?", off);
+                        }
+                        SPDLOG_INFO("[Experiment][GdfDump] #{} {} state {:x} raw:{}", gdf_dump_count, eye, st, raw);
+                        for (size_t off = 0x2a80; off < 0x2c80; off += 8) {
+                            uintptr_t p{}, vt{};
+                            if (!rd(st + off, p) || (p & 7) != 0 || !rd(p, vt) || vt < exe || vt >= exe + 0x40000000) {
+                                continue;
+                            }
+                            std::string words{};
+                            for (size_t i = 0; i < 16; ++i) {
+                                uintptr_t w{};
+                                words += rd(p + i * 8, w) ? fmt::format(" {:x}", w) : std::string{" ?"};
+                            }
+                            SPDLOG_INFO("[Experiment][GdfDump] #{} {} +0x{:x} -> {:x} vtable exe+0x{:x} name {}; qwords:{}",
+                                gdf_dump_count, eye, off, p, vt - exe, wide_name(p), words);
+                        }
+                    }
+                }
+            }
+
+            // Probes 2 and 3 (below) are off in this build: their scans stalled the game thread (17 s, then 1 s).
+            constexpr bool run_gdf_probe_2_3 = false;
             if (vr->get_experiment_pass_markers_seconds() > 0) {
                 static uint32_t gdf_probe_count{0};
-                if (++gdf_probe_count == 600 && primary.state != nullptr && secondary.state != nullptr) {
+                if (++gdf_probe_count == 600 && run_gdf_probe_2_3 && primary.state != nullptr && secondary.state != nullptr) {
                     const auto exe = (uintptr_t)GetModuleHandleW(nullptr);
                     size_t budget{};
                     bool budget_hit{false};
