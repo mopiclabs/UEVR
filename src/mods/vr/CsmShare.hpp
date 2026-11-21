@@ -144,18 +144,19 @@ inline bool align(int32_t mode, uintptr_t left_view, uintptr_t right_view) {
         }
     }
     ++s.w_frames;
-    if (s.found.load() == 0) {
+    // Menus and loading screens may not show the pattern (R19 run 1 gave up there after 600 frames): keep trying every
+    // 30 frames until found (one scan of both views costs ~1 ms), logging the first misses once.
+    if (s.found.load() == 0 && (s.tries++ % 30) == 0) {
         Layout l{}, r{};
-        if (find_layout(left_view, l) && find_layout(right_view, r) && l.start == r.start && l.size == r.size &&
-            l.shift == r.shift && l.start + l.shift + l.size <= kScan)
-        {
+        const bool lf = find_layout(left_view, l), rf = find_layout(right_view, r);
+        if (lf && rf && l.start == r.start && l.size == r.size && l.shift == r.shift && l.start + l.shift + l.size <= kScan) {
             s.layout = l;
             s.found = 1;
-            SPDLOG_INFO("[CsmShare] FSceneView layout found: ViewMatrices block +0x{:x} ({} bytes), ShadowViewMatrices +0x{:x}",
-                l.start, l.size, l.start + l.shift);
-        } else if (++s.tries >= 600) {
-            s.found = -1;
-            SPDLOG_INFO("[CsmShare] FSceneView layout not found after 600 frames: CSM share stays off");
+            SPDLOG_INFO("[CsmShare] FSceneView layout found after {} frames: ViewMatrices block +0x{:x} ({} bytes), "
+                "ShadowViewMatrices +0x{:x}", s.tries, l.start, l.size, l.start + l.shift);
+        } else if (s.tries <= 30 * 5) {
+            SPDLOG_INFO("[CsmShare] FSceneView layout not found yet (frame {}): left {} +0x{:x}/{}/+0x{:x}, right {} +0x{:x}/{}/+0x{:x}",
+                s.tries, lf, l.start, l.size, l.shift, rf, r.start, r.size, r.shift);
         }
     }
     if (s.found.load() != 1 || !want) {
