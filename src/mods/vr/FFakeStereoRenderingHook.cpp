@@ -28027,7 +28027,8 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             }
 
             // EXPERIMENT (exp/right-eye-cost, GDF share probe 2, log only): once, after 600 pair submissions, each eye's
-            // FSceneViewState on its own (a field may be null in the other eye), up to 256 KB.
+            // FSceneViewState on its own (a field may be null in the other eye), first 16 KB (probe 2 went to 256 KB and
+            // ran into the heap after the object; its pass B stalled the game thread 17 s, so probe 3 is smaller).
             //   Pass A: every named object (exe vtable; pooled render target desc / RDG buffer debug name) it points to.
             //   Pass B: nameless objects it points to whose first 32 KB point to objects named like global distance
             //   field data (a persistent GDF data object keeps its textures past a large clipmap-state array).
@@ -28042,10 +28043,10 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                     const auto exe = (uintptr_t)GetModuleHandleW(nullptr);
                     size_t budget{};
                     bool budget_hit{false};
-                    uintptr_t region_base[8]{}, region_end[8]{};
+                    uintptr_t region_base[64]{}, region_end[64]{};
                     size_t region_next{};
                     const auto readable = [&](uintptr_t a) {
-                        for (size_t i = 0; i < 8; ++i) {
+                        for (size_t i = 0; i < 64; ++i) {
                             if (a >= region_base[i] && a + 8 <= region_end[i]) {
                                 return true;
                             }
@@ -28063,7 +28064,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                         }
                         region_base[region_next] = (uintptr_t)mbi.BaseAddress;
                         region_end[region_next] = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-                        region_next = (region_next + 1) % 8;
+                        region_next = (region_next + 1) % 64;
                         return a + 8 <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
                     };
                     const auto rd = [&](uintptr_t a, uintptr_t& v) {
@@ -28129,8 +28130,8 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                         const char* eye = side == 0 ? "L" : "R";
                         std::string named{};
                         size_t off = 0, n_objs = 0, n_named = 0, n_hits = 0;
-                        const char* stop = "256 KB";
-                        for (; off < 0x40000; off += sizeof(void*)) {
+                        const char* stop = "16 KB";
+                        for (; off < 0x4000; off += sizeof(void*)) {
                             uintptr_t p{};
                             if (!rd(states[side] + off, p)) {
                                 stop = budget_hit ? "read budget" : "unreadable";
@@ -28158,18 +28159,52 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                             eye, states[side], off, stop, n_objs, n_named, n_hits, nameless[side].size(), budget, named);
                     }
 
-                    budget = 2000000;
+                    // Probe 3: objects both eyes' view states point to at the same offset (shared state)
+                    budget = 100000;
                     budget_hit = false;
-                    for (int side = 0; side < 2 && !budget_hit; ++side) {
-                        const char* eye = side == 0 ? "L" : "R";
-                        size_t scanned = 0, n_hits = 0;
-                        for (const auto& [off, p] : nameless[side]) {
-                            if (budget_hit) {
+                    {
+                        std::string shared{};
+                        size_t n_shared = 0;
+                        for (size_t off = 0; off < 0x4000; off += sizeof(void*)) {
+                            uintptr_t lp{}, rp{};
+                            if (!rd(states[0] + off, lp) || !rd(states[1] + off, rp)) {
                                 break;
+                            }
+                            if (lp != rp || !is_obj(lp)) {
+                                continue;
+                            }
+                            uintptr_t vt{};
+                            exp_gdf_probe_read(lp, &vt);
+                            ++n_shared;
+                            if (shared.size() < 8000) {
+                                shared += fmt::format(" +{:x}:{:x}/exe+0x{:x}/{}", off, lp, vt - exe, debug_name(lp));
+                            }
+                        }
+                        SPDLOG_INFO("[Experiment][GdfProbe3] {} objects shared by both eyes' view states (first 16 KB):{}", n_shared, shared);
+                    }
+
+                    // Pass B (probe 3): nameless objects in the first 16 KB of each view state (its own fields, not the
+                    // heap after it), right eye first; each object's first 8 KB; every object holding named objects is
+                    // logged (up to 8 names), GDF-looking ones marked "GDF". 1 M reads for both eyes.
+                    budget = 1000000;
+                    budget_hit = false;
+                    for (int pass = 0; pass < 2 && !budget_hit; ++pass) {
+                        const int side = pass == 0 ? 1 : 0;
+                        const char* eye = side == 0 ? "L" : "R";
+                        size_t scanned = 0, in_range = 0, n_holders = 0, n_hits = 0;
+                        for (const auto& [off, p] : nameless[side]) {
+                            if (off >= 0x4000) {
+                                continue;
+                            }
+                            ++in_range;
+                            if (budget_hit) {
+                                continue;
                             }
                             ++scanned;
                             std::string inner{};
-                            for (size_t i = 1; i < 0x8000 / 8; ++i) {
+                            size_t names = 0;
+                            bool gdf = false;
+                            for (size_t i = 1; i < 0x2000 / 8; ++i) {
                                 uintptr_t q{};
                                 if (!rd(p + i * 8, q)) {
                                     break;
@@ -28178,19 +28213,25 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                                     continue;
                                 }
                                 const auto qn = debug_name(q);
-                                if (qn != "-" && gdfish(qn)) {
+                                if (qn == "-") {
+                                    continue;
+                                }
+                                gdf = gdf || gdfish(qn);
+                                if (++names <= 8) {
                                     inner += fmt::format(" [+0x{:x}]{}", i * 8, qn);
                                 }
                             }
-                            if (!inner.empty()) {
-                                ++n_hits;
+                            if (names > 0) {
+                                ++n_holders;
+                                n_hits += gdf ? 1 : 0;
                                 uintptr_t vt{};
                                 exp_gdf_probe_read(p, &vt);
-                                SPDLOG_INFO("[Experiment][GdfProbe2] B {} +0x{:x} -> {:x} vtable exe+0x{:x}, holds:{}", eye, off, p, vt - exe, inner);
+                                SPDLOG_INFO("[Experiment][GdfProbe3] B {} +0x{:x} -> {:x} vtable exe+0x{:x}{}, {} named:{}", eye, off, p,
+                                    vt - exe, gdf ? " GDF" : "", names, inner);
                             }
                         }
-                        SPDLOG_INFO("[Experiment][GdfProbe2] B {}: {} of {} nameless objects scanned, {} hold GDF-named objects; reads left {}{}",
-                            eye, scanned, nameless[side].size(), n_hits, budget, budget_hit ? " (read budget hit)" : "");
+                        SPDLOG_INFO("[Experiment][GdfProbe3] B {}: {} of {} nameless objects in the first 16 KB scanned, {} hold named objects, {} GDF-named; reads left {}{}",
+                            eye, scanned, in_range, n_holders, n_hits, budget, budget_hit ? " (read budget hit)" : "");
                     }
                 }
             }
