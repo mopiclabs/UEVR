@@ -1,6 +1,6 @@
 # Whole runs of the Wukong-walk-nomod route (recipes\, about 11 min of walking and fighting from the forest-shrine
 # save, no modifier keys), one GDF mode per run in -Order (r = refresh = VR_ExperimentRightEyeGdfShare 0, the shipped
-# behaviour; s = share = 1), SBS + EyeSampler (binocular frames over the whole run, one every 11 s, at most 60: the
+# behaviour; s = share = 1; i = share with the update index kept = 3), SBS + EyeSampler (binocular frames over the whole run, one every 11 s, at most 60: the
 # harness's post-run binocular analysis grows faster than the frame count) + pass markers, through cost_run.ps1.
 #
 # Saves: the recipe loads the LAST entry of the game's save list, which is ordered by the date inside each save file.
@@ -89,7 +89,7 @@ New-Item -ItemType Directory -Force $aside | Out-Null
 foreach ($f in $expectMap.Keys) { Copy-Item (Join-Path $SaveDir $f) $aside -Force }
 Note "copied aside to $($aside): $(($expectMap.Keys | ForEach-Object { "$_ $(H8 (Join-Path $aside $_))" }) -join ', ')"
 
-$modes = @{ r = @{ mode = 0; name = "refresh" }; s = @{ mode = 1; name = "share" } }
+$modes = @{ r = @{ mode = 0; name = "refresh" }; s = @{ mode = 1; name = "share" }; i = @{ mode = 3; name = "shareidx" } }
 $plan = @(); $n = 1
 foreach ($c in $Order.ToCharArray()) { $m = $modes["$c"]; if (-not $m) { Note "unknown mode '$c' in -Order"; exit 5 }; $plan += @{ mode = $m.mode; label = "gdfwalk$n$($m.name)" }; $n++ }
 for ($i = 0; $i -lt $plan.Count; $i++) {

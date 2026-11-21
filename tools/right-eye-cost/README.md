@@ -29,6 +29,7 @@ changes a default. Run folders stay in the mopic-test harness's `runs\`. Logs an
   - `0` off. The shipped right-eye GDF refresh runs (`VR_NativeStereoFixSecondGlobalDistanceFieldRefreshFrames=15`, on change 8).
   - `1` the right eye renders with the left eye's Global Distance Field all run. The two view states' GDF blocks are exchanged around the right family; the right refresh is skipped.
   - `2` A/B in 10 s windows. `N >= 10` A/B in N-second windows. Share is in the even windows of QPC time.
+  - `3` share as `1`, but the right render's change to the shared block's GDF update index is undone before the block goes back. The index then advances once per frame, as with one view: UE's staggered clipmap schedule takes one step per frame instead of two. The window log counts "index advanced by the right render" (and "restored").
   - The log shows `[GdfShare] Global Distance Field block found ...` once in-world. Per window it shows `[GdfShare] window N (share|refresh): right families, exchanged, not shared (...)`.
 - AutoRes is pinned off for measurement by `cost_run.ps1` (`VR_AutoRes=false;VR_AutoResKeepSwapchains=true;Mopic_ConfigVersion=4`) unless `-AutoRes`.
 

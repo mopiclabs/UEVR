@@ -2,7 +2,14 @@
 
 // EXPERIMENT (exp/right-eye-cost, VR_ExperimentRightEyeGdfShare, default 0 = off; 1 = share whenever the block is
 // validated; 2 = in-run A/B: share in even 10-second windows of QPC time, today's refresh in odd ones; N >= 10: the
-// same A/B with N-second windows).
+// same A/B with N-second windows; 3 = share as 1, and the right render's change to the shared block's update index is
+// undone before the block goes back, so the index advances once per frame as with one view).
+//
+// Why 3: UE's staggered GDF schedule picks the clipmaps to update from the view state's update index (power-of-two
+// periods). Sharing one block, both renders advance its index, so the schedule runs twice per frame: each clipmap's
+// update always lands in the same eye's family and the far clipmaps come up twice as often. Mode 3 keeps one step per
+// frame: the right render then sees the index the left just used. The window log counts how often the right render
+// changed the index ("index advanced by the right render").
 //
 // The Native Stereo Fix renders the right eye as a second view family with a view state of its own, and each view
 // state keeps its own Global Distance Field (clipmap states, update index, camera vectors, page atlas, coverage atlas,
@@ -87,6 +94,7 @@ inline constexpr Resource kResources[] = {
     {0x30, 10, "GlobalDistanceField.MipTexture"},
 };
 inline constexpr ptrdiff_t kBlockFromAnchor = -0x268;
+inline constexpr ptrdiff_t kUpdateIndexFromAnchor = -0x50;  // int32 GDF update index (++ per update, back to 0 past 0x80)
 inline constexpr size_t kBlockSize = 0x2a0;
 inline constexpr size_t kAnchorSearchEnd = 0x4000;
 inline constexpr uint32_t kRing = 8;
@@ -108,6 +116,8 @@ struct State {
     uintptr_t swapped_left{0};
     uintptr_t swapped_right{0};
     size_t swapped_anchor{0};
+    int32_t swapped_index{0};     // the shared block's update index when the right render got it
+    bool restore_index{false};    // mode 3: undo the right render's change to it before exchanging back
     uint64_t exchanges{0};
     uint64_t declined{0};
     uint64_t not_validated{0};
@@ -117,6 +127,7 @@ struct State {
     std::atomic<uint32_t> gt_not_validated{0};  // game thread: wanted, but the block did not validate
     int64_t window{-1};
     uint32_t w_right{0}, w_exchanged{0}, w_declined{0}, w_rt_not_validated{0};
+    uint32_t w_index_advanced{0}, w_index_restored{0};
 };
 
 inline State& state() {
@@ -202,7 +213,7 @@ inline bool on_right_submission(int32_t mode, uintptr_t right_target, uintptr_t 
     using namespace detail;
     auto& s = state();
     bool share = false;
-    if (mode == 1 || (is_ab(mode) && window_shares(mode))) {
+    if (mode == 1 || mode == 3 || (is_ab(mode) && window_shares(mode))) {
         ++s.gt_wanted;
         share = right_target != 0 && validated(left_state, right_state);
         if (!share) {
@@ -224,8 +235,17 @@ inline bool on_right_submission(int32_t mode, uintptr_t right_target, uintptr_t 
 inline void on_family_render(int32_t mode, uintptr_t target) {
     using namespace detail;
     auto& s = state();
-    // The previous family's render is done: exchange back first.
+    // The previous family's render is done: exchange back first. The right view state holds the left's block until
+    // then; count (and in mode 3 undo) the right render's change to its update index.
     if (s.swapped_left != 0) {
+        auto* index = (int32_t*)(s.swapped_right + s.swapped_anchor + kUpdateIndexFromAnchor);
+        if (*index != s.swapped_index) {
+            ++s.w_index_advanced;
+            if (s.restore_index) {
+                *index = s.swapped_index;
+                ++s.w_index_restored;
+            }
+        }
         exchange(s.swapped_left, s.swapped_right, s.swapped_anchor);
         s.swapped_left = s.swapped_right = 0;
     }
@@ -237,12 +257,15 @@ inline void on_family_render(int32_t mode, uintptr_t target) {
         if (window != s.window) {
             if (s.window >= 0 && s.w_right > 0) {
                 SPDLOG_INFO("[GdfShare] window {} ({}): right families {}, exchanged {}, not shared {} (game thread: wanted {}, "
-                    "block not validated {}), not validated on the render thread {}",
-                    s.window, is_ab(mode) ? (s.window % 2 == 0 ? "share" : "refresh") : "share", s.w_right, s.w_exchanged,
-                    s.w_declined, s.gt_wanted.load(), s.gt_not_validated.load(), s.w_rt_not_validated);
+                    "block not validated {}), not validated on the render thread {}; index advanced by the right render {} "
+                    "(restored {})",
+                    s.window, is_ab(mode) ? (s.window % 2 == 0 ? "share" : "refresh") : (mode == 3 ? "shareidx" : "share"),
+                    s.w_right, s.w_exchanged, s.w_declined, s.gt_wanted.load(), s.gt_not_validated.load(),
+                    s.w_rt_not_validated, s.w_index_advanced, s.w_index_restored);
             }
             s.window = window;
             s.w_right = s.w_exchanged = s.w_declined = s.w_rt_not_validated = 0;
+            s.w_index_advanced = s.w_index_restored = 0;
             s.gt_wanted = 0;
             s.gt_not_validated = 0;
         }
@@ -274,6 +297,8 @@ inline void on_family_render(int32_t mode, uintptr_t target) {
         s.swapped_left = l;
         s.swapped_right = r;
         s.swapped_anchor = anchor;
+        s.swapped_index = *(const int32_t*)(r + anchor + kUpdateIndexFromAnchor);
+        s.restore_index = mode == 3;
         if (++s.exchanges == 1 || s.exchanges % 3600 == 0) {
             SPDLOG_INFO("[GdfShare] right eye renders with the left eye's Global Distance Field: {} frames (declined {}, "
                 "not validated on the render thread {})", s.exchanges, s.declined, s.not_validated);
