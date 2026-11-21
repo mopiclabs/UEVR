@@ -254,7 +254,13 @@ struct TargetInfo {
     uint32_t width{};
     uint32_t height{};
     uint32_t format{};
+    ID3D12Resource* resource{};  // identity only (not referenced)
 };
+
+// A cascaded-shadow-map atlas: a depth target whose width is 2-8 cascades of its height (Wukong: 4096x1024).
+inline bool is_csm_atlas(const TargetInfo& t) {
+    return t.height >= 256 && t.width % t.height == 0 && t.width / t.height >= 2 && t.width / t.height <= 8;
+}
 
 struct ListHooks {
     std::atomic<bool> enabled{false};
@@ -265,6 +271,10 @@ struct ListHooks {
     std::atomic<void*> original[kMaxSlot]{};
     std::shared_mutex targets_mtx{};
     std::unordered_map<uint64_t, TargetInfo> targets{};
+    // CSM probe (VR_ExperimentCsmProbe): depth-only binds of a CSM atlas, counted per D3D12 resource
+    std::atomic<bool> csm_probe{false};
+    std::mutex csm_mtx{};
+    std::unordered_map<ID3D12Resource*, uint64_t> csm_binds{};
 };
 
 inline ListHooks& list_hooks() {
@@ -320,6 +330,14 @@ inline TargetInfo find_target(uint64_t handle) {
 inline void STDMETHODCALLTYPE om_set_render_targets(ID3D12GraphicsCommandList* list, UINT count,
     const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, BOOL single_range, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv)
 {
+    if (count == 0 && dsv != nullptr && dsv->ptr != 0 && list_hooks().csm_probe.load(std::memory_order_relaxed)) {
+        const auto ds = find_target(dsv->ptr);
+        if (ds.resource != nullptr && is_csm_atlas(ds)) {
+            auto& h = list_hooks();
+            std::scoped_lock _{h.csm_mtx};
+            ++h.csm_binds[ds.resource];
+        }
+    }
     if (state().capturing.load(std::memory_order_acquire)) {
         const uint64_t rtv0 = (count != 0 && rtvs != nullptr) ? rtvs[0].ptr : 0;
         const uint64_t dsv0 = dsv != nullptr ? dsv->ptr : 0;
@@ -410,7 +428,22 @@ inline void on_create_view(ID3D12Resource* resource, D3D12_CPU_DESCRIPTOR_HANDLE
     const auto desc = resource->GetDesc();
     std::unique_lock _{h.targets_mtx};
     h.targets[handle.ptr] = detail::TargetInfo{(uint32_t)desc.Width, desc.Height,
-        view_format != 0 ? view_format : (uint32_t)desc.Format};
+        view_format != 0 ? view_format : (uint32_t)desc.Format, resource};
+}
+
+// CSM probe (VR_ExperimentCsmProbe): turn the counting on or off, and take (and reset) the counts as " resource:binds".
+inline void set_csm_probe(bool on) {
+    detail::list_hooks().csm_probe.store(on, std::memory_order_relaxed);
+}
+inline std::string take_csm_report() {
+    auto& h = detail::list_hooks();
+    std::scoped_lock _{h.csm_mtx};
+    std::string out{};
+    for (const auto& [res, n] : h.csm_binds) {
+        out += fmt::format(" {:x}:{}", (uintptr_t)res, n);
+    }
+    h.csm_binds.clear();
+    return out.empty() ? std::string{" none"} : out;
 }
 
 // D3D12Hook::set_pipeline_state, before the original: hooks the list's draws, dispatches, render target binds and Close

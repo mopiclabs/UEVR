@@ -1778,6 +1778,9 @@ private:
     // EXPERIMENT (exp/right-eye-cost): GDF probes 4 and 5 (log only). Probe 5 stalls the game thread 1-6 s per scan at
     // pair submissions 1200 / 2400 / 4800 / 9600 / 19200; up to 28dedeef both ran whenever pass markers were on.
     const ModToggle::Ptr m_experiment_gdf_probes{ ModToggle::create(generate_name("ExperimentGdfProbes"), false) };
+    // EXPERIMENT (exp/right-eye-cost): CSM probe (log only): CSM atlas binds per D3D12 resource every 600 pairs (needs pass
+    // markers on), and both eyes' FSceneView memory at pairs 2400 / 4800 (to find ShadowViewMatrices offline).
+    const ModToggle::Ptr m_experiment_csm_probe{ ModToggle::create(generate_name("ExperimentCsmProbe"), false) };
     // EXPERIMENT (exp/right-eye-cost): "N,group,..." right-eye-only groups in N-second windows (ExperimentSecondFamilyHold,
     // vr/ExperimentPhase.hpp).
     const ModString::Ptr m_experiment_second_family_cvars{ ModString::create(generate_name("ExperimentSecondFamilyCvars"), "") };
@@ -2146,6 +2149,7 @@ public:
             *m_experiment_pass_markers_seconds,
             *m_experiment_right_eye_gdf_share,
             *m_experiment_gdf_probes,
+            *m_experiment_csm_probe,
             *m_experiment_second_family_cvars,
             *m_experiment_cvar_dump_seconds,
             *m_experiment_frame_cvars,

@@ -33,6 +33,10 @@
     bool get_experiment_gdf_probes() const {
         return m_experiment_gdf_probes->value();
     }
+    // EXPERIMENT (exp/right-eye-cost, default false): CSM probe (atlas resources per family, FSceneView dumps; log only).
+    bool get_experiment_csm_probe() const {
+        return m_experiment_csm_probe->value();
+    }
 
     // VR_NativeStereoFixLumenOriginRefreshFrames (default 30, 0 = off): r.LumenScene.UpdateViewOrigin is held at 0 for
     // both eye renders except on every Nth frame, when both move Lumen's view origin (see begin_render_viewfamily_real).

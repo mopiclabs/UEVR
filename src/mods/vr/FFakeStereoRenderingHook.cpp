@@ -28246,6 +28246,43 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
                 }
             }
 
+            // EXPERIMENT (exp/right-eye-cost, CSM probe, log only, VR_ExperimentCsmProbe): every 600 pairs the CSM atlas
+            // binds per D3D12 resource (PassMarkers' OMSetRenderTargets detour; pass markers must be on): one resource =
+            // both families render into the same atlas, two = an atlas each. At pairs 2400 and 4800 the raw qwords of
+            // both eyes' FSceneView (0x2400 bytes), to find FViewMatrices / ShadowViewMatrices offline by diffing the eyes.
+            uevr::pass_markers::set_csm_probe(vr->get_experiment_csm_probe());
+            if (vr->get_experiment_csm_probe() && primary_view != nullptr && secondary_view != nullptr) {
+                static uint32_t csm_probe_count{0};
+                ++csm_probe_count;
+                if (csm_probe_count % 600 == 0) {
+                    SPDLOG_INFO("[Experiment][CsmProbe] #{} CSM atlas depth-only binds per D3D12 resource over 600 pairs:{}",
+                        csm_probe_count, uevr::pass_markers::take_csm_report());
+                }
+                if (csm_probe_count == 2400 || csm_probe_count == 4800) {
+                    const auto rd_view = [](uintptr_t a, uintptr_t& v) {
+                        MEMORY_BASIC_INFORMATION mbi{};
+                        if (a < 0x10000 || a > 0x7fffffffffffull || VirtualQuery((const void*)a, &mbi, sizeof(mbi)) != sizeof(mbi) ||
+                            mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+                            a + 8 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize)
+                        {
+                            return false;
+                        }
+                        return exp_gdf_probe_read(a, &v);
+                    };
+                    for (int side = 0; side < 2; ++side) {
+                        const auto view = (uintptr_t)(side == 0 ? primary_view : secondary_view);
+                        std::string raw{};
+                        raw.reserve(0x2400 / 8 * 18);
+                        for (size_t o = 0; o < 0x2400; o += 8) {
+                            uintptr_t v{};
+                            raw += rd_view(view + o, v) ? fmt::format(" {:x}", v) : std::string{" ?"};
+                        }
+                        SPDLOG_INFO("[Experiment][CsmView] #{} {} view {:x} qwords from +0:{}", csm_probe_count,
+                            side == 0 ? "L" : "R", view, raw);
+                    }
+                }
+            }
+
             // Probes 2 and 3 (below) are off in this build: their scans stalled the game thread (17 s, then 1 s).
             constexpr bool run_gdf_probe_2_3 = false;
             if (vr->get_experiment_pass_markers_seconds() > 0) {
