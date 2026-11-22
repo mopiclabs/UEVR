@@ -370,7 +370,7 @@ inline void exchange_back() {
 
 // Game thread, around the first (left-eye) submission: true once after a failed exchange back (hold the full update).
 inline bool take_left_rebuild() {
-    if (!state().left_rebuild.exchange(false)) {
+    if (!detail::state().left_rebuild.exchange(false)) {
         return false;
     }
     SPDLOG_INFO("[GdfShare] Left eye's distance field rebuilt in full once (after the failed exchange back)");
@@ -381,7 +381,7 @@ inline bool take_left_rebuild() {
 // (sharing needs this point to be alive).
 inline void on_post_render_point() {
     exchange_back();
-    state().post_render_points.fetch_add(1, std::memory_order_relaxed);
+    detail::state().post_render_points.fetch_add(1, std::memory_order_relaxed);
 }
 
 // Game thread, before the second (right-eye) submission of a frame. Returns whether the right eye shares the left's
