@@ -29069,6 +29069,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     {
         LumenViewOriginHold first_hold{hold_lumen_origin};
+        // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): once, after a failed exchange back, the left
+        // eye's view state may hold the right eye's (stale) block: rebuild it in full in this render.
+        GlobalDistanceFieldFullUpdateHold first_gdf_hold{uevr::gdf_share::take_left_rebuild()};
         call_original();
     }
 

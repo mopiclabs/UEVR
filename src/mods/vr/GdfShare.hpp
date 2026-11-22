@@ -31,13 +31,14 @@
 // The block's extent and the update index are not resources and can't be checked by name: they come from a table of
 // validated engine layouts, today UE 5.0 only, validated on one title (Black Myth: Wukong's GDF update code and memory
 // dumps of both eyes). Before the first exchange a self-check confirms the update index's place: over 8 consecutive
-// frames both eyes' index goes up by exactly one per render (64 misses: off for the session). Any other engine
-// version: off, one log line, the refresh as before.
+// frames both eyes' index goes up by exactly one per render (renders that leave both unchanged count neither way; 64
+// other changes: off for the session). Any other engine version: off, one log line, the refresh as before.
 //
 // Failures (one log line per kind): block not found or a resource not verified on the game thread -> no exchange that
 // frame; on the render thread, or the render thread consuming none of 30 frames the game thread chose to share -> the
 // right eye's field is rebuilt in the next frame and sharing stays off for 600 frames; a failed check before the
-// exchange back (a view state gone) -> nothing is written, sharing is off for the session. When sharing stops, the right
+// exchange back (a view state gone) -> nothing is written, sharing is off for the session, and the left eye's next render
+// rebuilds its field in full once (its view state may keep the right eye's block). When sharing stops, the right
 // eye's own (stale) field is rebuilt in that frame. Every read of engine memory before a write is SEH-guarded.
 // UE 4.x keeps a different distance field (clipmap volume textures, no page atlas): never found.
 // VR_DebugShareGlobalDistanceFieldFailVerify (debug, default 0): 1 fails the game thread's check, 2 the render thread's,
@@ -204,7 +205,8 @@ struct State {
     uint64_t exchanges{0};
     bool sc_have{false};
     int32_t sc_left{0}, sc_right{0};
-    uint32_t sc_streak{0}, sc_misses{0};
+    uint32_t sc_streak{0}, sc_misses{0}, sc_neutral{0};
+    std::atomic<bool> left_rebuild{false};  // render thread -> game thread: rebuild the left eye's field once
 };
 
 inline State& state() {
@@ -317,20 +319,24 @@ inline void self_check(uintptr_t l, uintptr_t r, size_t anchor, const Layout& la
     if (!read_i32(l + anchor + layout.update_index_from_anchor, li) || !read_i32(r + anchor + layout.update_index_from_anchor, ri)) {
         return;
     }
-    const auto step = [](int32_t prev, int32_t cur) { return cur == prev + 1 || (cur < prev && cur <= 1); };
+    // 0 = unchanged (a render without a GDF update: menu, pause, loading), 1 = +1 or the wrap, -1 = anything else
+    const auto step = [](int32_t prev, int32_t cur) { return cur == prev ? 0 : (cur == prev + 1 || (cur < prev && cur <= 1)) ? 1 : -1; };
     if (s.sc_have) {
-        if (step(s.sc_left, li) && step(s.sc_right, ri)) {
-            if (++s.sc_streak >= kSelfCheckFrames && !s.layout_confirmed.load()) {
-                s.layout_confirmed = true;
-                SPDLOG_INFO("[GdfShare] Update index self-check passed: both eyes +1 per render over {} frames ({} misses before)",
-                    kSelfCheckFrames, s.sc_misses);
-            }
-        } else {
+        const auto sl = step(s.sc_left, li), sr = step(s.sc_right, ri);
+        if (sl < 0 || sr < 0) {
             s.sc_streak = 0;
             if (++s.sc_misses >= kSelfCheckMaxMisses) {
                 log_once(LayoutSelfCheck);
                 s.disabled = true;
             }
+        } else if (sl == 1 && sr == 1) {
+            if (++s.sc_streak >= kSelfCheckFrames && !s.layout_confirmed.load()) {
+                s.layout_confirmed = true;
+                SPDLOG_INFO("[GdfShare] Update index self-check passed: both eyes +1 per render over {} frames ({} misses, {} "
+                    "frames without an update before)", kSelfCheckFrames, s.sc_misses, s.sc_neutral);
+            }
+        } else {
+            ++s.sc_neutral;  // an index that didn't move is neither a pass nor a miss
         }
     }
     s.sc_left = li;
@@ -351,12 +357,24 @@ inline void exchange_back() {
     const auto l = s.swapped_left, r = s.swapped_right;
     s.swapped_left = s.swapped_right = 0;
     if (!resources_ok(l, s.swapped_anchor) || !resources_ok(r, s.swapped_anchor)) {
+        // The left view state may now keep the right eye's stale block for good: its next render rebuilds it in full
+        // (take_left_rebuild); the right eye rebuilds its own as sharing stops.
         log_once(ExchangeBackCheck);
         s.disabled = true;
+        s.left_rebuild = true;
         return;
     }
     *(int32_t*)(r + s.swapped_anchor + s.swapped_index_off) = s.swapped_index;
     exchange(l, r, s.swapped_anchor, s.swapped_block, s.swapped_size);
+}
+
+// Game thread, around the first (left-eye) submission: true once after a failed exchange back (hold the full update).
+inline bool take_left_rebuild() {
+    if (!state().left_rebuild.exchange(false)) {
+        return false;
+    }
+    SPDLOG_INFO("[GdfShare] Left eye's distance field rebuilt in full once (after the failed exchange back)");
+    return true;
 }
 
 // Render thread, Slate DrawWindow_RenderThread (after the frame's scene renders): exchange back, and count the call
