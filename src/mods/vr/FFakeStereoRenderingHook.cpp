@@ -29275,7 +29275,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     // eye's render uses the left eye's field for this frame and needs no refresh; when it stops sharing (a check failed),
     // its own field is stale and is rebuilt in that frame.
     // In shared frames nothing is counted or reset here: no rebuild runs, and when sharing stops the rebuild comes at once.
-    static uint64_t gdf_shared_frames{0};
+    static uint64_t gdf_refreshes_share_stop{0};  // of gdf_refreshes_backstop: the rebuilds when sharing stopped (log only)
     bool gdf_share_refresh_now{false};
     const bool gdf_share = uevr::gdf_share::on_right_submission(vr->is_native_stereo_fix_share_gdf_enabled(),
         vr->get_debug_share_gdf_fail_verify(), gdf_share_left_target, reinterpret_cast<uintptr_t>(rtfrt),
@@ -29284,10 +29284,11 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     bool gdf_rebuild{false};
     if (gdf_share) {
-        ++gdf_shared_frames;
+        // shared: no rebuild (vr/GdfShare.hpp counts the frames the render thread exchanged)
     } else if (gdf_share_refresh_now && gdf_refresh > 0) {
         gdf_rebuild = true;
         ++gdf_refreshes_backstop;
+        ++gdf_refreshes_share_stop;
     } else if (gdf_signal && gdf_pending_changes > 0 && gdf_frames_since_refresh >= (uint32_t)gdf_change_refresh) {
         gdf_rebuild = true;
         ++gdf_refreshes_on_change;
@@ -29303,10 +29304,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     if (gdf_change_signal::is_installed() && ++gdf_log_counter % 3600 == 0) {
         gdf_change_signal::log_totals(gdf_refreshes_on_change, gdf_refreshes_backstop);
-        if (gdf_shared_frames > 0) {
-            SPDLOG_INFO("[GdfShare] Right eye shared the left eye's distance field in {} frames so far (no rebuild in those)",
-                gdf_shared_frames);
-        }
+        uevr::gdf_share::log_progress(gdf_refreshes_share_stop);
     }
 
     GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild};

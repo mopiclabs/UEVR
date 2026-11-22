@@ -34,6 +34,12 @@
 // frames both eyes' index goes up by exactly one per render (renders that leave both unchanged count neither way; 64
 // other changes: off for the session). Any other engine version: off, one log line, the refresh as before.
 //
+// Diagnostics (log lines only): a failed resource check names the eye, the resource and what was found there (null,
+// another debug name, unreadable); a run of failed game-thread checks logs its first frame and its length; the first
+// few times a resource's pointer changes between two verified frames are logged (a pooled target reallocated under
+// the same name); the periodic progress line counts the frames the render thread really exchanged, every "Not shared"
+// kind since the last line (each kind's text logs once) and the rebuilds when sharing stopped.
+//
 // Failures (one log line per kind): block not found or a resource not verified on the game thread -> no exchange that
 // frame; on the render thread, or the render thread consuming none of 30 frames the game thread chose to share -> the
 // right eye's field is rebuilt in the next frame and sharing stays off for 600 frames; a failed check before the
@@ -50,6 +56,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <optional>
 #include <string>
 
@@ -163,6 +170,15 @@ inline const char* kFailureText[FailureCount] = {
     "game thread check failed on purpose (VR_DebugShareGlobalDistanceFieldFailVerify=1)",
     "render thread check failed on purpose (VR_DebugShareGlobalDistanceFieldFailVerify=2); off for 600 frames",
 };
+// short names for the periodic counts
+inline const char* kFailureName[FailureCount] = {
+    "no layout", "no post-render point", "same target", "block not found", "offsets differ", "game-thread check",
+    "render-thread check", "render thread stalled", "self-check", "exchange-back check", "forced game thread",
+    "forced render thread",
+};
+inline constexpr size_t kResourceCount = sizeof(kResources) / sizeof(kResources[0]);
+inline constexpr uint32_t kDetailLines = 32;  // detail lines per kind and session; later ones are only counted
+inline constexpr uint32_t kMoveLines = 8;     // pointer-move lines per session; later moves are only counted
 
 struct Entry {
     std::atomic<uint64_t> seq{0};
@@ -181,6 +197,8 @@ struct State {
     std::atomic<uint64_t> rt_progress{0};        // render thread: ring entries taken
     std::atomic<uint64_t> post_render_points{0}; // render thread: Slate DrawWindow_RenderThread calls
     std::atomic<uint32_t> logged{0};             // bit per Failure kind
+    std::atomic<uint32_t> kind_count[FailureCount]{};  // occurrences per kind since the last progress line
+    std::atomic<uint64_t> exchange_total{0};     // render thread: frames it exchanged the blocks
     Entry ring[kRing]{};
     std::atomic<uint64_t> submitted{0};
     // game thread only
@@ -193,7 +211,17 @@ struct State {
     uint32_t frames_without_progress{0};
     uint64_t last_post_points{0};
     uint32_t frames_since_post_point{0xffff};
+    uint32_t gt_fail_run{0};        // consecutive failed game-thread checks
+    uint32_t gt_runs_logged{0};
+    uintptr_t last_ok[2][kResourceCount]{};  // both eyes' resource pointers at the last verified check
+    bool have_last_ok{false};
+    uint32_t moves_logged{0};
+    uint32_t moves_since[2][kResourceCount]{};
+    uint64_t progress_last_total{0};
+    uint64_t progress_last_stops{0};
     // render thread only
+    uint32_t rt_detail_logged{0};
+    bool eb_detail_logged{false};
     uint64_t consumed{0};
     uintptr_t swapped_left{0};
     uintptr_t swapped_right{0};
@@ -214,9 +242,12 @@ inline State& state() {
     return s;
 }
 
-inline void log_once(Failure f) {
+// Every occurrence of a failure kind: counted for the progress line; its text logged the first time.
+inline void record(Failure f) {
+    auto& s = state();
+    s.kind_count[f].fetch_add(1, std::memory_order_relaxed);
     const auto bit = 1u << f;
-    if ((state().logged.fetch_or(bit) & bit) == 0) {
+    if ((s.logged.fetch_or(bit) & bit) == 0) {
         SPDLOG_INFO("[GdfShare] Not shared: {}; the right eye's own distance field and its refresh are used", kFailureText[f]);
     }
 }
@@ -244,14 +275,91 @@ inline const Layout* layout_for_engine() {
     return nullptr;
 }
 
-inline bool resources_ok(uintptr_t view_state, size_t anchor) {
-    for (const auto& r : kResources) {
+// What a failed resource check found (diagnostics only; the check itself is named() as before).
+enum class Found : uint8_t { Verified, FieldUnreadable, Null, Misaligned, NameUnreadable, OtherName, ChangedWhileChecked };
+struct ResourceCheck {
+    int index{-1};  // the first resource that failed; -1: all verified
+    Found found{Found::Verified};
+    uintptr_t pointer{0};
+    char name[64]{};
+};
+
+// The UTF-16 debug name at p's qword name_index as ASCII (other characters as '?'), at most n - 1 characters.
+inline bool read_name(uintptr_t p, size_t name_index, char* buf, size_t n) {
+    uintptr_t s{};
+    if (!read(p + name_index * 8, s) || (s & 1) != 0) {
+        return false;
+    }
+    for (size_t i = 0; i + 1 < n; i += 4) {
+        uintptr_t w4{};
+        if (!read(s + i * 2, w4)) {
+            return false;
+        }
+        for (size_t k = 0; k < 4; ++k) {
+            const auto ch = (uint16_t)(w4 >> (16 * k));
+            if (ch == 0 || i + k + 1 >= n) {
+                buf[(std::min)(i + k, n - 1)] = 0;
+                return true;
+            }
+            buf[i + k] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '?';
+        }
+    }
+    buf[n - 1] = 0;
+    return true;
+}
+
+inline bool check_resources(uintptr_t view_state, size_t anchor, ResourceCheck* out, uintptr_t* pointers) {
+    for (size_t i = 0; i < kResourceCount; ++i) {
+        const auto& r = kResources[i];
         uintptr_t p{};
-        if (!read(view_state + anchor + r.from_anchor, p) || p == 0 || !named(p, r.name_index, r.name)) {
+        const bool field = read(view_state + anchor + r.from_anchor, p);
+        if (pointers != nullptr) {
+            pointers[i] = field ? p : 0;
+        }
+        if (!field || p == 0 || !named(p, r.name_index, r.name)) {
+            if (out != nullptr) {
+                out->index = (int)i;
+                out->pointer = p;
+                if (!field) {
+                    out->found = Found::FieldUnreadable;
+                } else if (p == 0) {
+                    out->found = Found::Null;
+                } else if ((p & 7) != 0) {
+                    out->found = Found::Misaligned;
+                } else if (!read_name(p, r.name_index, out->name, sizeof(out->name))) {
+                    out->found = Found::NameUnreadable;
+                } else {
+                    out->found = std::strcmp(out->name, r.name) == 0 ? Found::ChangedWhileChecked : Found::OtherName;
+                }
+            }
             return false;
         }
     }
     return true;
+}
+
+inline bool resources_ok(uintptr_t view_state, size_t anchor) {
+    return check_resources(view_state, anchor, nullptr, nullptr);
+}
+
+inline std::string describe(const ResourceCheck& c) {
+    if (c.index < 0) {
+        return "verified";
+    }
+    const auto what = [&]() -> std::string {
+        switch (c.found) {
+        case Found::FieldUnreadable: return "the field is unreadable";
+        case Found::Null: return "null pointer";
+        case Found::Misaligned: return std::format("misaligned pointer {:x}", c.pointer);
+        case Found::NameUnreadable: return std::format("object {:x} with an unreadable debug name", c.pointer);
+        case Found::OtherName: return std::format("object {:x} named \"{}\"", c.pointer, c.name);
+        case Found::ChangedWhileChecked: return std::format("object {:x} named as expected on a second read (changed while checked)", c.pointer);
+        default: return "verified";
+        }
+    }();
+    const auto off = kResources[c.index].from_anchor;
+    return std::format("resource {} {} ({}0x{:x} from the PageAtlas field): {}", c.index, kResources[c.index].name,
+        off < 0 ? "-" : "+", (size_t)(off < 0 ? -off : off), what);
 }
 
 inline std::optional<size_t> find_anchor(uintptr_t view_state) {
@@ -282,11 +390,11 @@ inline bool verified(const Layout& layout, uintptr_t left_state, uintptr_t right
         const auto l = find_anchor(left_state);
         const auto r = find_anchor(right_state);
         if (!l || !r) {
-            log_once(AnchorNotFound);
+            record(AnchorNotFound);
             return false;
         }
         if (*l != *r || (ptrdiff_t)*l + layout.block_from_anchor < 0) {
-            log_once(AnchorMismatch);
+            record(AnchorMismatch);
             return false;
         }
         anchor = *l;
@@ -294,10 +402,46 @@ inline bool verified(const Layout& layout, uintptr_t left_state, uintptr_t right
         SPDLOG_INFO("[GdfShare] Global Distance Field block found: PageAtlas field +0x{:x}, block +0x{:x}..+0x{:x}", anchor,
             anchor + layout.block_from_anchor, anchor + layout.block_from_anchor + layout.block_size);
     }
-    if (!resources_ok(left_state, anchor) || !resources_ok(right_state, anchor)) {
-        log_once(GameThreadCheck);
+    // both eyes are read (diagnostics: which eye fails first); the decision is the same as checking left, then right
+    ResourceCheck cl{}, cr{};
+    uintptr_t pl[kResourceCount]{}, pr[kResourceCount]{};
+    const bool lok = check_resources(left_state, anchor, &cl, pl);
+    const bool rok = check_resources(right_state, anchor, &cr, pr);
+    if (!lok || !rok) {
+        record(GameThreadCheck);
+        if (s.gt_fail_run++ == 0 && s.gt_runs_logged < kDetailLines) {
+            ++s.gt_runs_logged;
+            SPDLOG_INFO("[GdfShare] Game thread check failed (run {}): left eye {}; right eye {}", s.gt_runs_logged,
+                describe(cl), describe(cr));
+        }
         return false;
     }
+    if (s.gt_fail_run > 0) {
+        if (s.gt_runs_logged <= kDetailLines) {
+            SPDLOG_INFO("[GdfShare] Game thread check verifies again after {} frames (run {})", s.gt_fail_run, s.gt_runs_logged);
+        }
+        s.gt_fail_run = 0;
+    }
+    // a resource whose pointer changed between two verified checks: reallocated under the same name
+    if (s.have_last_ok) {
+        for (size_t i = 0; i < kResourceCount; ++i) {
+            const uintptr_t now[2] = {pl[i], pr[i]};
+            for (int eye = 0; eye < 2; ++eye) {
+                if (now[eye] == s.last_ok[eye][i]) {
+                    continue;
+                }
+                ++s.moves_since[eye][i];
+                if (s.moves_logged < kMoveLines) {
+                    ++s.moves_logged;
+                    SPDLOG_INFO("[GdfShare] {} eye's {} moved {:x} -> {:x} between verified checks", eye == 0 ? "Left" : "Right",
+                        kResources[i].name, s.last_ok[eye][i], now[eye]);
+                }
+            }
+        }
+    }
+    std::memcpy(s.last_ok[0], pl, sizeof(pl));
+    std::memcpy(s.last_ok[1], pr, sizeof(pr));
+    s.have_last_ok = true;
     return true;
 }
 
@@ -326,7 +470,7 @@ inline void self_check(uintptr_t l, uintptr_t r, size_t anchor, const Layout& la
         if (sl < 0 || sr < 0) {
             s.sc_streak = 0;
             if (++s.sc_misses >= kSelfCheckMaxMisses) {
-                log_once(LayoutSelfCheck);
+                record(LayoutSelfCheck);
                 s.disabled = true;
             }
         } else if (sl == 1 && sr == 1) {
@@ -356,10 +500,17 @@ inline void exchange_back() {
     }
     const auto l = s.swapped_left, r = s.swapped_right;
     s.swapped_left = s.swapped_right = 0;
-    if (!resources_ok(l, s.swapped_anchor) || !resources_ok(r, s.swapped_anchor)) {
+    ResourceCheck cl{}, cr{};
+    const bool lok = check_resources(l, s.swapped_anchor, &cl, nullptr);
+    const bool rok = check_resources(r, s.swapped_anchor, &cr, nullptr);
+    if (!lok || !rok) {
         // The left view state may now keep the right eye's stale block for good: its next render rebuilds it in full
         // (take_left_rebuild); the right eye rebuilds its own as sharing stops.
-        log_once(ExchangeBackCheck);
+        record(ExchangeBackCheck);
+        if (!s.eb_detail_logged) {
+            s.eb_detail_logged = true;
+            SPDLOG_INFO("[GdfShare] Exchange-back check failed: left view state {}; right view state {}", describe(cl), describe(cr));
+        }
         s.disabled = true;
         s.left_rebuild = true;
         return;
@@ -400,7 +551,7 @@ inline bool on_right_submission(bool enabled, int32_t debug_fail, uintptr_t left
         s.last_progress = progress;
         s.frames_without_progress = 0;
     } else if (s.last_shared && ++s.frames_without_progress >= kStallFrames) {
-        log_once(RenderThreadStalled);
+        record(RenderThreadStalled);
         s.frames_without_progress = 0;
         failed = true;
     }
@@ -424,13 +575,13 @@ inline bool on_right_submission(bool enabled, int32_t debug_fail, uintptr_t left
         }
         const auto* layout = s.layout.load();
         if (layout == nullptr) {
-            log_once(NoLayout);
+            record(NoLayout);
         } else if (s.frames_since_post_point >= kPostRenderPointFrames) {
-            log_once(NoPostRenderPoint);
+            record(NoPostRenderPoint);
         } else if (left_target == right_target) {
-            log_once(SameTarget);
+            record(SameTarget);
         } else if (debug_fail == 1) {
-            log_once(ForcedGameThread);
+            record(ForcedGameThread);
         } else {
             // until the render thread's update-index self-check has passed, the block is only verified (no exchange)
             share = verified(*layout, left_state, right_state) && s.layout_confirmed.load();
@@ -479,7 +630,7 @@ inline void on_family_render(int32_t debug_fail, uintptr_t target) {
             return;
         }
         if (debug_fail == 2) {
-            log_once(ForcedRenderThread);
+            record(ForcedRenderThread);
             s.rt_failed = true;
             return;
         }
@@ -487,8 +638,16 @@ inline void on_family_render(int32_t debug_fail, uintptr_t target) {
             s.rt_failed = true;  // turned off since the game thread chose it: refresh in the next frame
             return;
         }
-        if (anchor == 0 || !resources_ok(l, anchor) || !resources_ok(r, anchor)) {
-            log_once(RenderThreadCheck);
+        ResourceCheck cl{}, cr{};
+        const bool lok = anchor != 0 && check_resources(l, anchor, &cl, nullptr);
+        const bool rok = anchor != 0 && check_resources(r, anchor, &cr, nullptr);
+        if (!lok || !rok) {
+            record(RenderThreadCheck);
+            if (s.rt_detail_logged < kDetailLines) {
+                ++s.rt_detail_logged;
+                SPDLOG_INFO("[GdfShare] Render thread check failed ({}): left eye {}; right eye {}", s.rt_detail_logged,
+                    anchor == 0 ? "block not found" : describe(cl), anchor == 0 ? "block not found" : describe(cr));
+            }
             s.rt_failed = true;
             return;
         }
@@ -500,11 +659,49 @@ inline void on_family_render(int32_t debug_fail, uintptr_t target) {
         s.swapped_size = layout->block_size;
         s.swapped_index_off = layout->update_index_from_anchor;
         s.swapped_index = *(const int32_t*)(r + anchor + layout->update_index_from_anchor);
+        s.exchange_total.fetch_add(1, std::memory_order_relaxed);
         if (++s.exchanges == 1 || s.exchanges % 36000 == 0) {
             SPDLOG_INFO("[GdfShare] Right eye renders with the left eye's Global Distance Field (found and verified): {} frames",
                 s.exchanges);
         }
         return;
     }
+}
+
+// Game thread, the periodic distance field log (every 3600 right-eye submissions where the change signal is hooked):
+// the frames the render thread really exchanged, each "Not shared" kind since the last line (its text logs only once),
+// the right eye's rebuilds when sharing stopped (stop_rebuilds: the caller's running total) and the resource pointers
+// that moved between verified checks. Nothing is logged where nothing was ever exchanged or declined.
+inline void log_progress(uint64_t stop_rebuilds) {
+    using namespace detail;
+    auto& s = state();
+    const auto total = s.exchange_total.load(std::memory_order_relaxed);
+    const auto since = total - s.progress_last_total;
+    s.progress_last_total = total;
+    std::string kinds;
+    for (uint32_t f = 0; f < FailureCount; ++f) {
+        const auto n = s.kind_count[f].exchange(0, std::memory_order_relaxed);
+        if (n != 0 && f != NoLayout) {
+            kinds += std::format("{}{} {}", kinds.empty() ? "" : ", ", kFailureName[f], n);
+        }
+    }
+    std::string moves;
+    for (size_t i = 0; i < kResourceCount; ++i) {
+        for (int eye = 0; eye < 2; ++eye) {
+            if (s.moves_since[eye][i] != 0) {
+                moves += std::format("{}{} {} {}", moves.empty() ? "" : ", ", eye == 0 ? "L" : "R",
+                    kResources[i].name + std::strlen("GlobalDistanceField."), s.moves_since[eye][i]);
+                s.moves_since[eye][i] = 0;
+            }
+        }
+    }
+    const auto stops = stop_rebuilds - s.progress_last_stops;
+    s.progress_last_stops = stop_rebuilds;
+    if (total == 0 && kinds.empty()) {
+        return;
+    }
+    SPDLOG_INFO("[GdfShare] Right eye rendered with the left eye's distance field in {} frames so far ({} since the last "
+        "line); since the last line: not shared {}; rebuilt when sharing stopped {}; pointers moved {}", total, since,
+        kinds.empty() ? "none" : kinds, stops, moves.empty() ? "none" : moves);
 }
 } // namespace uevr::gdf_share
