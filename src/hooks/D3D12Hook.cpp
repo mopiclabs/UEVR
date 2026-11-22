@@ -17,6 +17,7 @@
 #include "mods/GameSpecific.hpp"
 #include "mods/vr/PerfLog.hpp"
 #include "mods/vr/PassMarkers.hpp"
+#include "mods/vr/HookProfiler.hpp"
 #include "render/D3D12Diagnostics.hpp"
 #include "render/ShaderOverrideRegistry.hpp"
 
@@ -1036,6 +1037,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
 
     // VR_PerfLog: the original Present call, and UEVR's own work around it (on_present/on_post_present).
     uevr::perf::PresentTimer perf_present{};
+    const double hp_hook_start = uevr::hook_profiler::on() ? uevr::hook_profiler::now_ms() : 0.0;  // EXPERIMENT (R21)
 
     if (d3d12->m_on_present) {
         d3d12->m_on_present(*d3d12);
@@ -1086,7 +1088,14 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     
     if (!d3d12->m_ignore_next_present) {
         perf_present.begin_present();
-        result = present_fn(swap_chain, sync_interval, flags, params);
+        {
+            // EXPERIMENT (R21, VR_EnableHitchDiagnostics): the original Present, and the params it got
+            uevr::hook_profiler::Scope hp_present{uevr::hook_profiler::OriginalPresent};
+            if (uevr::hook_profiler::on()) {
+                uevr::hook_profiler::note_present_params(swap_chain, sync_interval, flags);
+            }
+            result = present_fn(swap_chain, sync_interval, flags, params);
+        }
         perf_present.end_present();
 
         if (result == DXGI_ERROR_INVALID_CALL &&
@@ -1127,11 +1136,16 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     --g_present_depth;
 
     if (d3d12->m_on_post_present) {
+        uevr::hook_profiler::Scope hp_post{uevr::hook_profiler::PostPresent};
         d3d12->m_on_post_present(*d3d12);
     }
 
     perf_present.finish();
     d3d12->m_inside_present = false;
+    if (uevr::hook_profiler::on()) {
+        uevr::hook_profiler::state().parts[uevr::hook_profiler::HookTotal].add(uevr::hook_profiler::now_ms() - hp_hook_start);
+        uevr::hook_profiler::log_if_due(swap_chain);
+    }
 
     return result;
 }

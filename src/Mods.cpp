@@ -15,6 +15,7 @@
 #include "mods/PluginLoader.hpp"
 #include "mods/LuaLoader.hpp"
 #include "mods/UObjectHook.hpp"
+#include "mods/vr/HookProfiler.hpp"
 #include "Mods.hpp"
 
 namespace {
@@ -279,8 +280,14 @@ void Mods::on_frame() const {
 }
 
 void Mods::on_present() const {
+    // EXPERIMENT (R21, VR_EnableHitchDiagnostics): each mod's on_present on the presenting thread
+    const bool hp = uevr::hook_profiler::on();
     for (auto& mod : m_mods) {
+        const double t0 = hp ? uevr::hook_profiler::now_ms() : 0.0;
         mod->on_present();
+        if (hp) {
+            uevr::hook_profiler::add_mod(std::string{mod->get_name()}, uevr::hook_profiler::now_ms() - t0);
+        }
     }
 }
 
