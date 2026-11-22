@@ -79,27 +79,43 @@ inline bool skip_window() {
     return w >= 0 && w % 2 == 0;
 }
 
-inline std::atomic<bool> g_armed{false};  // 60 s of steady Presents seen (no hook gap over 250 ms)
+inline std::atomic<bool> g_armed{false};  // 120 s in and 60 s of steady Presents seen (no hook gap over 250 ms)
+inline std::atomic<int64_t> g_armed_at_ms{0};
+// The skip ends 200 s after arming, so the run's exit menus (pause, quit) are drawn and presented as usual.
+inline bool within_skip_span() {
+    const auto at = g_armed_at_ms.load(std::memory_order_relaxed);
+    const auto now = (int64_t)std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return at > 0 && now - at < 200000;
+}
 
 inline bool skip_present() {
-    return g_arm.load(std::memory_order_relaxed) == Present && g_armed.load(std::memory_order_relaxed) &&
+    return g_arm.load(std::memory_order_relaxed) == Present && g_armed.load(std::memory_order_relaxed) && within_skip_span() &&
         !g_disabled.load(std::memory_order_relaxed) && skip_window();
 }
 
-inline bool skip_ui() { return g_arm.load(std::memory_order_relaxed) == Ui && skip_window(); }
+// Both arms start only once armed (below): skipping the UI copy in the menus froze the menu the pilot reads (R22 dpu,
+// MENU_FAIL at the load list).
+inline bool skip_ui() {
+    return g_arm.load(std::memory_order_relaxed) == Ui && g_armed.load(std::memory_order_relaxed) && within_skip_span() && skip_window();
+}
 
 // Presenting thread, at every Present hook entry: the watchdog for the present skip (R22, second version: the first
 // counted a startup stall that began in a keep window). The skip starts only after 60 s without a hook gap over 250 ms.
 // Every gap over 250 ms is logged with the phase of the window it began in. Only gaps that began while Presents were
 // being skipped count: two of them in the same or consecutive skip windows turn the skip off for the rest of the run.
 inline void note_hook_entry() {
-    static double last_ms = 0.0, steady_since = 0.0;
+    static double last_ms = 0.0, steady_since = 0.0, first_ms = 0.0;
     static bool last_skipping = false;
     static int64_t last_counted_window = -10;
     const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (g_arm.load(std::memory_order_relaxed) == Present) {
+    if (g_arm.load(std::memory_order_relaxed) != None) {
+        if (first_ms == 0.0) {
+            first_ms = now;
+        }
         const double gap = last_ms > 0.0 ? now - last_ms : 0.0;
-        if (gap > 250.0) {
+        if (gap > 250.0 && g_arm.load(std::memory_order_relaxed) == Ui) {
+            steady_since = now;
+        } else if (gap > 250.0) {
             steady_since = now;
             const auto w = window_index();
             spdlog::info("[PresentHookAB] hook gap {:.0f} ms, began in a {} window (now window {})", gap,
@@ -114,9 +130,12 @@ inline void note_hook_entry() {
         } else if (steady_since == 0.0) {
             steady_since = now;
         }
-        if (!g_armed.load(std::memory_order_relaxed) && steady_since > 0.0 && now - steady_since > 60000.0) {
+        // armed: 120 s after the first Present with the option on (menus and the save load are over) and 60 s steady
+        if (!g_armed.load(std::memory_order_relaxed) && steady_since > 0.0 && now - steady_since > 60000.0 && now - first_ms > 120000.0) {
+            g_armed_at_ms = (int64_t)now;
             g_armed = true;
-            spdlog::info("[PresentHookAB] 60 s of steady Presents: the present skip starts with the next even window");
+            spdlog::info("[PresentHookAB] 120 s in and 60 s of steady Presents: the {} skip runs in even windows for the next 200 s",
+                g_arm.load() == Present ? "present" : "UI copy");
         }
     }
     last_ms = now;
@@ -216,7 +235,7 @@ inline void log_if_due(IDXGISwapChain* current) {
         }
         label = fmt::format(" window {} ({}{}{})", s.window, s.window % 2 == 0 ? "skip" : "keep",
             present_ab::g_disabled.load() ? ", present skip off by the watchdog" : "",
-            present_ab::g_arm.load() == present_ab::Present && !present_ab::g_armed.load() ? ", present skip not armed yet" : "");
+            present_ab::active() && !present_ab::g_armed.load() ? ", skip not armed yet" : "");
         s.window = w;
     } else {
         if (s.last_log.time_since_epoch().count() == 0) {
