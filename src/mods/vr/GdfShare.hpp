@@ -213,6 +213,7 @@ struct State {
     uint32_t frames_since_post_point{0xffff};
     uint32_t gt_fail_run{0};        // consecutive failed game-thread checks
     uint32_t gt_runs_logged{0};
+    bool gt_run_logged{false};      // this run's first frame was logged: log its end too
     uintptr_t last_ok[2][kResourceCount]{};  // both eyes' resource pointers at the last verified check
     bool have_last_ok{false};
     uint32_t moves_logged{0};
@@ -411,23 +412,28 @@ inline bool verified(const Layout& layout, uintptr_t left_state, uintptr_t right
         record(GameThreadCheck);
         if (s.gt_fail_run++ == 0 && s.gt_runs_logged < kDetailLines) {
             ++s.gt_runs_logged;
+            s.gt_run_logged = true;
             SPDLOG_INFO("[GdfShare] Game thread check failed (run {}): left eye {}; right eye {}", s.gt_runs_logged,
                 describe(cl), describe(cr));
         }
         return false;
     }
     if (s.gt_fail_run > 0) {
-        if (s.gt_runs_logged <= kDetailLines) {
+        // only for runs whose first frame was logged; runs past the cap are counted in the progress line
+        if (s.gt_run_logged) {
             SPDLOG_INFO("[GdfShare] Game thread check verifies again after {} frames (run {})", s.gt_fail_run, s.gt_runs_logged);
         }
+        s.gt_run_logged = false;
         s.gt_fail_run = 0;
     }
-    // a resource whose pointer changed between two verified checks: reallocated under the same name
+    // a resource whose pointer changed between two verified checks: reallocated under the same name. The game thread
+    // runs beside the render thread's frame, so it often reads the two view states while their blocks are exchanged:
+    // a pointer that was either eye's last time is the exchange, not a move; only a pointer neither eye had counts.
     if (s.have_last_ok) {
         for (size_t i = 0; i < kResourceCount; ++i) {
             const uintptr_t now[2] = {pl[i], pr[i]};
             for (int eye = 0; eye < 2; ++eye) {
-                if (now[eye] == s.last_ok[eye][i]) {
+                if (now[eye] == s.last_ok[0][i] || now[eye] == s.last_ok[1][i]) {
                     continue;
                 }
                 ++s.moves_since[eye][i];
