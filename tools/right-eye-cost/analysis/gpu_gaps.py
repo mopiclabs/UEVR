@@ -27,9 +27,11 @@ def main():
     ap.add_argument("--phases", type=int, default=1)
     ap.add_argument("--min-ms", type=float, default=0.3)
     ap.add_argument("--first-window", type=int, default=0)
+    ap.add_argument("--skip-windows", default="", help="comma-separated window indices where an R22 skip ran (with --phases 2)")
     ap.add_argument("--queues", default="0", help="list types whose union is the timeline (0 direct, 2 compute, 3 copy)")
     a = ap.parse_args()
     queues = {int(x) for x in a.queues.split(",")}
+    skip_set = {int(x) for x in a.skip_windows.split(",") if x.strip()}
     ltypes = defaultdict(int)
     other_in = defaultdict(lambda: defaultdict(float))
     detail = defaultdict(lambda: defaultdict(float))
@@ -97,6 +99,8 @@ def main():
             w = int(sec // a.window)
             if w < a.first_window:
                 continue
+            if skip_set and not (w in skip_set or (w - 1) in skip_set or (w + 1) in skip_set):
+                continue  # --skip-windows: only the listed skip windows and their keep neighbours
             ph = w % a.phases if a.phases > 1 else 0
             if a.phases > 1 and sec - w * a.window < 2:
                 continue

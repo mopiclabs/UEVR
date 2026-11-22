@@ -232,8 +232,8 @@ def main():
     scsv = os.path.join(a.side, "gpu.csv")
     if a.side and os.path.exists(scsv):
         per_tick = defaultdict(lambda: defaultdict(float))
-        rows3d = [r for r in csv.DictReader(open(scsv, encoding="utf-8"))
-                  if r["engtype"] == "3D" and float(r["util"]) <= 150]  # a new instance's first PDH value can be garbage (1.8e14 once in run a)
+        rows_all = [r for r in csv.DictReader(open(scsv, encoding="utf-8")) if float(r["util"]) <= 150]
+        rows3d = [r for r in rows_all if r["engtype"] == "3D"]  # a new instance's first PDH value can be garbage (1.8e14 once in run a)
         # only the game's adapter (blade18 has the iGPU too: Steam's web helper and the Mopic display's adapter)
         by_luid = defaultdict(float)
         for r in rows3d:
@@ -246,11 +246,15 @@ def main():
             q = int(r["qpc_ns"])
             who = "game" if r["process"].startswith("b1-") else ("service" if "openxr" in r["process"] or "monado" in r["process"] else "other")
             per_tick[q][who] += float(r["util"])
+        # the game's Copy engine on its adapter (R22: a cross-adapter window Present would show here)
+        for r in rows_all:
+            if r["luid"] == game_luid and r["engtype"] == "Copy" and r["process"].startswith("b1-"):
+                per_tick[int(r["qpc_ns"])]["copy"] += float(r["util"])
         for q, d in per_tick.items():
             if t0 <= q < t1:
                 p, w = phase_of(q)
                 if p is not None:
-                    for who in ("game", "service", "other"):
+                    for who in ("game", "service", "other", "copy"):
                         g3d[w][who].append(d.get(who, 0.0))
     # thread CPU per block
     cpu = defaultdict(lambda: defaultdict(float))
@@ -299,9 +303,11 @@ def main():
         if g3d.get(w):
             for who in ("game", "service", "other"):
                 d["3d_" + who] = statistics.mean(g3d[w][who])
+            d["copy_game"] = statistics.mean(g3d[w]["copy"]) if g3d[w].get("copy") else 0.0
             if fr:
                 d["game_work_ms"] = d["3d_game"] / 100 * fr
                 d["idle_ms"] = (1 - (d["3d_game"] + d["3d_service"] + d["3d_other"]) / 100) * fr
+                d["copy_ms"] = d["copy_game"] / 100 * fr
         if cpu.get(w):
             for c in ("GameThread", "RenderThread", "RHIThread"):
                 if fr:
@@ -309,7 +315,7 @@ def main():
                 d[c + "_busy"] = cpu[w].get(c, 0.0) / s / 10  # % of one core
         rows[w] = d
     keys = ["fps", "rendered_fps", "ticks_s", "presents_s", "etw_presents_s", "xr_new_s", "wait_ms", "end_ms", "nv_busy", "nv_clock", "nv_work_ms", "3d_game", "3d_service",
-            "3d_other", "game_work_ms", "idle_ms", "GameThread_ms_f", "RenderThread_ms_f", "RHIThread_ms_f",
+            "3d_other", "game_work_ms", "idle_ms", "copy_game", "copy_ms", "GameThread_ms_f", "RenderThread_ms_f", "RHIThread_ms_f",
             "GameThread_busy", "RenderThread_busy", "RHIThread_busy"]
     print("%s: %s; play %.0f s after settle, %d blocks" % (os.path.basename(a.run), src, (t1 - t0) / 1e9, len(blocks)))
     summary = {}
