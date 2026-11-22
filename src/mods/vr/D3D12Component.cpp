@@ -34,6 +34,7 @@
 #include "d3d12/DirectXTK.hpp"
 
 #include "D3D12Component.hpp"
+#include "HookProfiler.hpp"
 #include "NativeOpenXRArrayD3D12.hpp"
 #include "GalacticRacerRenderTargets.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
@@ -2113,7 +2114,12 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     const auto debug_skip_ui_copy = openxr_runtime != nullptr && openxr_runtime->debug_skip_ui_copy->value();
     const auto debug_disable_depth_submit = openxr_runtime != nullptr && openxr_runtime->debug_disable_depth_submit->value();
     auto suppress_scene_copy = debug_submit_empty_frame || debug_skip_scene_copy;
-    const auto suppress_ui_copy = debug_submit_empty_frame || debug_skip_ui_copy;
+    // EXPERIMENT (R22, VR_ExperimentPresentHookAB "N,ui"): the UI layer copy left out in skip windows (sizing only)
+    const auto exp_skip_ui = openxr_runtime != nullptr && uevr::present_ab::skip_ui();
+    if (exp_skip_ui) {
+        ++uevr::hook_profiler::state().skipped_ui;
+    }
+    const auto suppress_ui_copy = debug_submit_empty_frame || debug_skip_ui_copy || exp_skip_ui;
 
     if (is_dune_external_backbuffer && runtime->is_openxr()) {
         const auto adopted_desc = backbuffer->GetDesc();
@@ -4160,6 +4166,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         m_openvr.ui_tex.commands.execute();
     } else if (runtime->is_openxr() && vr->m_openxr->can_run_frame_loop() && ensure_openxr_frame_began("d3d12_first_copy")) {
         utility::pacing::ScopedEvent pacing_ui_copy{utility::pacing::Stage::ui_copy};
+        uevr::hook_profiler::Scope hp_ui_copy{uevr::hook_profiler::UiCopy};  // EXPERIMENT (R22)
         const auto ui_copy_start = collect_frame_timing
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
@@ -7391,6 +7398,11 @@ bool D3D12Component::OpenXR::copy(
     const NativeArraySources* retained_native_sources)
 {
     std::scoped_lock _{this->mtx};
+    // EXPERIMENT (R22, VR_EnableHitchDiagnostics): this copy's parts go to the UI or the eye rows of [HookProfiler]
+    const bool hp_ui = swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::UI ||
+        swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::UI_RIGHT ||
+        swapchain_idx == (uint32_t)runtimes::OpenXR::SwapchainIndex::FRAMEWORK_UI;
+    namespace hp = uevr::hook_profiler;
 
     auto vr = VR::get();
 
@@ -7493,7 +7505,11 @@ bool D3D12Component::OpenXR::copy(
         }
 
         XrSwapchainImageAcquireInfo acquire_info{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        auto result = xrAcquireSwapchainImage(swapchain.handle, &acquire_info, &texture_index);
+        XrResult result{};
+        {
+            hp::Scope hp_acquire{hp::copy_part(hp_ui, hp::EyeAcquire)};
+            result = xrAcquireSwapchainImage(swapchain.handle, &acquire_info, &texture_index);
+        }
 
         if (retained_native_sources && result != XR_SUCCESS && result != XR_SESSION_LOSS_PENDING) {
             SPDLOG_WARNING_EVERY_N_SEC(2, "[OpenXR][native] Array acquire deferred: {}", vr->m_openxr->get_result_string(result));
@@ -7530,7 +7546,10 @@ bool D3D12Component::OpenXR::copy(
         } else {
             XrSwapchainImageWaitInfo wait_info{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
             wait_info.timeout = XR_INFINITE_DURATION;
-            result = xrWaitSwapchainImage(swapchain.handle, &wait_info);
+            {
+                hp::Scope hp_wait_image{hp::copy_part(hp_ui, hp::EyeWaitImage)};  // EXPERIMENT (R22)
+                result = xrWaitSwapchainImage(swapchain.handle, &wait_info);
+            }
 
             if (result != XR_SUCCESS) {
                 spdlog::error("[VR] xrWaitSwapchainImage failed: {}", vr->m_openxr->get_result_string(result));
@@ -7549,8 +7568,14 @@ bool D3D12Component::OpenXR::copy(
     }
 
     auto& texture_ctx = ctx.texture_contexts[texture_index];
+    const double hp_ctx_start = hp::on() ? hp::now_ms() : 0.0;  // EXPERIMENT (R22)
     const bool retired = retained_native_sources != nullptr
         ? uevr::native_array::reclaim_array_commands(texture_ctx->commands) : texture_ctx->commands.wait(INFINITE);
+    double hp_record_start = 0.0;
+    if (hp::on()) {
+        hp_record_start = hp::now_ms();
+        hp::state().parts[hp::copy_part(hp_ui, hp::EyeCtxWait)].add(hp_record_start - hp_ctx_start);
+    }
     if (retained_native_sources != nullptr) {
         if (!retired || !texture_ctx->commands.ready()) { release_acquired(swapchain_idx); return false; }
         if (ctx.native_array_sources.size() != ctx.textures.size()) { release_acquired(swapchain_idx); return false; }
@@ -7623,7 +7648,13 @@ bool D3D12Component::OpenXR::copy(
     const bool native_recorded = retained_native_sources && texture_ctx->commands.has_commands;
     const auto stalker_fence_before = retained_stalker_pair ? texture_ctx->commands.fence_value : 0;
     const bool stalker_recorded = retained_stalker_pair && texture_ctx->commands.has_commands;
-    texture_ctx->commands.execute();
+    if (hp::on() && hp_record_start > 0.0) {  // EXPERIMENT (R22): recording = after the context wait, up to execute
+        hp::state().parts[hp::copy_part(hp_ui, hp::EyeRecord)].add(hp::now_ms() - hp_record_start);
+    }
+    {
+        hp::Scope hp_execute{hp::copy_part(hp_ui, hp::EyeExecute)};
+        texture_ctx->commands.execute();
+    }
     const bool native_enqueued = retained_native_sources && uevr::native_array::copy_enqueued(native_recorded,
         texture_ctx->commands.ready(), texture_ctx->commands.waiting_for_fence, native_fence_before, texture_ctx->commands.fence_value);
     if (native_recorded && !native_enqueued) {

@@ -1038,6 +1038,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     // VR_PerfLog: the original Present call, and UEVR's own work around it (on_present/on_post_present).
     uevr::perf::PresentTimer perf_present{};
     const double hp_hook_start = uevr::hook_profiler::on() ? uevr::hook_profiler::now_ms() : 0.0;  // EXPERIMENT (R21)
+    uevr::present_ab::note_hook_entry();  // EXPERIMENT (R22): the present-skip watchdog
 
     if (d3d12->m_on_present) {
         d3d12->m_on_present(*d3d12);
@@ -1086,13 +1087,19 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
 
     auto result = S_OK;
     
-    if (!d3d12->m_ignore_next_present) {
+    // EXPERIMENT (R22, VR_ExperimentPresentHookAB "N,present"): the original Present left out in skip windows
+    const bool exp_skip_present = uevr::present_ab::skip_present();
+    if (exp_skip_present) {
+        ++uevr::hook_profiler::state().skipped_presents;
+    }
+
+    if (!d3d12->m_ignore_next_present && !exp_skip_present) {
         perf_present.begin_present();
         {
             // EXPERIMENT (R21, VR_EnableHitchDiagnostics): the original Present, and the params it got
             uevr::hook_profiler::Scope hp_present{uevr::hook_profiler::OriginalPresent};
             if (uevr::hook_profiler::on()) {
-                uevr::hook_profiler::note_present_params(swap_chain, sync_interval, flags);
+                uevr::hook_profiler::note_present_params(sync_interval, flags);
             }
             result = present_fn(swap_chain, sync_interval, flags, params);
         }
@@ -1142,7 +1149,7 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
 
     perf_present.finish();
     d3d12->m_inside_present = false;
-    if (uevr::hook_profiler::on()) {
+    if (uevr::hook_profiler::on() && hp_hook_start > 0.0) {  // not the frame the switch turned on in (R21's first line)
         uevr::hook_profiler::state().parts[uevr::hook_profiler::HookTotal].add(uevr::hook_profiler::now_ms() - hp_hook_start);
         uevr::hook_profiler::log_if_due(swap_chain);
     }
