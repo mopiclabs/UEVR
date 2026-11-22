@@ -158,6 +158,7 @@
 
 #include "FFakeStereoRenderingHook.hpp"
 #include "RtSceneShare.hpp"
+#include "GdfShare.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
@@ -29266,8 +29267,20 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         gdf_pending_changes += gdf_change_signal::take_changes();
     }
 
+    // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): where the GDF block is found and verified, the right
+    // eye's render uses the left eye's field for this frame and needs no refresh; when it stops sharing (a check failed),
+    // its own field is stale and is rebuilt in that frame.
+    bool gdf_share_refresh_now{false};
+    const bool gdf_share = uevr::gdf_share::on_right_submission(vr->is_native_stereo_fix_share_gdf_enabled(),
+        vr->get_debug_share_gdf_fail_verify(), reinterpret_cast<uintptr_t>(rtfrt),
+        reinterpret_cast<uintptr_t>(native_left_metadata.state), reinterpret_cast<uintptr_t>(native_right_metadata.state),
+        &gdf_share_refresh_now);
+
     bool gdf_rebuild{false};
-    if (gdf_signal && gdf_pending_changes > 0 && gdf_frames_since_refresh >= (uint32_t)gdf_change_refresh) {
+    if (gdf_share_refresh_now && gdf_refresh > 0) {
+        gdf_rebuild = true;
+        ++gdf_refreshes_backstop;
+    } else if (gdf_signal && gdf_pending_changes > 0 && gdf_frames_since_refresh >= (uint32_t)gdf_change_refresh) {
         gdf_rebuild = true;
         ++gdf_refreshes_on_change;
     } else if (gdf_cap > 0 && gdf_frames_since_refresh >= gdf_cap) {
@@ -29284,7 +29297,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         gdf_change_signal::log_totals(gdf_refreshes_on_change, gdf_refreshes_backstop);
     }
 
-    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild};
+    GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild && !gdf_share};
     uevr::rt_share::RightGatherCullHold second_rt_cull_hold{vr->is_experiment_right_eye_rt_share_cull_gather() &&
         uevr::rt_share::right_eye_shares_this_frame()};
 
@@ -30496,6 +30509,10 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
 
     const auto frame_count = *(uint32_t*)((uintptr_t)&view_family + SceneViewExtensionAnalyzer::frame_count_offset);
     uevr::rt_share::on_family_render(frame_count, reinterpret_cast<uintptr_t>(view_family.get_render_target()));
+    // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): exchange the GDF blocks back after the previous
+    // family's render, and exchange them for the right eye's family when the game thread chose to share.
+    uevr::gdf_share::on_family_render(vr->get_debug_share_gdf_fail_verify(),
+        reinterpret_cast<uintptr_t>(view_family.get_render_target()));
     struct NativePreRenderKey {
         uint32_t frame{};
         uintptr_t family{};
