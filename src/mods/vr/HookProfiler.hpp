@@ -79,22 +79,48 @@ inline bool skip_window() {
     return w >= 0 && w % 2 == 0;
 }
 
+inline std::atomic<bool> g_armed{false};  // 60 s of steady Presents seen (no hook gap over 250 ms)
+
 inline bool skip_present() {
-    return g_arm.load(std::memory_order_relaxed) == Present && !g_disabled.load(std::memory_order_relaxed) && skip_window();
+    return g_arm.load(std::memory_order_relaxed) == Present && g_armed.load(std::memory_order_relaxed) &&
+        !g_disabled.load(std::memory_order_relaxed) && skip_window();
 }
 
 inline bool skip_ui() { return g_arm.load(std::memory_order_relaxed) == Ui && skip_window(); }
 
-// Presenting thread, at every Present hook entry: the watchdog for the present skip.
+// Presenting thread, at every Present hook entry: the watchdog for the present skip (R22, second version: the first
+// counted a startup stall that began in a keep window). The skip starts only after 60 s without a hook gap over 250 ms.
+// Every gap over 250 ms is logged with the phase of the window it began in. Only gaps that began while Presents were
+// being skipped count: two of them in the same or consecutive skip windows turn the skip off for the rest of the run.
 inline void note_hook_entry() {
-    static double last_ms = 0.0;
+    static double last_ms = 0.0, steady_since = 0.0;
+    static bool last_skipping = false;
+    static int64_t last_counted_window = -10;
     const double now = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (last_ms > 0.0 && skip_present() && now - last_ms > 250.0) {
-        g_disabled = true;
-        spdlog::warn("[PresentHookAB] a Present hook came {:.0f} ms after the previous one in a skip window: the present skip is off for the rest of the run",
-            now - last_ms);
+    if (g_arm.load(std::memory_order_relaxed) == Present) {
+        const double gap = last_ms > 0.0 ? now - last_ms : 0.0;
+        if (gap > 250.0) {
+            steady_since = now;
+            const auto w = window_index();
+            spdlog::info("[PresentHookAB] hook gap {:.0f} ms, began in a {} window (now window {})", gap,
+                last_skipping ? "skip (Presents skipped)" : "keep / not armed", w);
+            if (last_skipping) {
+                if (w - last_counted_window <= 2) {
+                    g_disabled = true;
+                    spdlog::warn("[PresentHookAB] second hook gap begun while skipping within two windows: the present skip is off for the rest of the run");
+                }
+                last_counted_window = w;
+            }
+        } else if (steady_since == 0.0) {
+            steady_since = now;
+        }
+        if (!g_armed.load(std::memory_order_relaxed) && steady_since > 0.0 && now - steady_since > 60000.0) {
+            g_armed = true;
+            spdlog::info("[PresentHookAB] 60 s of steady Presents: the present skip starts with the next even window");
+        }
     }
     last_ms = now;
+    last_skipping = skip_present();
 }
 } // namespace uevr::present_ab
 
@@ -188,8 +214,9 @@ inline void log_if_due(IDXGISwapChain* current) {
         if (w == s.window) {
             return;
         }
-        label = fmt::format(" window {} ({}{})", s.window, s.window % 2 == 0 ? "skip" : "keep",
-            present_ab::g_disabled.load() ? ", present skip off by the watchdog" : "");
+        label = fmt::format(" window {} ({}{}{})", s.window, s.window % 2 == 0 ? "skip" : "keep",
+            present_ab::g_disabled.load() ? ", present skip off by the watchdog" : "",
+            present_ab::g_arm.load() == present_ab::Present && !present_ab::g_armed.load() ? ", present skip not armed yet" : "");
         s.window = w;
     } else {
         if (s.last_log.time_since_epoch().count() == 0) {
