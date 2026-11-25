@@ -2027,6 +2027,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/GalacticRacerRHICommand.hpp"
 	"src/mods/vr/GalacticRacerRenderTargets.hpp"
 	"src/mods/vr/GamepadRecovery.hpp"
+	"src/mods/vr/GdfShare.hpp"
 	"src/mods/vr/GearsEDayAim.hpp"
 	"src/mods/vr/GearsEDayAllocation.hpp"
 	"src/mods/vr/GearsEDayNativeContracts.hpp"

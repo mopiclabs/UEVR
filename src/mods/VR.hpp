@@ -1765,6 +1765,11 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_second_lumen_surface_cache_freeze{ ModToggle::create(generate_name("NativeStereoFixSecondLumenSurfaceCacheFreeze"), true) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshFrames"), 15) };
     const ModInt32::Ptr m_native_stereo_fix_second_gdf_refresh_on_change_frames{ ModInt32::create(generate_name("NativeStereoFixSecondGlobalDistanceFieldRefreshOnChangeFrames"), 8) };
+    // VR_NativeStereoFixShareGlobalDistanceField: the default (on) acts only where the GDF block is found and verified
+    // (vr/GdfShare.hpp: validated engine layouts, today UE 5.0); everywhere else the right eye's refresh runs as before.
+    const ModToggle::Ptr m_native_stereo_fix_share_gdf{ ModToggle::create(generate_name("NativeStereoFixShareGlobalDistanceField"), true) };
+    // Debug (default 0): 1 / 2 fail the GDF share's game / render thread check on purpose, to see the refresh take over.
+    const ModInt32::Ptr m_debug_share_gdf_fail_verify{ ModInt32::create(generate_name("DebugShareGlobalDistanceFieldFailVerify"), 0) };
     const ModInt32::Ptr m_experiment_right_eye_rt_share{ ModInt32::create(generate_name("ExperimentRightEyeRTShare"), 0) };
     const ModToggle::Ptr m_experiment_right_eye_rt_share_cull_gather{ ModToggle::create(generate_name("ExperimentRightEyeRTShareCullGather"), false) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
@@ -2121,6 +2126,8 @@ public:
             *m_native_stereo_fix_second_lumen_surface_cache_freeze,
             *m_native_stereo_fix_second_gdf_refresh_frames,
             *m_native_stereo_fix_second_gdf_refresh_on_change_frames,
+            *m_native_stereo_fix_share_gdf,
+            *m_debug_share_gdf_fail_verify,
             *m_experiment_right_eye_rt_share,
             *m_experiment_right_eye_rt_share_cull_gather,
             *m_native_stereo_fix_texture_array_submit,

@@ -158,6 +158,7 @@
 
 #include "FFakeStereoRenderingHook.hpp"
 #include "RtSceneShare.hpp"
+#include "GdfShare.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
@@ -29068,6 +29069,9 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     {
         LumenViewOriginHold first_hold{hold_lumen_origin};
+        // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): once, after a failed exchange back, the left
+        // eye's view state may hold the right eye's (stale) block: rebuild it in full in this render.
+        GlobalDistanceFieldFullUpdateHold first_gdf_hold{uevr::gdf_share::take_left_rebuild()};
         call_original();
     }
 
@@ -29095,6 +29099,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
     }
 
     // Render only the proven secondary view into the generation-owned target.
+    const auto gdf_share_left_target = reinterpret_cast<uintptr_t>(view_family->get_render_target());  // vr/GdfShare.hpp
     view_family->set_render_target(rtfrt);
     if (use_hellblade_paired_renderer_transaction) {
         views.data[0] = native_left_view;
@@ -29266,8 +29271,25 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
         gdf_pending_changes += gdf_change_signal::take_changes();
     }
 
+    // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): where the GDF block is found and verified, the right
+    // eye's render uses the left eye's field for this frame and needs no refresh; when it stops sharing (a check failed),
+    // its own field is stale and is rebuilt in that frame.
+    // In shared frames nothing is counted or reset here: no rebuild runs, and when sharing stops the rebuild comes at once.
+    static uint64_t gdf_refreshes_share_stop{0};  // of gdf_refreshes_backstop: the rebuilds when sharing stopped (log only)
+    bool gdf_share_refresh_now{false};
+    const bool gdf_share = uevr::gdf_share::on_right_submission(vr->is_native_stereo_fix_share_gdf_enabled(),
+        vr->get_debug_share_gdf_fail_verify(), gdf_share_left_target, reinterpret_cast<uintptr_t>(rtfrt),
+        reinterpret_cast<uintptr_t>(native_left_metadata.state), reinterpret_cast<uintptr_t>(native_right_metadata.state),
+        &gdf_share_refresh_now);
+
     bool gdf_rebuild{false};
-    if (gdf_signal && gdf_pending_changes > 0 && gdf_frames_since_refresh >= (uint32_t)gdf_change_refresh) {
+    if (gdf_share) {
+        // shared: no rebuild (vr/GdfShare.hpp counts the frames the render thread exchanged)
+    } else if (gdf_share_refresh_now && gdf_refresh > 0) {
+        gdf_rebuild = true;
+        ++gdf_refreshes_backstop;
+        ++gdf_refreshes_share_stop;
+    } else if (gdf_signal && gdf_pending_changes > 0 && gdf_frames_since_refresh >= (uint32_t)gdf_change_refresh) {
         gdf_rebuild = true;
         ++gdf_refreshes_on_change;
     } else if (gdf_cap > 0 && gdf_frames_since_refresh >= gdf_cap) {
@@ -29282,6 +29304,7 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
 
     if (gdf_change_signal::is_installed() && ++gdf_log_counter % 3600 == 0) {
         gdf_change_signal::log_totals(gdf_refreshes_on_change, gdf_refreshes_backstop);
+        uevr::gdf_share::log_progress(gdf_refreshes_share_stop);
     }
 
     GlobalDistanceFieldFullUpdateHold second_gdf_hold{gdf_rebuild};
@@ -30396,6 +30419,10 @@ void FFakeStereoRenderingHook::pre_render_view_renderthread(
 }
 
 void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExtension* extension, sdk::FRHICommandListBase* cmd_list, sdk::FSceneViewFamily& view_family) {
+    // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): backstop for the exchange back, before every early
+    // return (normally done in the same frame at Slate's DrawWindow_RenderThread).
+    uevr::gdf_share::exchange_back();
+
     // Install this before Dune validation and de-duplication so a delegated
     // slot-7 callback always services the queue exactly once.
     utility::ScopeGuard render_thread_worker_guard{[]() {
@@ -30496,6 +30523,10 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
 
     const auto frame_count = *(uint32_t*)((uintptr_t)&view_family + SceneViewExtensionAnalyzer::frame_count_offset);
     uevr::rt_share::on_family_render(frame_count, reinterpret_cast<uintptr_t>(view_family.get_render_target()));
+    // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): exchange the GDF blocks back after the previous
+    // family's render, and exchange them for the right eye's family when the game thread chose to share.
+    uevr::gdf_share::on_family_render(vr->get_debug_share_gdf_fail_verify(),
+        reinterpret_cast<uintptr_t>(view_family.get_render_target()));
     struct NativePreRenderKey {
         uint32_t frame{};
         uintptr_t family{};
@@ -39501,6 +39532,10 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
 #endif
 
     g_framework->notify_render_activity();
+
+    // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): Slate draws the window after the frame's scene
+    // renders; exchange the GDF blocks back here, in the same frame, and mark this point as alive.
+    uevr::gdf_share::on_post_render_point();
 
     if (!g_framework->is_game_data_intialized() || a2 == nullptr) {
         return g_hook->m_slate_thread_hook.call<void*>(renderer, a2, a3, a4, params, unk1, unk2);

@@ -41,6 +41,16 @@
         return m_native_stereo_fix_second_gdf_refresh_on_change_frames->value();
     }
 
+    // VR_NativeStereoFixShareGlobalDistanceField (default on, acts only where the block is found and verified): the right
+    // eye's render uses the left eye's Global Distance Field for the frame, and its refresh above is skipped in those
+    // frames (see vr/GdfShare.hpp). VR_DebugShareGlobalDistanceFieldFailVerify (default 0): the failure-path check.
+    bool is_native_stereo_fix_share_gdf_enabled() const {
+        return m_native_stereo_fix_share_gdf->value();
+    }
+    int32_t get_debug_share_gdf_fail_verify() const {
+        return m_debug_share_gdf_fail_verify->value();
+    }
+
     // VR_ExperimentRightEyeRTShare (EXPERIMENT, default 0 = off, 2 in Hogwarts Legacy (VR::on_config_load); 1 = observe
     // and validate, 2 = share once validated, 3 = share in even 10-second QPC windows): the Native Stereo Fix right
     // eye's renderer borrows the ray tracing scene the left eye's renderer built in the same frame (see RtSceneShare.hpp).

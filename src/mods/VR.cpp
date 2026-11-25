@@ -9555,6 +9555,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "leaves the mesh where it was (one attached to an animated skeletal mesh standing still) does not count, "
                 "and a mesh that moves in every frame (sent in every frame, where its world position can't be read) stops "
                 "counting after 60 frames.");
+            m_native_stereo_fix_share_gdf->draw("Share the Left Eye's Distance Field With the Right Eye");
+            ImGui::TextWrapped(
+                "Default on. The right eye's render uses the distance field the left eye's render just updated instead of "
+                "its own, and the refresh above is skipped while it does (Black Myth: Wukong: about 3% more fps, no "
+                "rebuild spikes, eyes unchanged). Acts only on engine versions with a validated layout (today UE 5.0) and "
+                "where the field is found and checked by name in every frame; anywhere else the refresh runs as before.");
             m_native_stereo_fix_disable_frame_generation->draw("Turn Off Frame Generation");
             ImGui::TextWrapped(
                 "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "
