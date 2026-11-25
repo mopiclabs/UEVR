@@ -410,6 +410,159 @@ static void test_step_strikes() {
     ar::StepStrikes u{};
     expect(!u.verdict(true, 10.0), "a misread, then the GPU went NORMAL: no retake");
     expect(!u.verdict(true, 200.0), "minutes later another misread is a first again, not the second");
+
+    ar::StepStrikes v{};
+    expect(!v.verdict(true, 10.0, 0.97f), "against at 0.97: put back");
+    expect(!v.verdict(true, 22.0, 1.18f), "against at 1.18 disagrees: put back again");
+    expect(v.verdict(true, 34.0, 1.12f), "against at 1.12 agrees with 1.18: out");
+
+    ar::StepStrikes w{};
+    expect(!w.verdict(true, 10.0, 0.80f) && !w.verdict(true, 22.0, 1.00f) && !w.verdict(true, 34.0, 1.20f),
+        "three against, none agreeing");
+    expect(w.verdict(true, 46.0, 1.40f), "the fourth against in a row goes out anyway");
+    expect(!w.verdict(true, 58.0, 1.40f), "the count started over");
+}
+
+// compare_scene / judge_trial / TrialDiscards: a trial whose seconds show the content changing is not a verdict.
+struct FpsGpu {
+    float fps;
+    float gpu_ms;
+};
+
+static std::vector<ar::SecondReading> seconds_at(std::initializer_list<FpsGpu> fps_and_gpu_ms) {
+    std::vector<ar::SecondReading> out{};
+
+    for (const auto& [fps, gpu_ms] : fps_and_gpu_ms) {
+        // busy = GPU ms per frame x frames per second / 10
+        out.push_back(ar::SecondReading{1.0f, (uint64_t)fps, gpu_ms * fps / 10.0f});
+    }
+
+    return out;
+}
+
+static void test_scene_check() {
+    // Wukong, 3080L, 2026-11-23: the step inside a loading picture rendered at 37 fps / 22 ms, the play after it at
+    // 29 fps / 26 ms from 3 s before the verdict.
+    const auto picture = seconds_at({{37, 22.1f}, {37, 22.0f}, {38, 22.2f}, {37, 22.1f}});
+    const auto picture_then_play = seconds_at({{37, 22.0f}, {37, 22.1f}, {29, 26.2f}, {29, 26.0f}, {30, 26.1f}});
+    const auto incident = ar::compare_scene(picture, picture_then_play);
+    expect(incident.read == ar::SceneRead::changed, "the loading picture -> play inside the after-window is a scene change");
+    expect(incident.after.jump > ar::SCENE_JUMP && incident.before.jump < 0.05f, "the jump is after the step, the before is steady");
+    // With the cut inside a second, that second's mix dilutes the jump under SCENE_JUMP: the scene check alone misses it,
+    // and the strikes' agreement rule is what keeps it from leaving the actuator out (test_judge_trial).
+    const auto mixed = seconds_at({{37, 22.0f}, {37, 22.1f}, {33, 24.0f}, {29, 26.0f}, {30, 26.1f}});
+    expect(ar::compare_scene(picture, mixed).read == ar::SceneRead::same, "a cut inside a second can read as one scene");
+
+    // A step that works changes the level once, at the step: each side stays level.
+    const auto play = seconds_at({{35, 25.0f}, {36, 24.6f}, {34, 25.3f}, {35, 25.1f}});
+    const auto play_after_step = seconds_at({{40, 22.0f}, {41, 21.8f}, {39, 22.3f}, {40, 22.1f}, {40, 22.0f}});
+    expect(ar::compare_scene(play, play_after_step).read == ar::SceneRead::same, "a step's own change is not a scene change");
+
+    // Play's own variation, Wukong-like: +-10 % a second and a hitch second, stays one scene.
+    const auto noisy = seconds_at({{38, 24.0f}, {33, 26.0f}, {36, 25.0f}, {30, 25.5f}, {37, 24.2f}});
+    expect(ar::compare_scene(play, noisy).read == ar::SceneRead::same, "play's own +-10 % is one scene");
+
+    // A scene change in the before-window (the step 0.7 s into play after a menu).
+    const auto menu_then_play = seconds_at({{60, 9.0f}, {60, 9.2f}, {38, 24.0f}, {37, 24.5f}});
+    expect(ar::compare_scene(menu_then_play, play_after_step).read == ar::SceneRead::changed, "a change before the step");
+
+    // GPU time alone: a GPU-bound jump at a fixed frame rate (TEKKEN at 60).
+    const auto fixed_light = seconds_at({{60, 10.0f}, {60, 10.1f}, {60, 9.9f}, {60, 10.0f}});
+    const auto fixed_heavy_mid = seconds_at({{60, 10.0f}, {60, 10.2f}, {60, 13.8f}, {60, 14.0f}, {60, 13.9f}});
+    const auto fixed = ar::compare_scene(fixed_light, fixed_heavy_mid);
+    expect(fixed.read == ar::SceneRead::changed && fixed.after.gpu, "a GPU-time jump at a fixed frame rate is a change");
+
+    // The engine stopped for seconds on one side (a stall the stall clock missed): a change.
+    const auto stopped = seconds_at({{0, 0.0f}, {0, 0.0f}, {40, 22.0f}, {40, 22.1f}});
+    expect(ar::compare_scene(play, stopped).read == ar::SceneRead::changed, "no frames on one side is a change");
+
+    // Too few seconds (the sampler is off or just started): unknown, judged as before.
+    expect(ar::compare_scene({}, play_after_step).read == ar::SceneRead::unknown, "no sampler seconds: unknown");
+    expect(ar::compare_scene(seconds_at({{35, 25.0f}, {35, 25.0f}, {35, 25.0f}}), play_after_step).read == ar::SceneRead::unknown,
+        "three seconds before: unknown");
+}
+
+static void test_judge_trial() {
+    // The incident: the first verdict (in play, -3 %) was "no effect"; the second came across the loading picture.
+    {
+        ar::StepStrikes strikes{};
+        ar::TrialDiscards discards{};
+        const auto first = ar::judge_trial(ar::TrialReading{.gpu_ms_before = 25.0f, .gpu_ms_after = 24.3f, .fps_before = 35.0f,
+            .fps_after = 35.5f, .scene = ar::SceneRead::same}, strikes, discards, 100.0);
+        expect(first.outcome == ar::TrialOutcome::put_back && first.effect == ar::StepEffect::nothing, "in play: no effect, put back");
+        const auto second = ar::judge_trial(ar::TrialReading{.gpu_ms_before = 22.1f, .gpu_ms_after = 26.1f, .fps_before = 37.3f,
+            .fps_after = 29.3f, .scene = ar::SceneRead::changed}, strikes, discards, 130.0);
+        expect(second.outcome == ar::TrialOutcome::rescheduled && second.slower, "across the picture: rescheduled, not out");
+        expect(strikes.count == 1, "the rescheduled trial moves no strike");
+        const auto retake = ar::judge_trial(ar::TrialReading{.gpu_ms_before = 26.0f, .gpu_ms_after = 23.0f, .fps_before = 29.0f,
+            .fps_after = 33.0f, .scene = ar::SceneRead::same}, strikes, discards, 142.0);
+        expect(retake.outcome == ar::TrialOutcome::works && strikes.count == 0, "the retake in play judges it: works");
+    }
+
+    // The same with the scene check missing the cut: the two verdicts against disagree (0.97 and 1.18), so the second
+    // only puts the step back; a retake in play that agrees with the first leaves it out, as a step that does nothing.
+    {
+        ar::StepStrikes strikes{};
+        ar::TrialDiscards discards{};
+        const auto in_play = ar::TrialReading{.gpu_ms_before = 25.0f, .gpu_ms_after = 24.3f, .fps_before = 35.0f,
+            .fps_after = 35.5f, .scene = ar::SceneRead::same};
+        expect(ar::judge_trial(in_play, strikes, discards, 100.0).outcome == ar::TrialOutcome::put_back, "1st: put back");
+        const auto across = ar::judge_trial(ar::TrialReading{.gpu_ms_before = 22.1f, .gpu_ms_after = 26.1f, .fps_before = 37.3f,
+            .fps_after = 29.3f, .scene = ar::SceneRead::same}, strikes, discards, 130.0);
+        expect(across.outcome == ar::TrialOutcome::put_back, "across the picture, disagreeing: put back, not out");
+        expect(ar::judge_trial(in_play, strikes, discards, 142.0).outcome == ar::TrialOutcome::out,
+            "a third, agreeing with the first: out");
+    }
+
+    // Without the scene check (unknown) and agreeing readings: two against in a row leave it out, as before.
+    {
+        ar::StepStrikes strikes{};
+        ar::TrialDiscards discards{};
+        const auto reading = ar::TrialReading{.gpu_ms_before = 22.1f, .gpu_ms_after = 26.1f, .fps_before = 37.3f, .fps_after = 29.3f};
+        expect(ar::judge_trial(reading, strikes, discards, 10.0).outcome == ar::TrialOutcome::put_back, "unknown: judged, put back");
+        expect(ar::judge_trial(reading, strikes, discards, 22.0).outcome == ar::TrialOutcome::out, "unknown: judged, out");
+    }
+
+    // A scene that keeps changing: two reschedules, then the third is kept unjudged; no strike at all.
+    {
+        ar::StepStrikes strikes{};
+        ar::TrialDiscards discards{};
+        const auto reading = ar::TrialReading{.gpu_ms_before = 20.0f, .gpu_ms_after = 20.0f, .fps_before = 40.0f,
+            .fps_after = 40.0f, .scene = ar::SceneRead::changed};
+        expect(ar::judge_trial(reading, strikes, discards, 10.0).outcome == ar::TrialOutcome::rescheduled, "1st: rescheduled");
+        expect(ar::judge_trial(reading, strikes, discards, 22.0).outcome == ar::TrialOutcome::rescheduled, "2nd: rescheduled");
+        expect(ar::judge_trial(reading, strikes, discards, 34.0).outcome == ar::TrialOutcome::kept_unjudged, "3rd: kept unjudged");
+        expect(strikes.count == 0, "no strike from a changing scene");
+        expect(ar::judge_trial(reading, strikes, discards, 46.0).outcome == ar::TrialOutcome::rescheduled,
+            "after a kept one the count starts over");
+    }
+
+    // A reading for the step with the scene changing is kept and doesn't clear a strike either.
+    {
+        ar::StepStrikes strikes{};
+        ar::TrialDiscards discards{};
+        (void)ar::judge_trial(ar::TrialReading{.gpu_ms_before = 20.0f, .gpu_ms_after = 20.0f, .fps_before = 40.0f,
+            .fps_after = 40.0f, .scene = ar::SceneRead::same}, strikes, discards, 10.0);
+        const auto lighter = ar::judge_trial(ar::TrialReading{.gpu_ms_before = 20.0f, .gpu_ms_after = 15.0f, .fps_before = 40.0f,
+            .fps_after = 50.0f, .scene = ar::SceneRead::changed}, strikes, discards, 22.0);
+        expect(lighter.outcome == ar::TrialOutcome::kept && strikes.count == 1, "a lighter scene's works: kept, the strike stays");
+    }
+
+    // A stall: not judged, nothing moves (as before).
+    {
+        ar::StepStrikes strikes{};
+        ar::TrialDiscards discards{};
+        const auto stalled = ar::judge_trial(ar::TrialReading{.stall = true, .gpu_ms_before = 20.0f, .gpu_ms_after = 30.0f,
+            .fps_before = 40.0f, .fps_after = 20.0f, .scene = ar::SceneRead::changed}, strikes, discards, 10.0);
+        expect(stalled.outcome == ar::TrialOutcome::not_judged && strikes.count == 0 && discards.count == 0, "a stall: not judged");
+    }
+
+    // Discards are forgotten like strikes: two minutes apart are firsts.
+    {
+        ar::TrialDiscards discards{};
+        expect(discards.discard(10.0) && discards.discard(22.0), "two in a row");
+        expect(discards.discard(200.0) && discards.count == 1, "minutes later a first again");
+    }
 }
 
 // StallClock: UEVR's stall (no new engine frame for 250 ms, or no Present for max(250 ms, 4x the usual interval)) and
@@ -627,6 +780,8 @@ int main() {
     test_internal_recovery();
     test_anchor_gate();
     test_step_strikes();
+    test_scene_check();
+    test_judge_trial();
     test_stall_clock();
     test_frame_generation();
 

@@ -152,7 +152,8 @@ private:
     clock::time_point m_next_adapter_lookup{};
 
     // An SP or upscaler step down is checked against the 3 s before it (check_step): the GPU time per frame 2-5 s
-    // after it (AutoResPolicy.hpp judge_step), and the frame rate (10 % slower leaves the actuator out).
+    // after it (AutoResPolicy.hpp judge_step), and the frame rate (10 % slower leaves the actuator out), when the
+    // seconds around it show one scene (compare_scene).
     struct StepCheck {
         uevr::autores::Actuator actuator{};
         int to{};          // the step it measures; any other step cancels it
@@ -174,6 +175,9 @@ private:
     // The verdicts against each in a row (AutoResPolicy.hpp StepStrikes), and when a step put back may be taken again.
     uevr::autores::StepStrikes m_sp_strikes{};
     uevr::autores::StepStrikes m_upscaler_strikes{};
+    // Trials against a step that saw the scene change, in a row (AutoResPolicy.hpp TrialDiscards).
+    uevr::autores::TrialDiscards m_sp_discards{};
+    uevr::autores::TrialDiscards m_upscaler_discards{};
     clock::time_point m_retake_after{};
     uevr::autores::GpuBusySampler m_gpu{};
 

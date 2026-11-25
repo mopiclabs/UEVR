@@ -235,6 +235,8 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_upscaler_cap = -1;
     m_sp_strikes = {};
     m_upscaler_strikes = {};
+    m_sp_discards = {};
+    m_upscaler_discards = {};
     m_retake_after = {};
     m_gpu.start();
     m_anchor_decided = false;
@@ -357,10 +359,29 @@ bool AutoResController::carry_out(runtimes::OpenXR& openxr, CVarManager& cvars, 
     }
     }
 
-    // An SP or upscaler step down is checked against the 3 s before it (check_step).
+    // An SP or upscaler step down is checked against the 3 s before it (check_step). The frame rate before is the GPU
+    // sampler's over the same seconds as the GPU time where it has them (the guards' 3 s window can be 3 s older).
     if (step.actuator != ar::Actuator::level && step.to > step.from && m_fps) {
-        m_step_check = StepCheck{.actuator = step.actuator, .to = step.to, .at = now, .fps_before = *m_fps,
-            .gpu_ms_before = m_gpu.gpu_ms_per_frame(now - std::chrono::milliseconds{3500}, now)};
+        const auto from = now - std::chrono::milliseconds{3500};
+        const auto seconds = m_gpu.seconds(from, now);
+        float fps_before = *m_fps;
+
+        if (seconds.size() >= 2) {
+            double length = 0.0;
+            uint64_t frames = 0;
+
+            for (const auto& second : seconds) {
+                length += second.seconds;
+                frames += second.frames;
+            }
+
+            if (length > 0.0 && frames > 0) {
+                fps_before = (float)((double)frames / length);
+            }
+        }
+
+        m_step_check = StepCheck{.actuator = step.actuator, .to = step.to, .at = now, .fps_before = fps_before,
+            .gpu_ms_before = m_gpu.gpu_ms_per_frame(from, now)};
     }
 
     ar::apply(m_state, step);
@@ -761,6 +782,8 @@ void AutoResController::sync_available(CVarManager& cvars) {
 // takes it again 5 s later from a fresh "before" (a scene change can read as the step's, StepStrikes). The second in a
 // row stops the actuator at the step before it for the session, or leaves it out if it was the first, and a request
 // still wanted goes to the next actuator. A window with a stall or a load in it is not judged and counts neither way.
+// Nor is a reading against the step while the seconds around it show the scene changing (compare_scene, judge_trial):
+// the step is put back and taken again without a strike, twice in a row at most, then kept unjudged.
 void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     if (!m_step_check) {
         return;
@@ -800,32 +823,65 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         std::chrono::duration<float>(now - check.window_start).count();
     const auto gpu_ms_after = m_gpu.gpu_ms_per_frame(check.window_start, now);
     const auto name = check.actuator == ar::Actuator::sp ? "SP" : "upscaler";
-    const auto slower = !check.loading && fps_after < 0.9f * check.fps_before;
-    const auto effect = check.loading || !check.gpu_ms_before || !gpu_ms_after ? ar::StepEffect::unclear
-        : ar::judge_step(*check.gpu_ms_before, *gpu_ms_after);
-    const auto fmt_ms = [](const std::optional<float>& ms) { return ms ? fmt::format("{:.1f}", *ms) : std::string{"-"}; };
-    const auto against = slower || effect == ar::StepEffect::nothing;
+    const auto span = [](float seconds) {
+        return std::chrono::duration_cast<clock::duration>(std::chrono::duration<float>{seconds});
+    };
+    // The seconds around the step: one scene, or a change the step can't have made (AutoResPolicy.hpp compare_scene).
+    const auto scene = ar::compare_scene(m_gpu.seconds(check.at - span(ar::SCENE_BEFORE_SECONDS), check.at),
+        m_gpu.seconds(check.at + span(ar::SCENE_AFTER_FROM_SECONDS), now));
     auto& strikes = check.actuator == ar::Actuator::sp ? m_sp_strikes : m_upscaler_strikes;
-    const auto out = !check.loading && strikes.verdict(against, std::chrono::duration<double>(now.time_since_epoch()).count());
+    auto& discards = check.actuator == ar::Actuator::sp ? m_sp_discards : m_upscaler_discards;
+    const auto verdict = ar::judge_trial(ar::TrialReading{.stall = check.loading, .gpu_ms_before = check.gpu_ms_before,
+        .gpu_ms_after = gpu_ms_after, .fps_before = check.fps_before, .fps_after = fps_after, .scene = scene.read},
+        strikes, discards, std::chrono::duration<double>(now.time_since_epoch()).count());
+    const auto fmt_ms = [](const std::optional<float>& ms) { return ms ? fmt::format("{:.1f}", *ms) : std::string{"-"}; };
+    const auto fmt_jump = [](const ar::SceneJump& jump) {
+        return jump.jump >= 1e8f ? std::string{"frames stopped"}
+            : fmt::format("{} {:.1f} -> {:.1f}, {:.0f} %", jump.gpu ? "GPU ms" : "fps", jump.from, jump.to, 100.0f * jump.jump);
+    };
     // The steps before this one were kept (each was checked), so only this one goes back.
     const auto keep = check.to - 1;
-    const auto out_what = !out ? std::string{"put back, taken again if still wanted"}
-        : keep > 0 ? fmt::format("back to step {} and no further for the session", keep)
-                   : std::string{"put back and left out for the session"};
+    const auto against = verdict.slower || verdict.effect == ar::StepEffect::nothing;
+    const char* what = verdict.slower ? "slower" : verdict.effect == ar::StepEffect::nothing ? "no effect"
+        : verdict.effect == ar::StepEffect::works ? "works" : "kept";
+    std::string outcome{};
 
-    SPDLOG_INFO("[autores] {} step {}: GPU {} -> {} ms per frame{}, {:.1f} -> {:.1f} fps{}: {}", name, check.to,
-        fmt_ms(check.gpu_ms_before), fmt_ms(gpu_ms_after),
+    switch (verdict.outcome) {
+    case ar::TrialOutcome::works:
+    case ar::TrialOutcome::kept:
+        outcome = against ? fmt::format("reads {} but the scene changed, kept, not judged", what) : std::string{what};
+        break;
+    case ar::TrialOutcome::put_back:
+        outcome = fmt::format("{}, put back, taken again if still wanted", what);
+        break;
+    case ar::TrialOutcome::out:
+        outcome = fmt::format("{}, {}", what, keep > 0 ? fmt::format("back to step {} and no further for the session", keep)
+                                                       : std::string{"put back and left out for the session"});
+        break;
+    case ar::TrialOutcome::rescheduled:
+        outcome = fmt::format("reads {} but the scene changed, not judged: put back, taken again if still wanted", what);
+        break;
+    case ar::TrialOutcome::kept_unjudged:
+        outcome = fmt::format("reads {} but the scene changed ({} trials in a row), kept, not judged", what,
+            ar::TrialDiscards::MAX_IN_A_ROW + 1);
+        break;
+    case ar::TrialOutcome::not_judged:
+        outcome = "kept";
+        break;
+    }
+
+    SPDLOG_INFO("[autores] {} step {}: GPU {} -> {} ms per frame{}, {:.1f} -> {:.1f} fps{}: {}; scene {} (before: {}; after: {})",
+        name, check.to, fmt_ms(check.gpu_ms_before), fmt_ms(gpu_ms_after),
         check.gpu_ms_before && gpu_ms_after && *check.gpu_ms_before > 0.0f
             ? fmt::format(" ({:+.0f} %)", 100.0f * (*gpu_ms_after / *check.gpu_ms_before - 1.0f)) : std::string{},
-        check.fps_before, fps_after, check.loading ? " (a stall or a level change in between, not judged)" : "",
-        slower ? fmt::format("slower, {}", out_what)
-        : effect == ar::StepEffect::nothing ? fmt::format("no effect, {}", out_what)
-        : effect == ar::StepEffect::works ? "works" : "kept");
+        check.fps_before, fps_after, check.loading ? " (a stall or a level change in between, not judged)" : "", outcome,
+        scene.read == ar::SceneRead::changed ? "changed" : scene.read == ar::SceneRead::same ? "same" : "unknown",
+        fmt_jump(scene.before), fmt_jump(scene.after));
 
     const auto actuator = check.actuator;
     m_step_check.reset();
 
-    if (against && !out) {
+    if (verdict.outcome == ar::TrialOutcome::put_back || verdict.outcome == ar::TrialOutcome::rescheduled) {
         // Back to the step before; the request still wanted takes it again from RETAKE_SECONDS on, so the next check's
         // "before" is this state's.
         auto& steps = actuator == ar::Actuator::sp ? m_state.sp : m_state.upscaler;
@@ -844,7 +900,7 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         return;
     }
 
-    if (out) {
+    if (verdict.outcome == ar::TrialOutcome::out) {
         if (keep > 0) {
             (actuator == ar::Actuator::sp ? m_sp_cap : m_upscaler_cap) = keep;
         } else {
