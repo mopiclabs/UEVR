@@ -453,6 +453,23 @@ static void test_scene_check() {
     const auto mixed = seconds_at({{37, 22.0f}, {37, 22.1f}, {33, 24.0f}, {29, 26.0f}, {30, 26.1f}});
     expect(ar::compare_scene(picture, mixed).read == ar::SceneRead::same, "a cut inside a second can read as one scene");
 
+    // The incident's own perf.csv rows (3080L, 2026-11-23). Step 2 at 05:55:57.7 inside the loading picture: before
+    // 05:55:54-57, after 05:55:59-05:56:04 with the 143 ms tick second at 05:56:01. GPU per second is not in the data:
+    // 22.1 ms on the picture, 26.1 in play (the trial's own readings), so the frame rate carries it.
+    {
+        const auto before = seconds_at({{37, 22.1f}, {38, 22.1f}, {37, 22.1f}, {38, 22.1f}});
+        const auto after = seconds_at({{39, 22.1f}, {36, 22.1f}, {39, 22.1f}, {23, 22.1f}, {27, 26.1f}, {31, 26.1f}});
+        const auto real = ar::compare_scene(before, after);
+        expect(real.read == ar::SceneRead::changed && !real.after.gpu && real.after.jump > 0.40f,
+            "the incident's trial: fps 38 -> 27 after the step, a 41 % jump");
+        const auto clean = seconds_at({{39, 22.1f}, {36, 22.1f}, {39, 22.1f}, {27, 26.1f}, {31, 26.1f}});
+        expect(ar::compare_scene(before, clean).read == ar::SceneRead::changed, "without the tick second still 31 %");
+        // Its first step (05:55:29, in play, read no effect): one scene, judged as before.
+        const auto play_before = seconds_at({{29, 28.9f}, {28, 28.9f}, {28, 28.9f}, {26, 28.9f}});
+        const auto play_after = seconds_at({{31, 27.7f}, {30, 27.7f}, {27, 27.7f}, {28, 27.7f}, {25, 27.7f}});
+        expect(ar::compare_scene(play_before, play_after).read == ar::SceneRead::same, "the incident's first trial: same");
+    }
+
     // A step that works changes the level once, at the step: each side stays level.
     const auto play = seconds_at({{35, 25.0f}, {36, 24.6f}, {34, 25.3f}, {35, 25.1f}});
     const auto play_after_step = seconds_at({{40, 22.0f}, {41, 21.8f}, {39, 22.3f}, {40, 22.1f}, {40, 22.0f}});
