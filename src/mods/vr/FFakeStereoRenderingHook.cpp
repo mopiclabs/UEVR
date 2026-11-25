@@ -10016,6 +10016,185 @@ bool is_probable_new_rhi_command(sdk::FRHICommandBase_New* command, const char*&
     return true;
 }
 
+// UE5.1+ passes IStereoRendering::RenderTexture_RenderThread an FRDGBuilder&, not the immediate command list, so the
+// Slate worker's legacy Root read lands on the builder and falls back to enqueuing poses straight from the render
+// thread, unordered with the RHI thread's Present (a frame's image can then be submitted with the next frame's poses).
+// The builder holds a reference to the immediate list. Find it once by the list's own structure (no offsets): a
+// builder field pointing into a loaded module whose target has Root followed by CommandLink, CommandLink pointing at
+// Root (empty) or at the 'next' field of the last command reachable from Root. Accept it after the same field gives
+// the same list on 3 calls in a row. Per frame only cheap checks; any failure: the caller keeps today's direct enqueue.
+namespace slate_rdg_list {
+constexpr size_t BUILDER_SCAN = 0x400, LIST_SCAN = 0x80, MAX_CHAIN = 64;
+constexpr uint32_t DISCOVERY_CALLS = 120, MAX_CONSECUTIVE_FAILURES = 600;
+
+struct State {
+    size_t field{SIZE_MAX};       // builder field holding the list pointer
+    uintptr_t list{};             // the immediate list
+    size_t root_offset{};         // Root's offset in the list (CommandLink follows)
+    uintptr_t module_begin{}, module_end{};  // image the list lives in (its commands' vtables too)
+    size_t pending_field{SIZE_MAX};
+    uintptr_t pending_list{};
+    size_t pending_root{};
+    uint32_t pending_hits{}, discovery_calls{}, consecutive_failures{};
+    bool disabled{};
+    uint64_t fallbacks{};
+    std::chrono::steady_clock::time_point last_fallback_log{};
+};
+
+State& state() {
+    static State s{};
+    return s;
+}
+
+// Plain reads that survive a bad address; no syscall on the good path.
+bool read_qword(uintptr_t address, uintptr_t& out) {
+    __try {
+        out = *reinterpret_cast<volatile uintptr_t*>(address);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Root/CommandLink invariant at list + offset (discovery only: bounded walk with guarded reads)
+bool list_invariant(uintptr_t list, size_t offset) {
+    uintptr_t root{}, link{};
+    if (!read_qword(list + offset, root) || !read_qword(list + offset + sizeof(void*), link)) {
+        return false;
+    }
+    if (root == 0) {
+        return link == list + offset;
+    }
+    uintptr_t command = root;
+    for (size_t steps = 0; command != 0 && steps < MAX_CHAIN; ++steps) {
+        if ((command & (alignof(void*) - 1)) != 0) {
+            return false;
+        }
+        if (link == command + sizeof(void*)) {
+            return true;
+        }
+        if (!read_qword(command + sizeof(void*), command)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+bool find_in_builder(uintptr_t builder, size_t& field, uintptr_t& list, size_t& root_offset) {
+    for (size_t f = 0; f < BUILDER_SCAN; f += sizeof(void*)) {
+        uintptr_t candidate{};
+        if (!read_qword(builder + f, candidate) || candidate == 0 || candidate == builder ||
+            (candidate & (alignof(void*) - 1)) != 0 || !utility::get_module_within((void*)candidate).has_value()) {
+            continue;
+        }
+        for (size_t o = 0; o < LIST_SCAN; o += sizeof(void*)) {
+            if (list_invariant(candidate, o)) {
+                field = f;
+                list = candidate;
+                root_offset = o;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void note_fallback(State& s, const char* reason) {
+    ++s.fallbacks;
+    if (++s.consecutive_failures >= MAX_CONSECUTIVE_FAILURES && s.list != 0) {
+        s.disabled = true;
+        SPDLOG_WARN("[SlateRDG] {} consecutive frames without a usable command ({}); render-thread poses for this session",
+            s.consecutive_failures, reason);
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (s.last_fallback_log.time_since_epoch().count() == 0) {
+        SPDLOG_INFO("[SlateRDG] No command to carry this frame's poses ({}); render-thread poses for such frames", reason);
+        s.last_fallback_log = now;
+    } else if (now - s.last_fallback_log >= std::chrono::seconds(30)) {
+        SPDLOG_INFO("[SlateRDG] {} frames used render-thread poses so far (last: {})", s.fallbacks, reason);
+        s.last_fallback_log = now;
+    }
+}
+
+// The newest command queued on the immediate list the builder refers to, or null (caller enqueues directly).
+// Render thread only.
+sdk::FRHICommandBase_New* newest_command(void* builder_ptr) {
+    auto& s = state();
+    const auto builder = reinterpret_cast<uintptr_t>(builder_ptr);
+    if (s.disabled || builder == 0) {
+        return nullptr;
+    }
+
+    if (s.list == 0) {
+        if (s.discovery_calls >= DISCOVERY_CALLS) {
+            return nullptr;
+        }
+        const auto give_up_if_last = [&s]() {
+            if (s.discovery_calls == DISCOVERY_CALLS) {
+                SPDLOG_INFO("[SlateRDG] No stable module-owned immediate command list found through the render graph "
+                            "builder; render-thread poses for this session");
+            }
+            return (sdk::FRHICommandBase_New*)nullptr;
+        };
+        ++s.discovery_calls;
+        size_t field{}, root_offset{};
+        uintptr_t list{};
+        if (!find_in_builder(builder, field, list, root_offset)) {
+            s.pending_hits = 0;
+            return give_up_if_last();
+        }
+        if (s.pending_hits > 0 && field == s.pending_field && list == s.pending_list && root_offset == s.pending_root) {
+            ++s.pending_hits;
+        } else {
+            s.pending_field = field;
+            s.pending_list = list;
+            s.pending_root = root_offset;
+            s.pending_hits = 1;
+        }
+        if (s.pending_hits < 3) {
+            return give_up_if_last();
+        }
+        const auto module = utility::get_module_within((void*)list);
+        const auto size = module ? utility::get_module_size(*module).value_or(0) : 0;
+        if (!module || size == 0) {
+            return give_up_if_last();
+        }
+        s.field = field;
+        s.list = list;
+        s.root_offset = root_offset;
+        s.module_begin = reinterpret_cast<uintptr_t>(*module);
+        s.module_end = s.module_begin + size;
+        SPDLOG_INFO("[SlateRDG] Immediate command list found through the render graph builder (field +0x{:x}, Root "
+                    "+0x{:x}); poses travel with the frame's RHI commands", field, root_offset);
+    }
+
+    uintptr_t list{}, root{}, link{}, vtable{}, execute{};
+    if (!read_qword(builder + s.field, list) || list != s.list) {
+        note_fallback(s, "builder no longer refers to the list");
+        return nullptr;
+    }
+    if (!read_qword(list + s.root_offset, root) || !read_qword(list + s.root_offset + sizeof(void*), link)) {
+        note_fallback(s, "list unreadable");
+        return nullptr;
+    }
+    if (root == 0 || link == list + s.root_offset) {
+        note_fallback(s, "list empty");
+        return nullptr;
+    }
+    // CommandLink points at the newest command's 'next' field
+    const auto newest = link - sizeof(void*);
+    if ((root & (alignof(void*) - 1)) != 0 || (link & (alignof(void*) - 1)) != 0 ||
+        !read_qword(newest, vtable) || vtable < s.module_begin || vtable >= s.module_end ||
+        !read_qword(vtable, execute) || execute < s.module_begin || execute >= s.module_end) {
+        note_fallback(s, "newest command failed validation");
+        return nullptr;
+    }
+    s.consecutive_failures = 0;
+    return reinterpret_cast<sdk::FRHICommandBase_New*>(newest);
+}
+}
+
 bool swgr_rhi_command_layout_validated() {
     if (!swgr_ue574_dx12_runtime()) { return false; }
     static const bool validated = [] {
@@ -30707,6 +30886,21 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
                     SceneViewExtensionAnalyzer::hook_old_rhi_command((sdk::FRHICommandBase_Old*)l->root, frame_count + compensation);
                 }
             } else {
+                // UE5.1+: the worker got the frame's FRDGBuilder. Carry the poses on the newest command of the immediate
+                // list it refers to, so the RHI thread hands them over between the previous Present and this frame's.
+                if (is_ue5) {
+                    static uint32_t last_carried_frame = UINT32_MAX;
+                    const auto carried = frame_count + compensation;
+                    if (carried == last_carried_frame) {
+                        return; // a second RenderTexture call of the same frame: its poses already ride on a command
+                    }
+                    if (auto* newest = slate_rdg_list::newest_command(command_list); newest != nullptr) {
+                        last_carried_frame = carried;
+                        SceneViewExtensionAnalyzer::hook_new_rhi_command(newest, carried);
+                        return;
+                    }
+                }
+
                 // welp
                 vr->get_runtime()->enqueue_render_poses(frame_count + compensation);
             }
