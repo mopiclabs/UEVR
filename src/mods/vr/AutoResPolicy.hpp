@@ -795,6 +795,49 @@ struct TrialDiscards {
     void judged() { count = 0; }
 };
 
+// A step kept unjudged (TrialOutcome::kept_unjudged) is not kept for good. The step was asked for (the GPU IMPAIRED) and
+// one trial in a scene that keeps changing says nothing about it; putting it back at once would only start the
+// put-back / retake flicker over and hold the GPU at the game's own internal resolution while it is IMPAIRED. But while
+// the GPU stays IMPAIRED nothing else takes it back (the next request steps past it; a NORMAL edge or the internal
+// recovery, off by default, would), so RECHECK_SECONDS later, outside a load and with no trial running, it is put back
+// once, and a request still wanted takes it again with a fresh trial (and two more reschedules). In a scene that never
+// settles that is one put-back a minute and the step on for most of it; a scene that settles gets its verdict.
+struct UnjudgedStep {
+    static constexpr double RECHECK_SECONDS = 60.0;
+
+    std::optional<Step> step{};
+    double due{0.0};
+
+    void kept(const Step& kept_step, double now_seconds) {
+        step = kept_step;
+        due = now_seconds + RECHECK_SECONDS;
+    }
+
+    // The step to put back now, once: due, not loading, no trial running, and the state at it. Below it (put back, the
+    // actuator gone out) the re-check ends; past it (a later step taken over it) it waits until the state is back at it,
+    // a later step capped there included.
+    std::optional<Step> take_due(const State& state, double now_seconds, bool loading, bool trial_running) {
+        if (!step) {
+            return std::nullopt;
+        }
+
+        const auto current = step->actuator == Actuator::sp ? state.sp : state.upscaler;
+
+        if (current < step->to) {
+            step.reset();
+            return std::nullopt;
+        }
+
+        if (current > step->to || now_seconds < due || loading || trial_running) {
+            return std::nullopt;
+        }
+
+        const auto kept_step = *step;
+        step.reset();
+        return Step{kept_step.actuator, kept_step.to, kept_step.from};
+    }
+};
+
 // One trial's outcome (check_step), from its readings: whether a stall or a level change fell in it, the GPU time per
 // frame and the frame rate before and after, and the scene check.
 enum class TrialOutcome : uint8_t {

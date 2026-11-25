@@ -557,6 +557,30 @@ static void test_judge_trial() {
         expect(stalled.outcome == ar::TrialOutcome::not_judged && strikes.count == 0 && discards.count == 0, "a stall: not judged");
     }
 
+    // A step kept unjudged is put back once a minute later for a fresh trial, not kept for the session.
+    {
+        ar::State state{};
+        state.upscaler = 1;
+        ar::UnjudgedStep unjudged{};
+        unjudged.kept(ar::Step{ar::Actuator::upscaler, 0, 1}, 100.0);
+        expect(!unjudged.take_due(state, 130.0, false, false), "not before a minute");
+        expect(!unjudged.take_due(state, 161.0, true, false), "not while loading");
+        expect(!unjudged.take_due(state, 162.0, false, true), "not while a trial runs");
+        const auto back = unjudged.take_due(state, 163.0, false, false);
+        expect(back && back->actuator == ar::Actuator::upscaler && back->from == 1 && back->to == 0, "then put back, once");
+        expect(!unjudged.take_due(state, 200.0, false, false), "only once");
+
+        unjudged.kept(ar::Step{ar::Actuator::upscaler, 0, 1}, 300.0);
+        state.upscaler = 2;
+        expect(!unjudged.take_due(state, 400.0, false, false), "a later step over it: waits");
+        state.upscaler = 1;
+        expect(unjudged.take_due(state, 401.0, false, false).has_value(), "back at it (the later step capped): put back");
+
+        unjudged.kept(ar::Step{ar::Actuator::upscaler, 0, 1}, 500.0);
+        state.upscaler = 0;
+        expect(!unjudged.take_due(state, 501.0, false, false) && !unjudged.step, "put back or gone out meanwhile: ends");
+    }
+
     // Discards are forgotten like strikes: two minutes apart are firsts.
     {
         ar::TrialDiscards discards{};

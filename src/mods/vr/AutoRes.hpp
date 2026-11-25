@@ -178,6 +178,8 @@ private:
     // Trials against a step that saw the scene change, in a row (AutoResPolicy.hpp TrialDiscards).
     uevr::autores::TrialDiscards m_sp_discards{};
     uevr::autores::TrialDiscards m_upscaler_discards{};
+    // A step kept unjudged, put back once a minute later for a fresh trial (UnjudgedStep).
+    uevr::autores::UnjudgedStep m_unjudged{};
     clock::time_point m_retake_after{};
     uevr::autores::GpuBusySampler m_gpu{};
 

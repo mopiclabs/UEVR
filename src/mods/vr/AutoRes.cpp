@@ -236,6 +236,7 @@ void AutoResController::activate(runtimes::OpenXR& openxr, CVarManager& cvars, c
     m_sp_strikes = {};
     m_upscaler_strikes = {};
     m_sp_discards = {};
+    m_unjudged = {};
     m_upscaler_discards = {};
     m_retake_after = {};
     m_gpu.start();
@@ -430,6 +431,28 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     }
 
     check_step(cvars, inputs);
+
+    // A step kept unjudged a minute ago: put back once, a request still wanted takes it again with a fresh trial.
+    if (const auto back = m_unjudged.take_due(m_state, std::chrono::duration<double>(now.time_since_epoch()).count(),
+            inputs.loading, m_step_check.has_value())) {
+        const auto available = back->actuator == ar::Actuator::sp ? m_available.sp : m_available.upscaler;
+
+        if (available) {
+            (back->actuator == ar::Actuator::sp ? m_state.sp : m_state.upscaler) = back->to;
+
+            if (back->actuator == ar::Actuator::sp) {
+                cvars.set_autores_sp(ar::SP_PERCENT[back->to]);
+            } else {
+                cvars.set_autores_upscaler(back->to);
+            }
+
+            m_last_action = now;
+            m_retake_after = now + std::chrono::seconds{ar::StepStrikes::RETAKE_SECONDS};
+            m_waiting_logged = false;
+            SPDLOG_INFO("[autores] {} step {} kept unjudged {:.0f} s ago: put back for a fresh trial, taken again if still wanted",
+                actuator_name(back->actuator), back->from, ar::UnjudgedStep::RECHECK_SECONDS);
+        }
+    }
 
     // Over the budget: UE fills its texture pools close to it (TEKKEN 8 demo ran at 96-98 % of it on 8 GB at 50 fps,
     // 2026-10-28), so only usage past it means the OS is already demoting memory.
@@ -862,8 +885,9 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         outcome = fmt::format("reads {} but the scene changed, not judged: put back, taken again if still wanted", what);
         break;
     case ar::TrialOutcome::kept_unjudged:
-        outcome = fmt::format("reads {} but the scene changed ({} trials in a row), kept, not judged", what,
-            ar::TrialDiscards::MAX_IN_A_ROW + 1);
+        outcome = fmt::format("reads {} but the scene changed ({} trials in a row), kept, not judged; re-checked in {:.0f} s",
+            what, ar::TrialDiscards::MAX_IN_A_ROW + 1, ar::UnjudgedStep::RECHECK_SECONDS);
+        m_unjudged.kept(ar::Step{check.actuator, check.to - 1, check.to}, std::chrono::duration<double>(now.time_since_epoch()).count());
         break;
     case ar::TrialOutcome::not_judged:
         outcome = "kept";
