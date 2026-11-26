@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <optional>
 #include <chrono>
 #include <unordered_set>
 #include <memory>
@@ -300,6 +301,12 @@ private:
     bool initialize_dinput_hook();
 
     bool first_frame_initialize();
+    // The mods' first-frame initialization on a worker so the hooked Present isn't held (Framework.cpp).
+    enum class AsyncFirstFrameState : int { Idle, Running, Done, Failed };
+    std::atomic<AsyncFirstFrameState> m_async_first_frame_state{AsyncFirstFrameState::Idle};
+    std::optional<std::string> m_async_first_frame_error{};
+    static unsigned long __stdcall async_first_frame_thread(void* param);
+    bool use_async_first_frame_initialize();
     bool should_defer_vr_start_for_shader_compile();
 
     void call_on_frame();

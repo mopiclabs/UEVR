@@ -221,8 +221,12 @@ std::optional<std::string> Mods::on_initialize() const {
     return std::nullopt;
 }
 
-std::optional<std::string> Mods::on_initialize_d3d_thread() const {
-    std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
+std::optional<std::string> Mods::on_initialize_d3d_thread(bool lock) const {
+    std::unique_lock _{g_framework->get_hook_monitor_mutex(), std::defer_lock};
+
+    if (lock) {
+        _.lock();
+    }
 
     // once here to at least setup the values
     reload_config();

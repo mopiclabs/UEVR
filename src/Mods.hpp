@@ -8,7 +8,8 @@ public:
     virtual ~Mods() {}
 
     std::optional<std::string> on_initialize() const;
-    std::optional<std::string> on_initialize_d3d_thread() const;
+    // lock = false: the first-frame initialization on a worker while Presents go on; they must not wait for it.
+    std::optional<std::string> on_initialize_d3d_thread(bool lock = true) const;
     void reload_config(bool set_defaults = false) const;
 
     void on_pre_imgui_frame() const;
