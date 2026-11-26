@@ -123,6 +123,9 @@ public:
     static uint64_t get_pipeline_states_created();
     static std::chrono::nanoseconds get_pipeline_state_creation_time();
 
+    // The OpenXR session became READY (first time only): splits the startup Present-hold log line (D3D12Hook.cpp).
+    static void note_xr_session_ready();
+
     bool is_proton_swapchain() const {
         return m_using_proton_swapchain;
     }

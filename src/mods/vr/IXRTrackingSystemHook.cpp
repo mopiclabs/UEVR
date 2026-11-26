@@ -2764,7 +2764,8 @@ IXRTrackingSystemHook::SharedPtr* IXRTrackingSystemHook::get_stereo_rendering_de
         bool should_switch_to_4_27 = check_ix(*retdecode);
 
         if (!should_switch_to_4_27) {
-            utility::ShemuContext base_context{*module_within};
+            auto base_context_holder = sdk::make_module_shemu_context(*module_within); // lazily zeroed, same context (sdk/Utility.hpp)
+            auto& base_context = *base_context_holder->emu;
 
             base_context.ctx->Registers.RegRip = return_address;
             base_context.ctx->Registers.RegRax = 0xdeadbeef;
@@ -3802,7 +3803,8 @@ int32_t* IXRTrackingSystemHook::get_ideal_debug_canvas_render_target_size(sdk::I
         bool is_valid = check_ix(*retdecode);
 
         if (!is_valid) {
-            utility::ShemuContext base_context{*module_within};
+            auto base_context_holder = sdk::make_module_shemu_context(*module_within); // lazily zeroed, same context (sdk/Utility.hpp)
+            auto& base_context = *base_context_holder->emu;
 
             base_context.ctx->Registers.RegRip = return_address;
             base_context.ctx->Registers.RegRax = 0xdeadbeef;
@@ -3955,7 +3957,8 @@ bool IXRTrackingSystemHook::update_player_camera(sdk::IXRCamera*, Quat<float>* r
             // We need to nop out this call because it modifies the relative transform
             // causing the player to turn into a midget in some games
             // and also in some games causes strange rotation issues
-            utility::ShemuContext ctx{*module_within};
+            auto ctx_holder = sdk::make_module_shemu_context(*module_within); // lazily zeroed, same context (sdk/Utility.hpp)
+            auto& ctx = *ctx_holder->emu;
 
             ctx.ctx->Registers.RegRip = return_address;
             ctx.ctx->Registers.RegRax = 1;

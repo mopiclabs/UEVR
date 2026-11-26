@@ -1,3 +1,5 @@
+#include <atomic>
+#include <chrono>
 #include <array>
 #include <thread>
 #include <future>
@@ -1130,13 +1132,93 @@ HRESULT D3D12Hook::present_internal(IDXGISwapChain3* swap_chain, UINT sync_inter
     return result;
 }
 
+namespace {
+// The longest hooked Present (lock wait and the original Present included) before the OpenXR session is READY and in the
+// 10 s after it, logged once. Under DLSS Frame Generation the thread calling this hook is Streamline's pacer, and a long
+// hold there while frame generation changes state is what crashes sl.dlss_g at startup (Black Myth: Wukong); this
+// puts that number in every log. A clock read and a few atomics per Present until it has logged, nothing after.
+struct StartupPresentHolds {
+    std::atomic<int64_t> first_present_ns{0};
+    std::atomic<int64_t> ready_ns{0};
+    std::atomic<int64_t> max_before_ns{0};
+    std::atomic<int64_t> max_before_at_ns{0};
+    std::atomic<int64_t> max_after_ns{0};
+    std::atomic<int64_t> max_after_at_ns{0};
+    std::atomic<bool> logged{false};
+};
+
+StartupPresentHolds g_startup_present_holds{};
+
+int64_t steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void raise_max(std::atomic<int64_t>& max, std::atomic<int64_t>& at, int64_t value, int64_t when) {
+    auto current = max.load();
+    while (value > current && !max.compare_exchange_weak(current, value)) {}
+    if (value >= current) {
+        at = when;
+    }
+}
+
+struct StartupPresentHoldTimer {
+    int64_t start{g_startup_present_holds.logged.load() ? 0 : steady_ns()};
+
+    ~StartupPresentHoldTimer() {
+        if (start == 0) {
+            return;
+        }
+
+        auto& s = g_startup_present_holds;
+        const auto end = steady_ns();
+        const auto held = end - start;
+        int64_t expected = 0;
+        s.first_present_ns.compare_exchange_strong(expected, start);
+
+        const auto ready = s.ready_ns.load();
+        const auto first = s.first_present_ns.load();
+        constexpr int64_t after_window = 10'000'000'000;
+        constexpr int64_t no_ready_limit = 120'000'000'000;
+
+        if (ready == 0 || start < ready) {
+            raise_max(s.max_before_ns, s.max_before_at_ns, held, start);
+        } else if (start < ready + after_window) {
+            raise_max(s.max_after_ns, s.max_after_at_ns, held, start);
+        }
+
+        const auto done = (ready != 0 && end >= ready + after_window) || (ready == 0 && end - first >= no_ready_limit);
+
+        if (done && !s.logged.exchange(true)) {
+            const auto ms = [](int64_t ns) { return (double)ns / 1'000'000.0; };
+
+            if (ready == 0) {
+                spdlog::info("[Startup] Longest hooked Present: {:.0f} ms (no OpenXR session READY within 120 s of the first)",
+                    ms(s.max_before_ns));
+            } else {
+                spdlog::info("[Startup] Longest hooked Present: before READY {:.0f} ms (starting {:+.2f} s from READY), "
+                    "READY to +10 s {:.0f} ms (starting {:+.2f} s from READY); thread {}",
+                    ms(s.max_before_ns), ms(s.max_before_at_ns - ready) / 1000.0, ms(s.max_after_ns),
+                    ms(s.max_after_at_ns - ready) / 1000.0, GetCurrentThreadId());
+            }
+        }
+    }
+};
+}
+
+void D3D12Hook::note_xr_session_ready() {
+    int64_t expected = 0;
+    g_startup_present_holds.ready_ns.compare_exchange_strong(expected, steady_ns());
+}
+
 HRESULT WINAPI D3D12Hook::present(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags) {
+    StartupPresentHoldTimer hold_timer{};
     std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
-    
+
     return D3D12Hook::present_internal(swap_chain, sync_interval, flags, nullptr, false);
 }
 
 HRESULT WINAPI D3D12Hook::present1(IDXGISwapChain3* swap_chain, UINT sync_interval, UINT flags, DXGI_PRESENT_PARAMETERS* params) {
+    StartupPresentHoldTimer hold_timer{};
     std::scoped_lock _{g_framework->get_hook_monitor_mutex()};
 
     return D3D12Hook::present_internal(swap_chain, sync_interval, flags, params, true);

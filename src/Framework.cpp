@@ -2126,6 +2126,72 @@ bool Framework::initialize_dinput_hook() {
 // Ran on the first valid frame after pre-initialization of mods has taken place and hasn't failed
 // This one allows mods to run any initialization code in the context of the D3D thread (like VR code)
 // It also is the one that actually loads any config files
+// VR_AsyncFirstFrameInit worker. The result (m_async_first_frame_error) is written before the Done state is stored and
+// read only after it is loaded, so the Present thread sees it complete. Pins UEVR's module and leaves through
+// FreeLibraryAndExitThread; nothing joins it.
+unsigned long __stdcall Framework::async_first_frame_thread(void* param) {
+    auto self_framework = (Framework*)param;
+    const auto start = std::chrono::steady_clock::now();
+
+    spdlog::info("Running first frame D3D initialization of mods... (worker thread {})", GetCurrentThreadId());
+
+    try {
+        self_framework->m_async_first_frame_error = self_framework->m_mods->on_initialize_d3d_thread(false);
+
+        // update_hmd_state's cvar lookups scan the module on first use (~1 s on Wukong) and would run on the first
+        // Presents after the OpenXR session is READY, the long hooked Present this worker exists to avoid.
+        if (!self_framework->m_async_first_frame_error) {
+            if (const auto& vr = VR::get(); vr != nullptr) {
+                vr->prime_hmd_state_cvars();
+            }
+        }
+    } catch (...) {
+        self_framework->m_async_first_frame_error = std::string{"An exception has occurred during the first-frame initialization."};
+    }
+
+    spdlog::info("[Startup] first-frame initialization ran {} ms on the worker; no Present waited for it",
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
+
+    self_framework->m_async_first_frame_state.store(AsyncFirstFrameState::Done);
+
+    HMODULE self{};
+
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)&Framework::async_first_frame_thread, &self) && self != nullptr) {
+        FreeLibraryAndExitThread(self, 0);
+    }
+
+    return 0;
+}
+
+// Whether the mods' first-frame initialization runs on a worker instead of inside the hooked Present (D3D12 only).
+// With a DLSS Frame Generation swapchain the hooked Present runs on Streamline's pacer thread, and holding it for the
+// ~1 s of the first-frame initialization lets sl.dlss_g's worker read a frame-generation resource that is being torn
+// down (Black Myth: Wukong startup crash, ~1.4 % of launches). VR_AsyncFirstFrameInit=true/false in config.txt
+// forces it; without the key it is on when sl.dlss_g.dll is loaded. Read once from config.txt: the options aren't
+// loaded yet at this point.
+bool Framework::use_async_first_frame_initialize() {
+    static const bool use_async = [this]() {
+        if (m_renderer_type != RendererType::D3D12) {
+            return false; // a D3D11 initialization can use the immediate context, which isn't free-threaded
+        }
+
+        utility::Config cfg{ get_persistent_dir("config.txt").string() };
+
+        if (const auto forced = cfg.get<bool>("VR_AsyncFirstFrameInit"); forced.has_value()) {
+            spdlog::info("[Startup] VR_AsyncFirstFrameInit={} (config)", *forced);
+            return *forced;
+        }
+
+        const bool dlssg = GetModuleHandleW(L"sl.dlss_g.dll") != nullptr;
+        spdlog::info("[Startup] first-frame initialization on a worker: {} (DLSS Frame Generation {})", dlssg,
+            dlssg ? "loaded" : "not loaded");
+        return dlssg;
+    }();
+
+    return use_async;
+}
+
 bool Framework::first_frame_initialize() {
     const bool is_init_ok = m_error.empty() && m_game_data_initialized;
 
@@ -2134,10 +2200,67 @@ bool Framework::first_frame_initialize() {
         return is_init_ok;
     }
 
-    m_vr_start_deferred = should_defer_vr_start_for_shader_compile();
+    // Once the worker has started, the shader-compile wait has already let VR start: asking it again on every
+    // Present returns "defer" for each new 1 s measuring window and would hold the result until a window ends.
+    if (m_async_first_frame_state.load() == AsyncFirstFrameState::Idle ||
+        m_async_first_frame_state.load() == AsyncFirstFrameState::Failed)
+    {
+        m_vr_start_deferred = should_defer_vr_start_for_shader_compile();
 
-    if (m_vr_start_deferred) {
-        return false;
+        if (m_vr_start_deferred) {
+            return false;
+        }
+    }
+
+    // On a worker (see use_async_first_frame_initialize): this and later Presents return at once with VR start
+    // deferred (that path does nothing of UEVR's) until the worker is done; the next Present applies the result. The
+    // worker doesn't take the hook monitor lock, which every Present takes. If it can't be started, the initialization
+    // runs here as before.
+    if (m_async_first_frame_state.load() != AsyncFirstFrameState::Failed && use_async_first_frame_initialize()) {
+        const auto state = m_async_first_frame_state.load();
+
+        if (state == AsyncFirstFrameState::Idle) {
+            HMODULE self{};
+
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)&async_first_frame_thread, &self) &&
+                self != nullptr)
+            {
+                m_async_first_frame_state = AsyncFirstFrameState::Running;
+                auto thread = CreateThread(nullptr, 0, &async_first_frame_thread, this, 0, nullptr);
+
+                if (thread != nullptr) {
+                    CloseHandle(thread);
+                    spdlog::info("[Startup] first-frame initialization started on a worker");
+                    m_vr_start_deferred = true;
+                    return false;
+                }
+
+                FreeLibrary(self);
+            }
+
+            m_async_first_frame_state = AsyncFirstFrameState::Failed;
+            spdlog::warn("[Startup] could not start the first-frame initialization worker; running it here as before");
+        } else if (state == AsyncFirstFrameState::Running) {
+            m_vr_start_deferred = true;
+            return false;
+        } else if (state == AsyncFirstFrameState::Done) {
+            m_first_frame_d3d_initialize = false;
+            m_vr_start_deferred = false;
+
+            if (m_async_first_frame_error) {
+                m_error = m_async_first_frame_error->empty() ? "An unknown error has occurred." : *m_async_first_frame_error;
+                spdlog::error("Initialization of mods failed. Reason: {}", m_error);
+                m_game_data_initialized = false;
+                m_mods_fully_initialized = false;
+                return false;
+            }
+
+            std::scoped_lock _{get_hook_monitor_mutex()};
+            save_config();
+            m_mods_fully_initialized = true;
+            spdlog::info("[Startup] first-frame initialization from the worker applied");
+            return true;
+        }
     }
 
     std::scoped_lock _{get_hook_monitor_mutex()};

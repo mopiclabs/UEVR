@@ -16,6 +16,7 @@
 #include <stop_token>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <sdk/Math.hpp>
@@ -144,6 +145,10 @@ public:
         return clean_initialize();
     }
 
+    // VR_OpenXRPrewarm: starts OpenXR instance and system creation on a worker at framework init (see
+    // VR::start_openxr_prewarm in VR.cpp).
+    std::optional<std::string> on_initialize() override;
+
     std::vector<SidebarEntryInfo> get_sidebar_entries() override {
         return {
             {"Runtime", false},
@@ -203,6 +208,8 @@ public:
     void on_pre_viewport_client_draw(void* viewport_client, void* viewport, void* canvas) override;
 
     void update_hmd_state(bool from_view_extensions = false, uint32_t frame_count = 0);
+    // First lookups of update_hmd_state's cvars, done once on the first-frame worker (VR.cpp).
+    void prime_hmd_state_cvars();
     void update_action_states(bool from_stalled_xinput = false);
     void update_dpad_gestures();
 
@@ -1062,6 +1069,37 @@ private:
     std::optional<std::string> initialize_openvr();
     std::optional<std::string> initialize_openvr_input();
     std::optional<std::string> initialize_openxr();
+
+    // VR_OpenXRPrewarm (default on; false = OpenXR starts in the first-frame initialization as before): xrCreateInstance
+    // + xrGetSystem (~1 s on the Mopic runtime, its service starts on demand) run on a worker started at framework init,
+    // ~1 s before the first-frame initialization, so VR starts that much earlier. initialize_openxr() adopts the result
+    // (waiting only for the rest of it) when it was made with the same extension choices it would make itself; anything
+    // else destroys it and starts OpenXR as before.
+public:
+    struct OpenXRPrewarm {
+        std::mutex mutex{};
+        std::condition_variable cv{};
+        bool done{false};
+        bool perf_log{false};
+        bool autores{false};
+        bool dx12{false};
+        XrInstance instance{XR_NULL_HANDLE};
+        XrSystemId system{XR_NULL_SYSTEM_ID};
+        std::unordered_set<std::string> enabled_extensions{};
+        bool performance_settings_enabled{false};
+        std::string error{};
+        std::chrono::steady_clock::time_point started{};
+        std::chrono::steady_clock::time_point finished{};
+    };
+    void start_openxr_prewarm();
+    void adopt_openxr_prewarm();
+    static void run_openxr_prewarm(std::shared_ptr<OpenXRPrewarm> state);
+private:
+    std::shared_ptr<OpenXRPrewarm> m_openxr_prewarm{};
+
+    void apply_hmd_state_cvars();
+    std::atomic<bool> m_hmd_state_cvars_priming{false};
+    std::atomic<bool> m_hmd_state_cvars_primed{false};
     std::optional<std::string> initialize_openxr_input();
     std::optional<std::string> initialize_openxr_swapchains();
 
@@ -1783,6 +1821,8 @@ private:
     const ModToggle::Ptr m_stalker2_sharpen_priority{ ModToggle::create(generate_name("Stalker2SharpenExistingPriority"), false) };
     const ModToggle::Ptr m_native_stereo_fix_pair_snapshot{ ModToggle::create(generate_name("NativeStereoFixPairSnapshot"), false) };
     const ModToggle::Ptr m_native_stereo_fix_disable_frame_generation{ ModToggle::create(generate_name("NativeStereoFixDisableFrameGeneration"), true) };
+    // Read straight from config.txt at framework init (before options load); registered so it shows and saves.
+    const ModToggle::Ptr m_openxr_prewarm_option{ ModToggle::create(generate_name("OpenXRPrewarm"), true) };
     const ModToggle::Ptr m_native_stereo_fix_whole_sky_capture{ ModToggle::create(generate_name("NativeStereoFixWholeSkyCapture"), true) };
     const ModToggle::Ptr m_submit_once_per_engine_frame{ ModToggle::create(generate_name("SubmitOncePerEngineFrame"), true) };
 
@@ -2141,6 +2181,7 @@ public:
             *m_stalker2_sharpen_priority,
             *m_native_stereo_fix_pair_snapshot,
             *m_native_stereo_fix_disable_frame_generation,
+            *m_openxr_prewarm_option,
             *m_native_stereo_fix_whole_sky_capture,
             *m_submit_once_per_engine_frame,
             *m_splitscreen_compatibility_mode,

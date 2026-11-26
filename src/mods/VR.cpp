@@ -3195,6 +3195,244 @@ std::optional<std::string> VR::initialize_openvr_input() {
     return std::nullopt;
 }
 
+std::optional<std::string> VR::on_initialize() {
+    start_openxr_prewarm();
+    return Mod::on_initialize();
+}
+
+namespace {
+DWORD WINAPI openxr_prewarm_thread(LPVOID param) {
+    auto state = std::unique_ptr<std::shared_ptr<VR::OpenXRPrewarm>>((std::shared_ptr<VR::OpenXRPrewarm>*)param);
+
+    try {
+        VR::run_openxr_prewarm(*state);
+    } catch (...) {
+        std::scoped_lock lock{(*state)->mutex};
+        (*state)->error = "exception";
+        (*state)->done = true;
+        (*state)->cv.notify_all();
+    }
+
+    state.reset();
+
+    HMODULE self{};
+
+    // The reference taken in start_openxr_prewarm(): no unload can unmap this code under the thread, and nothing
+    // joins it (no DllMain wait at exit).
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)&openxr_prewarm_thread, &self) && self != nullptr) {
+        FreeLibraryAndExitThread(self, 0);
+    }
+
+    return 0;
+}
+}
+
+// Framework init (Mods::on_initialize), ~1 s before the first-frame initialization on Present. Only when the frontend
+// has already loaded openxr_loader.dll and not openvr_api.dll: initialize_openvr() then always gives way to OpenXR, so
+// starting OpenXR here can't change which runtime is used. The extension choices come from config.txt (options are
+// not loaded yet); adopt_openxr_prewarm() compares them with the loaded options and discards a mismatch.
+void VR::start_openxr_prewarm() try {
+    if (m_openxr_prewarm != nullptr || g_framework == nullptr) {
+        return;
+    }
+
+    if (GetModuleHandleW(L"openxr_loader.dll") == nullptr || GetModuleHandleW(L"openvr_api.dll") != nullptr) {
+        spdlog::info("[XrPrewarm] not started: openxr_loader.dll not pre-loaded (or openvr_api.dll loaded)");
+        return;
+    }
+
+    utility::Config cfg{ Framework::get_persistent_dir("config.txt").string() };
+
+    if (!cfg.get<bool>(m_openxr_prewarm_option->get_config_name()).value_or(m_openxr_prewarm_option->default_value())) {
+        spdlog::info("[XrPrewarm] off (VR_OpenXRPrewarm=false): OpenXR starts on the first frame as before");
+        return;
+    }
+
+    auto state = std::make_shared<OpenXRPrewarm>();
+    state->perf_log = cfg.get<bool>(m_perf_log->get_config_name()).value_or(m_perf_log->default_value());
+    state->autores = cfg.get<bool>(m_autores->get_config_name()).value_or(m_autores->default_value());
+    state->dx12 = g_framework->is_dx12();
+    state->started = std::chrono::steady_clock::now();
+
+    HMODULE self{};
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)&openxr_prewarm_thread, &self) ||
+        self == nullptr) {
+        spdlog::warn("[XrPrewarm] could not pin UEVR's module; not started");
+        return;
+    }
+
+    auto param = new std::shared_ptr<OpenXRPrewarm>(state);
+    auto thread = CreateThread(nullptr, 0, &openxr_prewarm_thread, param, 0, nullptr);
+
+    if (thread == nullptr) {
+        delete param;
+        FreeLibrary(self);
+        spdlog::warn("[XrPrewarm] could not start its thread");
+        return;
+    }
+
+    CloseHandle(thread);
+    m_openxr_prewarm = state;
+    spdlog::info("[XrPrewarm] started (perf log {}, AutoRes {}, {})", state->perf_log, state->autores,
+        state->dx12 ? "D3D12" : "D3D11");
+} catch (...) {
+    spdlog::warn("[XrPrewarm] start threw; OpenXR starts on the first frame as before");
+}
+
+// The worker: the same extension choices as initialize_openxr() (keep the two lists in step), then xrCreateInstance
+// and xrGetSystem. Touches nothing of UEVR's but its own state.
+void VR::run_openxr_prewarm(std::shared_ptr<OpenXRPrewarm> state) {
+    std::vector<const char*> extensions{};
+    std::unordered_set<std::string> enabled{};
+    bool performance_settings{};
+
+    extensions.push_back(state->dx12 ? XR_KHR_D3D12_ENABLE_EXTENSION_NAME : XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
+
+    uint32_t extension_count{};
+    auto result = xrEnumerateInstanceExtensionProperties(nullptr, 0, &extension_count, nullptr);
+    std::vector<XrExtensionProperties> extension_properties(extension_count, {XR_TYPE_EXTENSION_PROPERTIES});
+
+    if (!XR_FAILED(result)) {
+        result = xrEnumerateInstanceExtensionProperties(nullptr, extension_count, &extension_count, extension_properties.data());
+    }
+
+    if (!XR_FAILED(result)) {
+        std::unordered_set<std::string> wanted{
+            XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
+            XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME,
+            uevr::steam_frame::extension
+        };
+
+        if (state->perf_log) {
+            wanted.insert(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+        }
+
+        if (state->autores) {
+            wanted.insert(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+        }
+
+        for (const auto& property : extension_properties) {
+            if (wanted.contains(property.extensionName)) {
+                enabled.insert(property.extensionName);
+                performance_settings = performance_settings ||
+                    std::string_view{property.extensionName} == XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
+                extensions.push_back(property.extensionName);
+            }
+        }
+    }
+
+    XrInstanceCreateInfo create_info{XR_TYPE_INSTANCE_CREATE_INFO};
+    create_info.enabledExtensionCount = (uint32_t)extensions.size();
+    create_info.enabledExtensionNames = extensions.data();
+
+    std::string application_name{"UEVR"};
+
+    if (const auto full_path = utility::get_module_pathw(utility::get_executable()); full_path) {
+        application_name += "_" + std::filesystem::path(*full_path).stem().string();
+
+        if (application_name.length() >= XR_MAX_APPLICATION_NAME_SIZE) {
+            application_name = application_name.substr(0, XR_MAX_APPLICATION_NAME_SIZE - 1);
+        }
+    }
+
+    strcpy(create_info.applicationInfo.applicationName, application_name.c_str());
+    create_info.applicationInfo.applicationName[XR_MAX_APPLICATION_NAME_SIZE - 1] = '\0';
+    create_info.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+
+    XrInstance instance{XR_NULL_HANDLE};
+    XrSystemId system{XR_NULL_SYSTEM_ID};
+    std::string error{};
+
+    result = xrCreateInstance(&create_info, &instance);
+
+    if (result != XR_SUCCESS || instance == XR_NULL_HANDLE) {
+        error = "xrCreateInstance " + std::to_string((int32_t)result);
+        instance = XR_NULL_HANDLE;
+    } else {
+        XrSystemGetInfo system_info{XR_TYPE_SYSTEM_GET_INFO};
+        system_info.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+        result = xrGetSystem(instance, &system_info, &system);
+
+        if (result != XR_SUCCESS) {
+            error = "xrGetSystem " + std::to_string((int32_t)result);
+            system = XR_NULL_SYSTEM_ID; // the instance is still handed over; initialize_openxr() retries the system
+        }
+    }
+
+    std::scoped_lock lock{state->mutex};
+    state->instance = instance;
+    state->system = system;
+    state->enabled_extensions = std::move(enabled);
+    state->performance_settings_enabled = performance_settings;
+    state->error = error;
+    state->finished = std::chrono::steady_clock::now();
+    state->done = true;
+    state->cv.notify_all();
+
+    spdlog::info("[XrPrewarm] instance {} and system {} ready {} ms after framework init{}{}", (void*)instance,
+        (uint64_t)system, std::chrono::duration_cast<std::chrono::milliseconds>(state->finished - state->started).count(),
+        error.empty() ? "" : "; error ", error);
+}
+
+// From initialize_openxr(), on the first-frame initialization (the presenting thread). Waits only for the rest of the
+// worker's run; a mismatch or failure leaves m_openxr empty, which is today's path.
+void VR::adopt_openxr_prewarm() {
+    auto state = std::move(m_openxr_prewarm);
+
+    if (state == nullptr) {
+        return;
+    }
+
+    const auto wait_start = std::chrono::steady_clock::now();
+    std::unique_lock lock{state->mutex};
+
+    if (!state->cv.wait_for(lock, std::chrono::seconds{60}, [&]() { return state->done; })) {
+        // The worker still holds its own reference; whatever it makes is left alone (a leaked instance, not a race).
+        spdlog::warn("[XrPrewarm] not ready after 60 s; OpenXR starts here as before");
+        return;
+    }
+
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start).count();
+    std::string reason{};
+
+    if (state->instance == XR_NULL_HANDLE) {
+        reason = "it failed (" + state->error + ")";
+    } else if (state->perf_log != m_perf_log->value() || state->autores != m_autores->value()) {
+        reason = "the loaded config differs (perf log / AutoRes)";
+    } else if (state->dx12 != g_framework->is_dx12()) {
+        reason = "the renderer differs";
+    } else if (m_ktjl_openxr_factory_repair->value() && g_framework->is_dx12()) {
+        reason = "the KTJL factory repair needs the instance made on this thread";
+    } else if (m_requested_runtime_name->value() != "openxr_loader.dll") {
+        reason = "the requested runtime is " + m_requested_runtime_name->value();
+    } else if (!m_openxr_prewarm_option->value()) {
+        reason = "VR_OpenXRPrewarm is off in the loaded config";
+    }
+
+    if (!reason.empty()) {
+        if (state->instance != XR_NULL_HANDLE) {
+            xrDestroyInstance(state->instance);
+        }
+
+        spdlog::info("[XrPrewarm] not used: {}; OpenXR starts here as before (waited {} ms)", reason, waited);
+        return;
+    }
+
+    m_openxr->instance = state->instance;
+    m_openxr->system = state->system;
+    m_openxr->enabled_extensions = state->enabled_extensions;
+    m_openxr->performance_settings_enabled = state->performance_settings_enabled;
+
+    for (const auto& name : state->enabled_extensions) {
+        spdlog::info("[VR] Enabling {} extension (prewarmed instance)", name);
+    }
+
+    spdlog::info("[XrPrewarm] using the prewarmed instance{} (waited {} ms on the first frame)",
+        state->system == XR_NULL_SYSTEM_ID ? " (system retried here)" : " and system", waited);
+}
+
 std::optional<std::string> VR::initialize_openxr() {
     ZoneScopedN(__FUNCTION__);
 
@@ -3222,6 +3460,10 @@ std::optional<std::string> VR::initialize_openxr() {
 
     m_openxr->needs_pose_update = true;
     m_openxr->got_first_poses = false;
+
+    // VR_OpenXRPrewarm: sets m_openxr->instance (and system) when the framework-init worker made them to match, so
+    // the two steps below find them existing; otherwise they run here as before.
+    adopt_openxr_prewarm();
 
     // Step 1: Create an instance
     spdlog::info("[VR] Creating OpenXR instance");
@@ -7664,12 +7906,9 @@ void VR::on_pre_viewport_client_draw(void* viewport_client, void* viewport, void
     }
 }
 
-void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
-    ZoneScopedN(__FUNCTION__);
-
-    std::scoped_lock _{m_reinitialize_mtx};
-
-    auto runtime = get_runtime();
+// The cvars update_hmd_state writes every frame. Each one's first lookup scans the game module (string references, and
+// for GetInt the console-variable vtable layout): about 1 s in all on Black Myth: Wukong.
+void VR::apply_hmd_state_cvars() {
     if (m_uncap_framerate->value()) {
         sdk::set_cvar_data_float(L"Engine", L"t.MaxFPS", 500.0f);
     }
@@ -7684,13 +7923,50 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
             sdk::set_cvar_int(L"Slate", L"Slate.AllowBackgroundBlurWidgets", 0);
         }
     }
+}
 
-    // With Slate.DrawToVRRenderTarget 0 a UE4/UE5.0-5.3 game draws Slate to the swapchain, past the UI redirect
-    // (Stellar Blade). Keep it at 1 only while the redirect is on (the hook's own condition, and a redirected DrawWindow
-    // within the last second): with 1 and no redirect, Slate would draw over the scene target.
-    if (m_fake_stereo_hook != nullptr && is_legacy_slate_vr_target_runtime_cached()) {
-        update_slate_draw_to_vr_target(is_hmd_active() && !is_stereo_emulation_enabled() &&
-            m_fake_stereo_hook->is_legacy_slate_redirect_recent(std::chrono::seconds(1)));
+// Called once on the first-frame worker (Framework::async_first_frame_thread) after the mods' initialization: does the
+// first lookups of update_hmd_state's cvars there, so the first Presents after the OpenXR session is READY (DLSS-G's
+// pacer under frame generation) find them cached instead of scanning the module (~1 s on Wukong). The sdk lookup
+// caches have no lock of their own: this runs while every Present takes the deferred path (nothing of UEVR's), and
+// update_hmd_state skips the writes until it is done.
+void VR::prime_hmd_state_cvars() try {
+    const auto start = std::chrono::steady_clock::now();
+    m_hmd_state_cvars_priming = true;
+
+    apply_hmd_state_cvars();
+
+    if (is_legacy_slate_vr_target_runtime_cached()) {
+        sdk::find_cvar_cached(L"SlateRHIRenderer", L"Slate.DrawToVRRenderTarget");
+    }
+
+    m_hmd_state_cvars_primed = true;
+    spdlog::info("[Startup] HMD-state cvar lookups primed on the first-frame worker in {} ms",
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
+} catch (...) {
+    m_hmd_state_cvars_primed = true; // the Present path looks them up as before
+    spdlog::warn("[Startup] priming the HMD-state cvar lookups threw; they are looked up on the Present as before");
+}
+
+void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
+    ZoneScopedN(__FUNCTION__);
+
+    std::scoped_lock _{m_reinitialize_mtx};
+
+    auto runtime = get_runtime();
+
+    // While the first-frame worker primes these lookups (prime_hmd_state_cvars) they are skipped here, so a Present
+    // never waits for them; the worker finishes before the first Present that starts VR, so in practice none is skipped.
+    if (!m_hmd_state_cvars_priming.load() || m_hmd_state_cvars_primed.load()) {
+        apply_hmd_state_cvars();
+
+        // With Slate.DrawToVRRenderTarget 0 a UE4/UE5.0-5.3 game draws Slate to the swapchain, past the UI redirect
+        // (Stellar Blade). Keep it at 1 only while the redirect is on (the hook's own condition, and a redirected
+        // DrawWindow within the last second): with 1 and no redirect, Slate would draw over the scene target.
+        if (m_fake_stereo_hook != nullptr && is_legacy_slate_vr_target_runtime_cached()) {
+            update_slate_draw_to_vr_target(is_hmd_active() && !is_stereo_emulation_enabled() &&
+                m_fake_stereo_hook->is_legacy_slate_redirect_recent(std::chrono::seconds(1)));
+        }
     }
 
     if (!is_using_afr()) {
