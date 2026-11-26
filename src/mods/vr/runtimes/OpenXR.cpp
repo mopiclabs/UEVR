@@ -2045,6 +2045,7 @@ VRRuntime::Error OpenXR::consume_events(std::function<void(void*)> callback) {
                     this->last_ready_state_probe_log = {};
                     this->last_valid_pose_probe_log = {};
                     spdlog::info("[OpenXR] Session is READY; synchronizing first frame");
+                    D3D12Hook::note_xr_session_ready();
                     this->last_frame_timing_log = {};
                     this->wait_frame_timing.reset();
                     this->begin_frame_timing.reset();
