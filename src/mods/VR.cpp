@@ -69,6 +69,76 @@
 namespace {
 bool is_stalker2_executable_cached();
 bool is_dune_awakening_executable_cached();
+
+// The engine paths where a resolution change rebuilds live (the slider's version policy): UE 4.27 and 5.3+ (5.7+
+// included), by the version string, else by the file version.
+struct OpenXRResolutionReconfigurePolicy {
+    bool live_allowed{false};
+    std::string version{"0.00"};
+    const char* reason{"unknown_version"};
+};
+
+const OpenXRResolutionReconfigurePolicy& openxr_legacy_live_policy() {
+    static const auto result = []() {
+        const auto disk_version = sdk::get_file_version_info();
+        const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
+
+        if (str_version != "0.00") {
+            const auto live_allowed =
+                str_version.starts_with("4.27") ||
+                str_version.starts_with("5.3") ||
+                str_version.starts_with("5.4") ||
+                str_version.starts_with("5.5") ||
+                str_version.starts_with("5.6") ||
+                str_version.starts_with("5.7") ||
+                str_version.starts_with("5.8") ||
+                str_version.starts_with("5.9");
+
+            return OpenXRResolutionReconfigurePolicy{
+                .live_allowed = live_allowed,
+                .version = str_version,
+                .reason = live_allowed ? "legacy_safe_band" : "blocked_ue50_52_or_unknown"
+            };
+        }
+
+        const auto major = (disk_version.dwFileVersionMS >> 16) & 0xFFFF;
+        const auto minor = disk_version.dwFileVersionMS & 0xFFFF;
+        const auto live_allowed = (major == 4 && minor == 27) || (major == 5 && minor >= 3);
+        std::ostringstream version{};
+        version << "file_version_" << major << "." << minor;
+
+        return OpenXRResolutionReconfigurePolicy{
+            .live_allowed = live_allowed,
+            .version = version.str(),
+            .reason = live_allowed ? "legacy_safe_file_version_band" : "blocked_file_version"
+        };
+    }();
+
+    return result;
+}
+
+bool is_older_ue4(const OpenXRResolutionReconfigurePolicy& policy) {
+    return policy.version.starts_with("4.") || policy.version.starts_with("file_version_4.");
+}
+}
+
+// Before an automatic level step changes the eye size (OpenXR::apply_autores_level): whether
+// on_openxr_resolution_scale_changed will rebuild live on this engine path. A refused step must not touch the eye size
+// at all: the game reads it every frame (OpenXR::get_width/get_height), and a size set only for the refusal to put it
+// back reallocated the view target and the Native Stereo Fix capture twice (3080 laptop, Black Myth: Wukong with
+// VR_AutoResLevelOnAnyEngine=false, 2026-11-26: 1280x1440 -> 1600x1800 -> 1280x1440 in 150 ms, one black right-eye
+// sample after it). UE 5.7+ is inside the version band, so its invalidation path is never refused here.
+bool VR::autores_level_rebuilds_live(uint32_t old_width, uint32_t old_height, uint32_t new_width, uint32_t new_height) {
+    const auto& policy = openxr_legacy_live_policy();
+
+    if (uevr::autores::level_step_rebuilds_live(policy.live_allowed, m_autores_level_on_any_engine->value(), is_older_ue4(policy),
+            is_stalker2_executable_cached())) {
+        return true;
+    }
+
+    SPDLOG_WARN("[autores] No live rebuild on this engine path; version={} reason={}: no level steps [{}x{}]->[{}x{}]",
+        policy.version, policy.reason, old_width, old_height, new_width, new_height);
+    return false;
 }
 
 std::shared_ptr<VR>& VR::get() {
@@ -100,57 +170,15 @@ bool VR::on_openxr_resolution_scale_changed(
         ue57_invalidated = m_fake_stereo_hook->invalidate_ue57_resolution_dependent_state(old_width, old_height, new_width, new_height);
     }
 
-    struct OpenXRResolutionReconfigurePolicy {
-        bool live_allowed{false};
-        std::string version{"0.00"};
-        const char* reason{"unknown_version"};
-    };
-
-    const auto legacy_live_policy = []() {
-        static const auto result = []() {
-            const auto disk_version = sdk::get_file_version_info();
-            const auto str_version = utility::narrow(sdk::search_for_version(utility::get_executable()).value_or(L"0.00"));
-
-            if (str_version != "0.00") {
-                const auto live_allowed =
-                    str_version.starts_with("4.27") ||
-                    str_version.starts_with("5.3") ||
-                    str_version.starts_with("5.4") ||
-                    str_version.starts_with("5.5") ||
-                    str_version.starts_with("5.6") ||
-                    str_version.starts_with("5.7") ||
-                    str_version.starts_with("5.8") ||
-                    str_version.starts_with("5.9");
-
-                return OpenXRResolutionReconfigurePolicy{
-                    .live_allowed = live_allowed,
-                    .version = str_version,
-                    .reason = live_allowed ? "legacy_safe_band" : "blocked_ue50_52_or_unknown"
-                };
-            }
-
-            const auto major = (disk_version.dwFileVersionMS >> 16) & 0xFFFF;
-            const auto minor = disk_version.dwFileVersionMS & 0xFFFF;
-            const auto live_allowed = (major == 4 && minor == 27) || (major == 5 && minor >= 3);
-            std::ostringstream version{};
-            version << "file_version_" << major << "." << minor;
-
-            return OpenXRResolutionReconfigurePolicy{
-                .live_allowed = live_allowed,
-                .version = version.str(),
-                .reason = live_allowed ? "legacy_safe_file_version_band" : "blocked_file_version"
-            };
-        }();
-
-        return result;
-    }();
+    const auto& legacy_live_policy = openxr_legacy_live_policy();
 
     // A VR_AutoRes level step on an engine path the policy keeps the slider from (VR_AutoResLevelOnAnyEngine): UE 5.0-5.2
     // and versions UEVR can't read, as the measured titles were (TEKKEN 8 demo and Sonic Racing: CrossWorlds read as
-    // file_version_1.0). Not an older UE4, and Stalker 2 never.
-    const auto older_ue4 = legacy_live_policy.version.starts_with("4.") || legacy_live_policy.version.starts_with("file_version_4.");
+    // file_version_1.0). Not an older UE4, and Stalker 2 never. The same decision autores_level_rebuilds_live makes
+    // before the eye size changes, so an automatic step that gets here is not refused.
     const auto automatic_live = automatic && !ue57_invalidated && !legacy_live_policy.live_allowed &&
-        m_autores_level_on_any_engine->value() && !older_ue4 && !is_stalker2_executable_cached();
+        uevr::autores::level_step_rebuilds_live(false, m_autores_level_on_any_engine->value(), is_older_ue4(legacy_live_policy),
+            is_stalker2_executable_cached());
 
     if (automatic_live) {
         SPDLOG_INFO("[autores] Live rebuild although version={} reason={} (VR_AutoResLevelOnAnyEngine) [{}x{}]->[{}x{}]",
