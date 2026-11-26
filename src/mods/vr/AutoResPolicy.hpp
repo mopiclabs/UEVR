@@ -169,6 +169,7 @@ struct State {
     int level{BASE_LEVEL};
     int start_level{BASE_LEVEL};
     int level_cap{MAX_LEVEL}; // min(Max, the runtime's maxImageRect, the VRAM guard)
+    bool vram_over{false};    // GPU memory over the DXGI budget in the last second read: no level step up (next_up)
     Notification gpu{Notification::normal};
     Notification cpu{Notification::normal};
 };
@@ -244,8 +245,16 @@ inline std::optional<Step> next_down(const State& state, const Available& availa
 // One step up: the eye size back to the anchor (start_level: where the session started, or Base after
 // VR_AutoResOutputAnchor), then the internal resolution back to the game's own, then pixels above the anchor up to the
 // cap. SP and the upscaler are restored even when they are no longer available.
+//
+// No level step up while GPU memory is over the DXGI budget (state.vram_over): a bigger eye allocates new targets and,
+// on most engine paths, rebuilds the swapchains live while the OS is already demoting memory. The guard below only
+// steps down after 3 s over and had nothing to take at Min, so an 8 GB laptop at Min over the budget all along took a
+// NORMAL edge's Min -> Saver rebuild at 113-119 % (3080 laptop, Black Myth: Wukong, 2026-11-26: a GPU MMU fault 1.3 s
+// after the next step, Saver -> Base). SP and the upscaler still go back up: they render into the same targets.
 inline std::optional<Step> next_up(const State& state, const Available& available) {
-    if (available.level && state.level < state.start_level && state.level < state.level_cap) {
+    const auto level_up = available.level && !state.vram_over;
+
+    if (level_up && state.level < state.start_level && state.level < state.level_cap) {
         return Step{Actuator::level, state.level, state.level + 1};
     }
 
@@ -257,11 +266,34 @@ inline std::optional<Step> next_up(const State& state, const Available& availabl
         return Step{Actuator::sp, state.sp, state.sp - 1};
     }
 
-    if (available.level && state.level < state.level_cap) {
+    if (level_up && state.level < state.level_cap) {
         return Step{Actuator::level, state.level, state.level + 1};
     }
 
     return std::nullopt;
+}
+
+// Whether next_up's answer is nothing only because GPU memory is over the budget (a level step up held back).
+inline bool level_up_held_by_vram(const State& state, const Available& available) {
+    if (!state.vram_over || next_up(state, available)) {
+        return false;
+    }
+
+    auto under = state;
+    under.vram_over = false;
+    const auto step = next_up(under, available);
+    return step && step->actuator == Actuator::level;
+}
+
+// The VRAM guard (3 s over the budget, settled, not loading) at the lowest level: nothing to take, so the cap goes there
+// for the session, as a guard step down caps at the level it leaves. True when it set the cap now.
+inline bool cap_at_min_after_guard(State& state, const Available& available) {
+    if (!available.level || state.level != MIN_LEVEL || state.level_cap <= MIN_LEVEL) {
+        return false;
+    }
+
+    state.level_cap = MIN_LEVEL;
+    return true;
 }
 
 // Frame-bound games (design v1 §3-2, Appendix B): a game whose time runs with its frames plays in slow motion below its
