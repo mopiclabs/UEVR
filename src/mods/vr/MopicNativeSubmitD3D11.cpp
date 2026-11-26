@@ -55,11 +55,17 @@ bool D3D11Component::submit_mopic_hold(const MopicHoldSubmit& submit) {
         }
     }
     const auto nsf_hold = std::chrono::milliseconds(vr->m_openxr->autores.nsf_hold_ms);
+    // The hold's timing (uevr::autores::nsf_resize_hold): a capture accepted late still gets its hold. D3D11 also holds
+    // while the fix is not active yet or became active in the last 200 ms, within the wait after the change.
+    const auto ms = [](std::chrono::steady_clock::time_point t) {
+        return t.time_since_epoch().count() == 0 ? int64_t{0}
+            : (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count();
+    };
     const bool native_stereo_resize_hold =
         nsf_hold.count() > 0 && vr->is_native_stereo_fix_enabled() && resized_live &&
-        copy_now - live_resize_at < nsf_hold + std::chrono::milliseconds(1800) &&
-        (m_scene_capture_accepted_at < live_resize_at || copy_now - m_scene_capture_accepted_at < nsf_hold ||
-         !nsf_active || copy_now - m_nsf_active_since < std::chrono::milliseconds(200));
+        (uevr::autores::nsf_resize_hold(ms(copy_now), ms(live_resize_at), ms(m_scene_capture_accepted_at), nsf_hold.count()) ||
+         (copy_now - live_resize_at < nsf_hold + std::chrono::milliseconds(uevr::autores::NSF_HOLD_WAIT_MS) &&
+          (!nsf_active || copy_now - m_nsf_active_since < std::chrono::milliseconds(200))));
 
     D3D11_TEXTURE2D_DESC source_desc{};
     backbuffer->GetDesc(&source_desc);

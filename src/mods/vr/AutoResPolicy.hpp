@@ -241,6 +241,28 @@ inline std::optional<Step> next_down(const State& state, const Available& availa
     return std::nullopt;
 }
 
+// VR_AutoResNsfHoldMs (MopicNativeSubmitD3D12/D3D11): after a live resolution change the Native Stereo Fix's new
+// right-eye capture comes out dark for its first frames (exposure and history start over), so the left eye goes in both
+// halves from the change until hold_ms has passed since the new capture was accepted. Times in ms on one clock;
+// change_ms 0 = no live change yet. Before the new capture comes, the hold lasts at most hold_ms + NSF_HOLD_WAIT_MS
+// after the change; a capture accepted later than that still gets its hold_ms (within NSF_LATE_ACCEPT_MS of the change):
+// on the 3080 laptop at 113-119 % of the VRAM budget the capture came back 4.6-5.7 s after the change, after the old
+// single ceiling (hold_ms + 1.8 s), and its first frames showed a black right eye (Black Myth: Wukong, 2026-11-26).
+inline constexpr int64_t NSF_HOLD_WAIT_MS = 1800;
+inline constexpr int64_t NSF_LATE_ACCEPT_MS = 15000;
+
+inline bool nsf_resize_hold(int64_t now_ms, int64_t change_ms, int64_t accepted_ms, int64_t hold_ms) {
+    if (hold_ms <= 0 || change_ms == 0) {
+        return false;
+    }
+
+    if (accepted_ms >= change_ms) {
+        return accepted_ms - change_ms < NSF_LATE_ACCEPT_MS && now_ms - accepted_ms < hold_ms;
+    }
+
+    return now_ms - change_ms < hold_ms + NSF_HOLD_WAIT_MS;
+}
+
 // One step up: the eye size back to the anchor (start_level: where the session started, or Base after
 // VR_AutoResOutputAnchor), then the internal resolution back to the game's own, then pixels above the anchor up to the
 // cap. SP and the upscaler are restored even when they are no longer available.
