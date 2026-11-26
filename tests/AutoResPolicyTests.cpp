@@ -220,25 +220,6 @@ static void test_limits() {
         "no room under DLSS: the level");
 }
 
-static void test_nsf_resize_hold() {
-    const int64_t change = 100'000, hold = 700;
-
-    // The 4090 laptop: the capture back 0.3 s after the change, held 0.7 s after that (as before).
-    expect(ar::nsf_resize_hold(change + 100, change, change - 5000, hold), "waiting for the capture: held");
-    expect(ar::nsf_resize_hold(change + 900, change, change + 300, hold), "0.6 s after the accept: held");
-    expect(!ar::nsf_resize_hold(change + 1100, change, change + 300, hold), "0.8 s after the accept: shown");
-
-    // The 3080 laptop: the capture back 5.67 s after the change, past the old single ceiling (0.7 + 1.8 s).
-    expect(!ar::nsf_resize_hold(change + 3000, change, change - 5000, hold), "no capture yet, past the wait: shown as before");
-    expect(ar::nsf_resize_hold(change + 5670 + 200, change, change + 5670, hold), "late capture: its first frames held");
-    expect(!ar::nsf_resize_hold(change + 5670 + 800, change, change + 5670, hold), "late capture after its hold: shown");
-
-    // Bounds: a capture long after the change (another cause), no change yet, the hold off.
-    expect(!ar::nsf_resize_hold(change + 20'000 + 100, change, change + 20'000, hold), "an accept 20 s later: not this change's");
-    expect(!ar::nsf_resize_hold(5000, 0, 4900, hold), "no live change yet: no hold");
-    expect(!ar::nsf_resize_hold(change + 100, change, change + 50, 0), "VR_AutoResNsfHoldMs=0: no hold");
-}
-
 static void test_dlss_floor() {
     // The UE5 plugin's modes as (optimal %, mode): DLAA 100, Ultra Quality 77, Quality 66.7, Balanced 58, Performance 50,
     // Ultra Performance 33.3; Auto (1) reports Performance's.
@@ -411,6 +392,25 @@ static void test_step_effect() {
     expect(ar::judge_step(30.0f, 30.5f) == ar::StepEffect::nothing, "SP under DLSS, or slower: nothing");
     expect(ar::judge_step(30.0f, 30.0f * 0.94f) == ar::StepEffect::unclear, "6 % less: kept, not judged either way");
     expect(ar::judge_step(0.0f, 10.0f) == ar::StepEffect::unclear, "no GPU time before: not judged");
+}
+
+static void test_nsf_resize_hold() {
+    const int64_t change = 100'000, hold = 700;
+
+    // The 4090 laptop: the capture back 0.3 s after the change, held 0.7 s after that (as before).
+    expect(ar::nsf_resize_hold(change + 100, change, change - 5000, hold), "waiting for the capture: held");
+    expect(ar::nsf_resize_hold(change + 900, change, change + 300, hold), "0.6 s after the accept: held");
+    expect(!ar::nsf_resize_hold(change + 1100, change, change + 300, hold), "0.8 s after the accept: shown");
+
+    // The 3080 laptop: the capture back 5.67 s after the change, past the old single ceiling (0.7 + 1.8 s).
+    expect(!ar::nsf_resize_hold(change + 3000, change, change - 5000, hold), "no capture yet, past the wait: shown as before");
+    expect(ar::nsf_resize_hold(change + 5670 + 200, change, change + 5670, hold), "late capture: its first frames held");
+    expect(!ar::nsf_resize_hold(change + 5670 + 800, change, change + 5670, hold), "late capture after its hold: shown");
+
+    // Bounds: a capture long after the change (another cause), no change yet, the hold off.
+    expect(!ar::nsf_resize_hold(change + 20'000 + 100, change, change + 20'000, hold), "an accept 20 s later: not this change's");
+    expect(!ar::nsf_resize_hold(5000, 0, 4900, hold), "no live change yet: no hold");
+    expect(!ar::nsf_resize_hold(change + 100, change, change + 50, 0), "VR_AutoResNsfHoldMs=0: no hold");
 }
 
 static void test_step_strikes() {
@@ -640,9 +640,9 @@ int main() {
     test_edges();
     test_order();
     test_limits();
-    test_nsf_resize_hold();
     test_upscaler_probe();
     test_step_effect();
+    test_nsf_resize_hold();
     test_dlss_floor();
     test_internal_recovery();
     test_anchor_gate();

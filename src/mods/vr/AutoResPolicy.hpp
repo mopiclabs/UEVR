@@ -192,6 +192,28 @@ struct Step {
 // up: the GPU has room. cpu_up: CPU-bound with the GPU NORMAL; the same step up, wanted for as long as both hold.
 enum class Request : uint8_t { none, down, up, cpu_up };
 
+// VR_AutoResNsfHoldMs (MopicNativeSubmitD3D12/D3D11): after a live resolution change the Native Stereo Fix's new
+// right-eye capture comes out dark for its first frames (exposure and history start over), so the left eye goes in both
+// halves from the change until hold_ms has passed since the new capture was accepted. Times in ms on one clock;
+// change_ms 0 = no live change yet. Before the new capture comes, the hold lasts at most hold_ms + NSF_HOLD_WAIT_MS
+// after the change; a capture accepted later than that still gets its hold_ms (within NSF_LATE_ACCEPT_MS of the change):
+// on the 3080 laptop at 113-119 % of the VRAM budget the capture came back 4.6-5.7 s after the change, after the old
+// single ceiling (hold_ms + 1.8 s), and its first frames showed a black right eye (Black Myth: Wukong, 2026-11-26).
+inline constexpr int64_t NSF_HOLD_WAIT_MS = 1800;
+inline constexpr int64_t NSF_LATE_ACCEPT_MS = 15000;
+
+inline bool nsf_resize_hold(int64_t now_ms, int64_t change_ms, int64_t accepted_ms, int64_t hold_ms) {
+    if (hold_ms <= 0 || change_ms == 0) {
+        return false;
+    }
+
+    if (accepted_ms >= change_ms) {
+        return accepted_ms - change_ms < NSF_LATE_ACCEPT_MS && now_ms - accepted_ms < hold_ms;
+    }
+
+    return now_ms - change_ms < hold_ms + NSF_HOLD_WAIT_MS;
+}
+
 // Records an edge and says what it asks for (design v1 §3-2). GPU RENDERING IMPAIRED: one step down; WARNING: hold;
 // NORMAL: one step up. CPU RENDERING IMPAIRED: CPU-bound, so SP and the upscaler go back to the game's values and the
 // spare GPU goes into pixels, but only when the GPU's last state is NORMAL. THERMAL and COMPOSITING are for display.
@@ -239,28 +261,6 @@ inline std::optional<Step> next_down(const State& state, const Available& availa
     }
 
     return std::nullopt;
-}
-
-// VR_AutoResNsfHoldMs (MopicNativeSubmitD3D12/D3D11): after a live resolution change the Native Stereo Fix's new
-// right-eye capture comes out dark for its first frames (exposure and history start over), so the left eye goes in both
-// halves from the change until hold_ms has passed since the new capture was accepted. Times in ms on one clock;
-// change_ms 0 = no live change yet. Before the new capture comes, the hold lasts at most hold_ms + NSF_HOLD_WAIT_MS
-// after the change; a capture accepted later than that still gets its hold_ms (within NSF_LATE_ACCEPT_MS of the change):
-// on the 3080 laptop at 113-119 % of the VRAM budget the capture came back 4.6-5.7 s after the change, after the old
-// single ceiling (hold_ms + 1.8 s), and its first frames showed a black right eye (Black Myth: Wukong, 2026-11-26).
-inline constexpr int64_t NSF_HOLD_WAIT_MS = 1800;
-inline constexpr int64_t NSF_LATE_ACCEPT_MS = 15000;
-
-inline bool nsf_resize_hold(int64_t now_ms, int64_t change_ms, int64_t accepted_ms, int64_t hold_ms) {
-    if (hold_ms <= 0 || change_ms == 0) {
-        return false;
-    }
-
-    if (accepted_ms >= change_ms) {
-        return accepted_ms - change_ms < NSF_LATE_ACCEPT_MS && now_ms - accepted_ms < hold_ms;
-    }
-
-    return now_ms - change_ms < hold_ms + NSF_HOLD_WAIT_MS;
 }
 
 // One step up: the eye size back to the anchor (start_level: where the session started, or Base after
