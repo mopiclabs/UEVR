@@ -40220,7 +40220,8 @@ void* FFakeStereoRenderingHook::slate_draw_window_render_thread(void* renderer, 
                 }
             }};
 
-            utility::ShemuContext ctx{*module_within};
+            auto ctx_holder = sdk::make_module_shemu_context(*module_within); // lazily zeroed, same context (sdk/Utility.hpp)
+            auto& ctx = *ctx_holder->emu;
             ctx.ctx->Registers.RegRip = (ND_UINT64)g_hook->m_slate_thread_hook.target_address();
             ctx.ctx->Registers.RegRcx = (ND_UINT64)renderer;
             ctx.ctx->Registers.RegRdx = (ND_UINT64)a2;
@@ -41661,7 +41662,8 @@ bool VRRenderTargetManager_Base::need_reallocate_view_target(const sdk::FViewpor
         if (ret_addr) {
             SPDLOG_INFO("Found return address: {:x}", *ret_addr);
 
-            utility::ShemuContext ctx{*module_within};
+            auto ctx_holder = sdk::make_module_shemu_context(*module_within); // lazily zeroed, same context (sdk/Utility.hpp)
+            auto& ctx = *ctx_holder->emu;
             ctx.ctx->Registers.RegRip = *ret_addr;
             ctx.ctx->Registers.RegRax = 1; // As if we're returning true from this function.
 
@@ -46810,7 +46812,8 @@ bool VRRenderTargetManager_Base::allocate_render_target_texture(uintptr_t return
         // Previously, we were using just straight linear disassembly to do this, and it mostly worked
         // but in one game, there was an unconditional branch after the call instead of flowing
         // directly into the next instruction.
-        auto emu = utility::ShemuContext{*utility::get_module_within(return_address)};
+        auto emu_holder = sdk::make_module_shemu_context(*utility::get_module_within(return_address)); // lazily zeroed, same context (sdk/Utility.hpp)
+        auto& emu = *emu_holder->emu;
 
         emu.ctx->Registers.RegRax = 0;
         emu.ctx->Registers.RegRip = (ND_UINT64)return_address;
