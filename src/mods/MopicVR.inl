@@ -51,6 +51,12 @@
         return m_debug_share_gdf_fail_verify->value();
     }
 
+    // VR_NativeStereoFixShareShadowCascades (default on, acts only where it is found and verified): the right eye's render
+    // uses the left eye's directional shadow cascades and skips drawing its own shadow atlas (see vr/CascadeShare.hpp).
+    bool is_native_stereo_fix_share_shadow_cascades_enabled() const {
+        return m_native_stereo_fix_share_shadow_cascades->value();
+    }
+
     // VR_ExperimentRightEyeRTShare (EXPERIMENT, default 0 = off, 2 in Hogwarts Legacy (VR::on_config_load); 1 = observe
     // and validate, 2 = share once validated, 3 = share in even 10-second QPC windows): the Native Stereo Fix right
     // eye's renderer borrows the ray tracing scene the left eye's renderer built in the same frame (see RtSceneShare.hpp).
