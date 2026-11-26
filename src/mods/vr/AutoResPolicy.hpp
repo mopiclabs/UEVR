@@ -209,6 +209,13 @@ inline Request on_edge(State& state, Domain domain, SubDomain sub_domain, Notifi
     return to == Notification::impaired && state.gpu == Notification::normal ? Request::cpu_up : Request::none;
 }
 
+// Whether an automatic level step rebuilds live on this engine path (VR::autores_level_rebuilds_live, decided before the
+// eye size changes): inside the slider's version band (UE 4.27, 5.3+), or with VR_AutoResLevelOnAnyEngine any other
+// engine but UE4 before 4.27 and Stalker 2, whose live rebuild is off on purpose. A refused step changes nothing.
+inline bool level_step_rebuilds_live(bool version_band, bool level_on_any_engine, bool older_ue4, bool stalker2) {
+    return version_band || (level_on_any_engine && !older_ue4 && !stalker2);
+}
+
 // Whether a request held back (loading, the level interval) still stands.
 inline bool still_wanted(const State& state, Request request) {
     switch (request) {
@@ -239,13 +246,6 @@ inline std::optional<Step> next_down(const State& state, const Available& availa
     }
 
     return std::nullopt;
-}
-
-// Whether an automatic level step rebuilds live on this engine path (VR::autores_level_rebuilds_live, decided before the
-// eye size changes): inside the slider's version band (UE 4.27, 5.3+), or with VR_AutoResLevelOnAnyEngine any other
-// engine but UE4 before 4.27 and Stalker 2, whose live rebuild is off on purpose. A refused step changes nothing.
-inline bool level_step_rebuilds_live(bool version_band, bool level_on_any_engine, bool older_ue4, bool stalker2) {
-    return version_band || (level_on_any_engine && !older_ue4 && !stalker2);
 }
 
 // One step up: the eye size back to the anchor (start_level: where the session started, or Base after
