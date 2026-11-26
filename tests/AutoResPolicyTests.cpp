@@ -112,6 +112,16 @@ static void test_frame_bound() {
     expect(weak.state == ar::FrameBound::unknown, "a weak slowdown (3080L TEKKEN, r 0.92-0.97) stays unknown at 0.93");
 }
 
+static void test_level_rebuilds_live() {
+    // version_band, level_on_any_engine, older_ue4, stalker2
+    expect(ar::level_step_rebuilds_live(true, false, false, false), "UE 5.3+ / 4.27: live without the option");
+    expect(ar::level_step_rebuilds_live(true, true, true, false), "UE 4.27 (in the band, reads as 4.x): live");
+    expect(ar::level_step_rebuilds_live(false, true, false, false), "UE 5.0-5.2 / unreadable with the option (default): live");
+    expect(!ar::level_step_rebuilds_live(false, false, false, false), "UE 5.0-5.2 with the option off: refused");
+    expect(!ar::level_step_rebuilds_live(false, true, true, false), "UE4 before 4.27: refused");
+    expect(!ar::level_step_rebuilds_live(false, true, false, true), "Stalker 2: refused");
+}
+
 static void test_edges() {
     ar::State state{};
     expect(ar::on_edge(state, ar::Domain::gpu, ar::SubDomain::rendering, ar::Notification::impaired) == ar::Request::down,
@@ -218,6 +228,68 @@ static void test_limits() {
     state = ar::State{};
     expect(step(state, ar::Available{.sp = false, .upscaler_steps = 0}, ar::Request::down) && state.level == 1 && state.upscaler == 0,
         "no room under DLSS: the level");
+}
+
+static void test_vram_step_up() {
+    const ar::Available dlss{.sp = false};
+
+    // The 3080 laptop at Min with DLSS at its floor, over the budget (2026-11-26): a NORMAL edge brings DLSS back up
+    // first, then would take Min -> Saver; over the budget the level stays.
+    {
+        ar::State state{.upscaler = 1, .level = ar::MIN_LEVEL, .vram_over = true};
+        expect(step(state, dlss, ar::Request::up) && state.upscaler == 0 && state.level == ar::MIN_LEVEL,
+            "over the budget: the upscaler still goes back up");
+        expect(!ar::level_up_held_by_vram(ar::State{.upscaler = 1, .level = ar::MIN_LEVEL, .vram_over = true}, dlss),
+            "a step that does go (the upscaler) is not held back");
+        expect(!step(state, dlss, ar::Request::up) && state.level == ar::MIN_LEVEL, "over the budget: no level step up");
+        expect(ar::level_up_held_by_vram(state, dlss), "the step up is held back by the memory, not missing");
+        state.vram_over = false;
+        expect(step(state, dlss, ar::Request::up) && state.level == ar::MIN_LEVEL + 1, "under the budget again: Min -> Saver");
+        expect(!ar::level_up_held_by_vram(state, dlss), "under the budget nothing is held back");
+    }
+
+    // Below the start level (the steps took the eye down): the way back up is held too; down steps are not.
+    {
+        ar::State state{.level = ar::MIN_LEVEL, .start_level = ar::BASE_LEVEL, .vram_over = true};
+        expect(!step(state, dlss, ar::Request::up), "over the budget: not back up to the start either");
+        ar::State high{.level = ar::BASE_LEVEL, .vram_over = true};
+        expect(step(high, ar::Available{.sp = false, .upscaler_steps = 0}, ar::Request::down) && high.level == ar::BASE_LEVEL - 1,
+            "over the budget: steps down as before");
+    }
+
+    // At the top already (or no level steps): nothing to step, and nothing held back either.
+    {
+        ar::State state{.level = ar::MAX_LEVEL, .vram_over = true};
+        expect(!ar::level_up_held_by_vram(state, dlss), "at Max: nothing held back");
+        expect(!ar::level_up_held_by_vram(ar::State{.vram_over = true}, ar::Available{.sp = false, .level = false}),
+            "no level steps: nothing held back");
+    }
+
+    // The guard at Min: the cap goes to Min once, for the session; above Min, or without level steps, it doesn't.
+    {
+        ar::State state{.level = ar::MIN_LEVEL};
+        expect(ar::cap_at_min_after_guard(state, dlss) && state.level_cap == ar::MIN_LEVEL, "guard at Min: capped at Min");
+        expect(!ar::cap_at_min_after_guard(state, dlss), "capped once");
+        state.vram_over = false;
+        expect(!step(state, dlss, ar::Request::up) && state.level == ar::MIN_LEVEL, "capped: no step up under the budget either");
+
+        ar::State saver{.level = ar::MIN_LEVEL + 1};
+        expect(!ar::cap_at_min_after_guard(saver, dlss) && saver.level_cap == ar::MAX_LEVEL, "above Min: the guard steps instead");
+        ar::State no_levels{.level = ar::MIN_LEVEL};
+        expect(!ar::cap_at_min_after_guard(no_levels, ar::Available{.level = false}), "no level steps: no cap");
+    }
+
+    // A PC with headroom: never over, every step up as before, Base -> Max.
+    {
+        ar::State state{};
+        int steps = 0;
+
+        while (step(state, dlss, ar::Request::up)) {
+            ++steps;
+        }
+
+        expect(state.level == ar::MAX_LEVEL && steps == ar::MAX_LEVEL - ar::BASE_LEVEL, "headroom: up to Max as before");
+    }
 }
 
 static void test_dlss_floor() {
@@ -392,6 +464,25 @@ static void test_step_effect() {
     expect(ar::judge_step(30.0f, 30.5f) == ar::StepEffect::nothing, "SP under DLSS, or slower: nothing");
     expect(ar::judge_step(30.0f, 30.0f * 0.94f) == ar::StepEffect::unclear, "6 % less: kept, not judged either way");
     expect(ar::judge_step(0.0f, 10.0f) == ar::StepEffect::unclear, "no GPU time before: not judged");
+}
+
+static void test_nsf_resize_hold() {
+    const int64_t change = 100'000, hold = 700;
+
+    // The 4090 laptop: the capture back 0.3 s after the change, held 0.7 s after that (as before).
+    expect(ar::nsf_resize_hold(change + 100, change, change - 5000, hold), "waiting for the capture: held");
+    expect(ar::nsf_resize_hold(change + 900, change, change + 300, hold), "0.6 s after the accept: held");
+    expect(!ar::nsf_resize_hold(change + 1100, change, change + 300, hold), "0.8 s after the accept: shown");
+
+    // The 3080 laptop: the capture back 5.67 s after the change, past the old single ceiling (0.7 + 1.8 s).
+    expect(!ar::nsf_resize_hold(change + 3000, change, change - 5000, hold), "no capture yet, past the wait: shown as before");
+    expect(ar::nsf_resize_hold(change + 5670 + 200, change, change + 5670, hold), "late capture: its first frames held");
+    expect(!ar::nsf_resize_hold(change + 5670 + 800, change, change + 5670, hold), "late capture after its hold: shown");
+
+    // Bounds: a capture long after the change (another cause), no change yet, the hold off.
+    expect(!ar::nsf_resize_hold(change + 20'000 + 100, change, change + 20'000, hold), "an accept 20 s later: not this change's");
+    expect(!ar::nsf_resize_hold(5000, 0, 4900, hold), "no live change yet: no hold");
+    expect(!ar::nsf_resize_hold(change + 100, change, change + 50, 0), "VR_AutoResNsfHoldMs=0: no hold");
 }
 
 static void test_step_strikes() {
@@ -900,11 +991,14 @@ static void test_repeat_burst() {
 int main() {
     test_ladder();
     test_frame_bound();
+    test_level_rebuilds_live();
     test_edges();
     test_order();
     test_limits();
+    test_vram_step_up();
     test_upscaler_probe();
     test_step_effect();
+    test_nsf_resize_hold();
     test_dlss_floor();
     test_internal_recovery();
     test_anchor_gate();

@@ -76,14 +76,16 @@ D3D12Component::MopicDoubleWideResult D3D12Component::submit_mopic_double_wide(M
     const auto nsf_hold = std::chrono::milliseconds(vr->m_openxr->autores.nsf_hold_ms);
     const auto live_resize_at = vr->m_openxr->autores.live_resize_at;
     const auto copy_now = std::chrono::steady_clock::now();
+    // The hold's timing (uevr::autores::nsf_resize_hold): a capture accepted late still gets its hold.
+    const auto ms = [](std::chrono::steady_clock::time_point t) {
+        return t.time_since_epoch().count() == 0 ? int64_t{0}
+            : (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count();
+    };
     const bool native_stereo_resize_hold =
-        nsf_hold.count() > 0 &&
         vr->is_native_stereo_fix_enabled() &&
         !use_native_array_submit &&
         !shf_using_mono_expansion && !dune_using_hmd_mono_expansion &&
-        live_resize_at.time_since_epoch().count() != 0 &&
-        copy_now - live_resize_at < nsf_hold + std::chrono::milliseconds(1800) &&
-        (m_scene_capture_accepted_at < live_resize_at || copy_now - m_scene_capture_accepted_at < nsf_hold);
+        uevr::autores::nsf_resize_hold(ms(copy_now), ms(live_resize_at), ms(m_scene_capture_accepted_at), nsf_hold.count());
 
     // VR_AutoResSourceHoldMs, without the fix: the game's first frames in its render target of the new
     // size have a black right eye (Hozy: 1-3 frames from ~40 ms after the switch, live-resolution

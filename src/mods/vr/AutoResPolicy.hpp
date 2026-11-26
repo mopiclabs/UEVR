@@ -169,6 +169,7 @@ struct State {
     int level{BASE_LEVEL};
     int start_level{BASE_LEVEL};
     int level_cap{MAX_LEVEL}; // min(Max, the runtime's maxImageRect, the VRAM guard)
+    bool vram_over{false};    // GPU memory over the DXGI budget in the last second read: no level step up (next_up)
     Notification gpu{Notification::normal};
     Notification cpu{Notification::normal};
 };
@@ -192,6 +193,28 @@ struct Step {
 // up: the GPU has room. cpu_up: CPU-bound with the GPU NORMAL; the same step up, wanted for as long as both hold.
 enum class Request : uint8_t { none, down, up, cpu_up };
 
+// VR_AutoResNsfHoldMs (MopicNativeSubmitD3D12/D3D11): after a live resolution change the Native Stereo Fix's new
+// right-eye capture comes out dark for its first frames (exposure and history start over), so the left eye goes in both
+// halves from the change until hold_ms has passed since the new capture was accepted. Times in ms on one clock;
+// change_ms 0 = no live change yet. Before the new capture comes, the hold lasts at most hold_ms + NSF_HOLD_WAIT_MS
+// after the change; a capture accepted later than that still gets its hold_ms (within NSF_LATE_ACCEPT_MS of the change):
+// on the 3080 laptop at 113-119 % of the VRAM budget the capture came back 4.6-5.7 s after the change, after the old
+// single ceiling (hold_ms + 1.8 s), and its first frames showed a black right eye (Black Myth: Wukong, 2026-11-26).
+inline constexpr int64_t NSF_HOLD_WAIT_MS = 1800;
+inline constexpr int64_t NSF_LATE_ACCEPT_MS = 15000;
+
+inline bool nsf_resize_hold(int64_t now_ms, int64_t change_ms, int64_t accepted_ms, int64_t hold_ms) {
+    if (hold_ms <= 0 || change_ms == 0) {
+        return false;
+    }
+
+    if (accepted_ms >= change_ms) {
+        return accepted_ms - change_ms < NSF_LATE_ACCEPT_MS && now_ms - accepted_ms < hold_ms;
+    }
+
+    return now_ms - change_ms < hold_ms + NSF_HOLD_WAIT_MS;
+}
+
 // Records an edge and says what it asks for (design v1 §3-2). GPU RENDERING IMPAIRED: one step down; WARNING: hold;
 // NORMAL: one step up. CPU RENDERING IMPAIRED: CPU-bound, so SP and the upscaler go back to the game's values and the
 // spare GPU goes into pixels, but only when the GPU's last state is NORMAL. THERMAL and COMPOSITING are for display.
@@ -207,6 +230,13 @@ inline Request on_edge(State& state, Domain domain, SubDomain sub_domain, Notifi
 
     state.cpu = to;
     return to == Notification::impaired && state.gpu == Notification::normal ? Request::cpu_up : Request::none;
+}
+
+// Whether an automatic level step rebuilds live on this engine path (VR::autores_level_rebuilds_live, decided before the
+// eye size changes): inside the slider's version band (UE 4.27, 5.3+), or with VR_AutoResLevelOnAnyEngine any other
+// engine but UE4 before 4.27 and Stalker 2, whose live rebuild is off on purpose. A refused step changes nothing.
+inline bool level_step_rebuilds_live(bool version_band, bool level_on_any_engine, bool older_ue4, bool stalker2) {
+    return version_band || (level_on_any_engine && !older_ue4 && !stalker2);
 }
 
 // Whether a request held back (loading, the level interval) still stands.
@@ -244,8 +274,16 @@ inline std::optional<Step> next_down(const State& state, const Available& availa
 // One step up: the eye size back to the anchor (start_level: where the session started, or Base after
 // VR_AutoResOutputAnchor), then the internal resolution back to the game's own, then pixels above the anchor up to the
 // cap. SP and the upscaler are restored even when they are no longer available.
+//
+// No level step up while GPU memory is over the DXGI budget (state.vram_over): a bigger eye allocates new targets and,
+// on most engine paths, rebuilds the swapchains live while the OS is already demoting memory. The guard below only
+// steps down after 3 s over and had nothing to take at Min, so an 8 GB laptop at Min over the budget all along took a
+// NORMAL edge's Min -> Saver rebuild at 113-119 % (3080 laptop, Black Myth: Wukong, 2026-11-26: a GPU MMU fault 1.3 s
+// after the next step, Saver -> Base). SP and the upscaler still go back up: they render into the same targets.
 inline std::optional<Step> next_up(const State& state, const Available& available) {
-    if (available.level && state.level < state.start_level && state.level < state.level_cap) {
+    const auto level_up = available.level && !state.vram_over;
+
+    if (level_up && state.level < state.start_level && state.level < state.level_cap) {
         return Step{Actuator::level, state.level, state.level + 1};
     }
 
@@ -257,11 +295,34 @@ inline std::optional<Step> next_up(const State& state, const Available& availabl
         return Step{Actuator::sp, state.sp, state.sp - 1};
     }
 
-    if (available.level && state.level < state.level_cap) {
+    if (level_up && state.level < state.level_cap) {
         return Step{Actuator::level, state.level, state.level + 1};
     }
 
     return std::nullopt;
+}
+
+// Whether next_up's answer is nothing only because GPU memory is over the budget (a level step up held back).
+inline bool level_up_held_by_vram(const State& state, const Available& available) {
+    if (!state.vram_over || next_up(state, available)) {
+        return false;
+    }
+
+    auto under = state;
+    under.vram_over = false;
+    const auto step = next_up(under, available);
+    return step && step->actuator == Actuator::level;
+}
+
+// The VRAM guard (3 s over the budget, settled, not loading) at the lowest level: nothing to take, so the cap goes there
+// for the session, as a guard step down caps at the level it leaves. True when it set the cap now.
+inline bool cap_at_min_after_guard(State& state, const Available& available) {
+    if (!available.level || state.level != MIN_LEVEL || state.level_cap <= MIN_LEVEL) {
+        return false;
+    }
+
+    state.level_cap = MIN_LEVEL;
+    return true;
 }
 
 // Frame-bound games (design v1 §3-2, Appendix B): a game whose time runs with its frames plays in slow motion below its
