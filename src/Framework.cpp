@@ -2137,6 +2137,14 @@ unsigned long __stdcall Framework::async_first_frame_thread(void* param) {
 
     try {
         self_framework->m_async_first_frame_error = self_framework->m_mods->on_initialize_d3d_thread(false);
+
+        // update_hmd_state's cvar lookups scan the module on first use (~1 s on Wukong) and would run on the first
+        // Presents after the OpenXR session is READY, the long hooked Present this worker exists to avoid.
+        if (!self_framework->m_async_first_frame_error) {
+            if (const auto& vr = VR::get(); vr != nullptr) {
+                vr->prime_hmd_state_cvars();
+            }
+        }
     } catch (...) {
         self_framework->m_async_first_frame_error = std::string{"An exception has occurred during the first-frame initialization."};
     }

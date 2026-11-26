@@ -7878,12 +7878,9 @@ void VR::on_pre_viewport_client_draw(void* viewport_client, void* viewport, void
     }
 }
 
-void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
-    ZoneScopedN(__FUNCTION__);
-
-    std::scoped_lock _{m_reinitialize_mtx};
-
-    auto runtime = get_runtime();
+// The cvars update_hmd_state writes every frame. Each one's first lookup scans the game module (string references, and
+// for GetInt the console-variable vtable layout): about 1 s in all on Black Myth: Wukong.
+void VR::apply_hmd_state_cvars() {
     if (m_uncap_framerate->value()) {
         sdk::set_cvar_data_float(L"Engine", L"t.MaxFPS", 500.0f);
     }
@@ -7898,13 +7895,50 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
             sdk::set_cvar_int(L"Slate", L"Slate.AllowBackgroundBlurWidgets", 0);
         }
     }
+}
 
-    // With Slate.DrawToVRRenderTarget 0 a UE4/UE5.0-5.3 game draws Slate to the swapchain, past the UI redirect
-    // (Stellar Blade). Keep it at 1 only while the redirect is on (the hook's own condition, and a redirected DrawWindow
-    // within the last second): with 1 and no redirect, Slate would draw over the scene target.
-    if (m_fake_stereo_hook != nullptr && is_legacy_slate_vr_target_runtime_cached()) {
-        update_slate_draw_to_vr_target(is_hmd_active() && !is_stereo_emulation_enabled() &&
-            m_fake_stereo_hook->is_legacy_slate_redirect_recent(std::chrono::seconds(1)));
+// Called once on the first-frame worker (Framework::async_first_frame_thread) after the mods' initialization: does the
+// first lookups of update_hmd_state's cvars there, so the first Presents after the OpenXR session is READY (DLSS-G's
+// pacer under frame generation) find them cached instead of scanning the module (~1 s on Wukong). The sdk lookup
+// caches have no lock of their own: this runs while every Present takes the deferred path (nothing of UEVR's), and
+// update_hmd_state skips the writes until it is done.
+void VR::prime_hmd_state_cvars() try {
+    const auto start = std::chrono::steady_clock::now();
+    m_hmd_state_cvars_priming = true;
+
+    apply_hmd_state_cvars();
+
+    if (is_legacy_slate_vr_target_runtime_cached()) {
+        sdk::find_cvar_cached(L"SlateRHIRenderer", L"Slate.DrawToVRRenderTarget");
+    }
+
+    m_hmd_state_cvars_primed = true;
+    spdlog::info("[Startup] HMD-state cvar lookups primed on the first-frame worker in {} ms",
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
+} catch (...) {
+    m_hmd_state_cvars_primed = true; // the Present path looks them up as before
+    spdlog::warn("[Startup] priming the HMD-state cvar lookups threw; they are looked up on the Present as before");
+}
+
+void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
+    ZoneScopedN(__FUNCTION__);
+
+    std::scoped_lock _{m_reinitialize_mtx};
+
+    auto runtime = get_runtime();
+
+    // While the first-frame worker primes these lookups (prime_hmd_state_cvars) they are skipped here, so a Present
+    // never waits for them; the worker finishes before the first Present that starts VR, so in practice none is skipped.
+    if (!m_hmd_state_cvars_priming.load() || m_hmd_state_cvars_primed.load()) {
+        apply_hmd_state_cvars();
+
+        // With Slate.DrawToVRRenderTarget 0 a UE4/UE5.0-5.3 game draws Slate to the swapchain, past the UI redirect
+        // (Stellar Blade). Keep it at 1 only while the redirect is on (the hook's own condition, and a redirected
+        // DrawWindow within the last second): with 1 and no redirect, Slate would draw over the scene target.
+        if (m_fake_stereo_hook != nullptr && is_legacy_slate_vr_target_runtime_cached()) {
+            update_slate_draw_to_vr_target(is_hmd_active() && !is_stereo_emulation_enabled() &&
+                m_fake_stereo_hook->is_legacy_slate_redirect_recent(std::chrono::seconds(1)));
+        }
     }
 
     if (!is_using_afr()) {

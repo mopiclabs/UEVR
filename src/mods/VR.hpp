@@ -208,6 +208,8 @@ public:
     void on_pre_viewport_client_draw(void* viewport_client, void* viewport, void* canvas) override;
 
     void update_hmd_state(bool from_view_extensions = false, uint32_t frame_count = 0);
+    // First lookups of update_hmd_state's cvars, done once on the first-frame worker (VR.cpp).
+    void prime_hmd_state_cvars();
     void update_action_states(bool from_stalled_xinput = false);
     void update_dpad_gestures();
 
@@ -1090,6 +1092,10 @@ public:
     static void run_openxr_prewarm(std::shared_ptr<OpenXRPrewarm> state);
 private:
     std::shared_ptr<OpenXRPrewarm> m_openxr_prewarm{};
+
+    void apply_hmd_state_cvars();
+    std::atomic<bool> m_hmd_state_cvars_priming{false};
+    std::atomic<bool> m_hmd_state_cvars_primed{false};
     std::optional<std::string> initialize_openxr_input();
     std::optional<std::string> initialize_openxr_swapchains();
 
