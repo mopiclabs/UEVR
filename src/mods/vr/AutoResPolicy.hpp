@@ -700,6 +700,7 @@ struct SceneCheck {
     SceneRead read{SceneRead::unknown};
     SceneJump before{};
     SceneJump after{};
+    std::optional<float> repeat_burst{}; // seconds from the step to a burst of repeated Presents in the trial (RepeatBurstClock)
 };
 
 namespace detail {
@@ -761,6 +762,87 @@ inline SceneCheck compare_scene(const std::vector<SecondReading>& before, const 
     check.before = scene_jump(before);
     check.after = scene_jump(after);
     check.read = check.before.jump > SCENE_JUMP || check.after.jump > SCENE_JUMP ? SceneRead::changed : SceneRead::same;
+    return check;
+}
+
+// A fade the engine renders through can cut the content inside one second, too short for a split of SCENE_MIN_RUN
+// seconds a side (3080L, Black Myth: Wukong's death fade, 2026-11-26: a trial across it read -36 % GPU time, play's
+// were -8..-15 %). What the fade does show: the game presents without a new engine frame, 4-5 times a second for
+// about 2 s (the "Present passes skipped" counter), where play shows none. A burst of REPEAT_BURST_PRESENTS or more in
+// one second after REPEAT_QUIET_SECONDS with at most REPEAT_QUIET_PRESENTS in all marks such a cut; a game that always
+// presents twice never makes one, and frame generation (FrameGenCheck) isn't counted, so either keeps today's trial.
+// A burst from the start of the "before" seconds to the end of the trial reads the scene as changed: a reading
+// against the step is rescheduled, one for it is kept with no strike moved (judge_trial). It doesn't see a trial
+// wholly inside a loading picture, which measures the world the engine keeps rendering behind it (4090 laptop perf.csv,
+// 2026-11-26: a fresh right-eye render every frame of the picture, at play's frame rate).
+inline constexpr int REPEAT_BURST_PRESENTS = 3;
+inline constexpr int REPEAT_QUIET_SECONDS = 5;
+inline constexpr int REPEAT_QUIET_PRESENTS = 2;
+
+struct RepeatBurstClock {
+    int64_t second_start_ns{0};             // 0: none yet
+    int current{0};                         // repeats in the second from second_start_ns
+    std::array<int, REPEAT_QUIET_SECONDS> earlier{}; // the seconds before it, the latest first
+    bool burst_this_second{false};
+    int64_t last_burst_ns{0};               // 0: none yet
+
+    // One Present at now_ns; repeat: no new engine frame since the Present before. True when it starts a burst.
+    bool on_present(int64_t now_ns, bool repeat) {
+        constexpr int64_t second = 1'000'000'000;
+
+        if (second_start_ns == 0) {
+            second_start_ns = now_ns;
+        }
+
+        if (now_ns - second_start_ns >= second) {
+            const auto gone = (now_ns - second_start_ns) / second;
+
+            if (gone > REPEAT_QUIET_SECONDS) {
+                earlier.fill(0);
+            } else {
+                for (int64_t i = 0; i < gone; ++i) {
+                    for (size_t j = earlier.size() - 1; j > 0; --j) {
+                        earlier[j] = earlier[j - 1];
+                    }
+
+                    earlier[0] = i == 0 ? current : 0;
+                }
+            }
+
+            second_start_ns += gone * second;
+            current = 0;
+            burst_this_second = false;
+        }
+
+        if (!repeat) {
+            return false;
+        }
+
+        ++current;
+
+        auto quiet = 0;
+
+        for (const auto count : earlier) {
+            quiet += count;
+        }
+
+        if (!burst_this_second && current >= REPEAT_BURST_PRESENTS && quiet <= REPEAT_QUIET_PRESENTS) {
+            burst_this_second = true;
+            last_burst_ns = now_ns;
+            return true;
+        }
+
+        return false;
+    }
+};
+
+// compare_scene's check with a burst of repeated Presents in the trial (seconds from the step; before it negative).
+inline SceneCheck with_repeat_burst(SceneCheck check, std::optional<float> burst_seconds) {
+    if (burst_seconds) {
+        check.read = SceneRead::changed;
+        check.repeat_burst = burst_seconds;
+    }
+
     return check;
 }
 

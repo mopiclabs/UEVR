@@ -8854,6 +8854,9 @@ void VR::update_autores() {
     const auto new_engine_frame = m_frame_count != m_autores_last_frame_count;
     m_autores_last_frame_count = m_frame_count;
     m_autores_frame_generation.on_present(ns(now), new_engine_frame, stall);
+    // A fade's burst of Presents without a new engine frame (AutoResPolicy.hpp RepeatBurstClock); not under frame
+    // generation, where every engine frame presents more than once.
+    m_autores_repeat_burst.on_present(ns(now), !new_engine_frame && !m_autores_frame_generation.on);
 
     m_autores_controller.on_present(*m_openxr, *m_cvar_manager, AutoResController::Inputs{
         .enabled = m_autores->value(),
@@ -8862,6 +8865,7 @@ void VR::update_autores() {
         .level_interval_seconds = m_autores_level_interval_seconds->value(),
         .loading = loading,
         .frame_generation = m_autores_frame_generation.on,
+        .repeat_burst_ns = m_autores_repeat_burst.last_burst_ns,
         .level_possible = !m_2d_screen_mode->value() && !m_extreme_compat_mode->value(),
         .frame_bound_detect = m_autores_frame_bound_detect->value(),
         .tick_delta_us = m_autores_tick_clock.delta_us(),

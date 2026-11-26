@@ -805,8 +805,9 @@ void AutoResController::sync_available(CVarManager& cvars) {
 // takes it again 5 s later from a fresh "before" (a scene change can read as the step's, StepStrikes). The second in a
 // row stops the actuator at the step before it for the session, or leaves it out if it was the first, and a request
 // still wanted goes to the next actuator. A window with a stall or a load in it is not judged and counts neither way.
-// Nor is a reading against the step while the seconds around it show the scene changing (compare_scene, judge_trial):
-// the step is put back and taken again without a strike, twice in a row at most, then kept unjudged.
+// Nor is a reading against the step while the seconds around it show the scene changing (compare_scene, or a fade's
+// burst of repeated Presents in them, with_repeat_burst; judge_trial): the step is put back and taken again without a
+// strike, twice in a row at most, then kept unjudged.
 void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     if (!m_step_check) {
         return;
@@ -849,9 +850,20 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
     const auto span = [](float seconds) {
         return std::chrono::duration_cast<clock::duration>(std::chrono::duration<float>{seconds});
     };
-    // The seconds around the step: one scene, or a change the step can't have made (AutoResPolicy.hpp compare_scene).
-    const auto scene = ar::compare_scene(m_gpu.seconds(check.at - span(ar::SCENE_BEFORE_SECONDS), check.at),
-        m_gpu.seconds(check.at + span(ar::SCENE_AFTER_FROM_SECONDS), now));
+    // The seconds around the step: one scene, or a change the step can't have made (AutoResPolicy.hpp compare_scene),
+    // a fade's burst of repeated Presents in them included (with_repeat_burst).
+    std::optional<float> burst{};
+
+    if (inputs.repeat_burst_ns != 0) {
+        const auto burst_at = clock::time_point{std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds{inputs.repeat_burst_ns})};
+
+        if (burst_at >= check.at - span(ar::SCENE_BEFORE_SECONDS) && burst_at <= now) {
+            burst = std::chrono::duration<float>(burst_at - check.at).count();
+        }
+    }
+
+    const auto scene = ar::with_repeat_burst(ar::compare_scene(m_gpu.seconds(check.at - span(ar::SCENE_BEFORE_SECONDS), check.at),
+        m_gpu.seconds(check.at + span(ar::SCENE_AFTER_FROM_SECONDS), now)), burst);
     auto& strikes = check.actuator == ar::Actuator::sp ? m_sp_strikes : m_upscaler_strikes;
     auto& discards = check.actuator == ar::Actuator::sp ? m_sp_discards : m_upscaler_discards;
     const auto verdict = ar::judge_trial(ar::TrialReading{.stall = check.loading, .gpu_ms_before = check.gpu_ms_before,
@@ -894,13 +906,14 @@ void AutoResController::check_step(CVarManager& cvars, const Inputs& inputs) {
         break;
     }
 
-    SPDLOG_INFO("[autores] {} step {}: GPU {} -> {} ms per frame{}, {:.1f} -> {:.1f} fps{}: {}; scene {} (before: {}; after: {})",
+    SPDLOG_INFO("[autores] {} step {}: GPU {} -> {} ms per frame{}, {:.1f} -> {:.1f} fps{}: {}; scene {} (before: {}; after: {}{})",
         name, check.to, fmt_ms(check.gpu_ms_before), fmt_ms(gpu_ms_after),
         check.gpu_ms_before && gpu_ms_after && *check.gpu_ms_before > 0.0f
             ? fmt::format(" ({:+.0f} %)", 100.0f * (*gpu_ms_after / *check.gpu_ms_before - 1.0f)) : std::string{},
         check.fps_before, fps_after, check.loading ? " (a stall or a level change in between, not judged)" : "", outcome,
         scene.read == ar::SceneRead::changed ? "changed" : scene.read == ar::SceneRead::same ? "same" : "unknown",
-        fmt_jump(scene.before), fmt_jump(scene.after));
+        fmt_jump(scene.before), fmt_jump(scene.after),
+        scene.repeat_burst ? fmt::format("; repeated Presents at {:+.1f} s", *scene.repeat_burst) : std::string{});
 
     const auto actuator = check.actuator;
     m_step_check.reset();

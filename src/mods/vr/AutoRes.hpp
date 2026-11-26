@@ -74,6 +74,7 @@ public:
         int level_interval_seconds{60}; // VR_AutoResLevelIntervalSeconds
         bool loading{false};            // the engine or the Presents stopped in the last seconds
         bool frame_generation{false};   // the game presents more often than its engine ticks
+        int64_t repeat_burst_ns{0};     // steady_clock ns of the last burst of repeated Presents (RepeatBurstClock), 0: none
         bool level_possible{true};      // the eye size follows OpenXR (not the 2D screen or extreme compatibility mode)
         bool frame_bound_detect{false}; // VR_AutoResFrameBoundDetect
         uint64_t tick_delta_us{0};      // TickClock's sums

@@ -809,6 +809,94 @@ static void test_frame_generation() {
     }
 }
 
+// Presents at 40 a second for `seconds` from `start_s`; repeats_per_second of each second's Presents (the first ones)
+// have no new engine frame. Returns the bursts started (their times in seconds).
+static std::vector<double> run_presents(ar::RepeatBurstClock& clock, double start_s, int seconds, int repeats_per_second) {
+    std::vector<double> bursts{};
+
+    for (int s = 0; s < seconds; ++s) {
+        for (int i = 0; i < 40; ++i) {
+            const auto t = start_s + s + i / 40.0;
+
+            if (clock.on_present((int64_t)(t * 1e9), i < repeats_per_second)) {
+                bursts.push_back(t);
+            }
+        }
+    }
+
+    return bursts;
+}
+
+static void test_repeat_burst() {
+    // Black Myth: Wukong's death fade (4090 laptop perf.csv, 2026-11-26): no repeats in play, 5 then 4 in the fade's two
+    // seconds; one burst per fade, at its first second's third repeat.
+    {
+        ar::RepeatBurstClock clock{};
+        expect(run_presents(clock, 100.0, 30, 0).empty(), "fade: play makes no burst");
+        const auto fade = run_presents(clock, 130.0, 1, 5);
+        expect(fade.size() == 1 && fade[0] > 130.0 && fade[0] < 130.1, "fade: a burst at its start");
+        expect((int64_t)(fade[0] * 1e9) == clock.last_burst_ns, "fade: last_burst_ns is the burst");
+        expect(run_presents(clock, 131.0, 1, 4).empty(), "fade: its second second is the same burst");
+        expect(run_presents(clock, 132.0, 50, 0).empty(), "fade: the picture and the play after it make none");
+        expect(run_presents(clock, 182.0, 1, 5).size() == 1, "fade: the next fade a minute later is a burst of its own");
+    }
+
+    // A game that always presents twice: once the first seconds are counted, never a burst; a lone hitch with two
+    // repeats in a second neither.
+    {
+        ar::RepeatBurstClock clock{};
+        run_presents(clock, 10.0, 6, 20);
+        expect(run_presents(clock, 16.0, 120, 20).empty(), "always twice: no burst");
+
+        ar::RepeatBurstClock hitch{};
+        run_presents(hitch, 10.0, 10, 0);
+        expect(run_presents(hitch, 20.0, 1, 2).empty() && run_presents(hitch, 21.0, 10, 0).empty(), "a hitch: no burst");
+    }
+
+    // Two fades 3 s apart: the second has the first's repeats in its quiet seconds and is no burst; the trial still has
+    // the first in it.
+    {
+        ar::RepeatBurstClock clock{};
+        run_presents(clock, 0.0, 10, 0);
+        expect(run_presents(clock, 10.0, 1, 5).size() == 1, "close fades: the first is a burst");
+        run_presents(clock, 11.0, 2, 0);
+        expect(run_presents(clock, 13.0, 1, 5).empty(), "close fades: the second inside the quiet seconds is none");
+    }
+
+    // with_repeat_burst: a burst in the trial reads the scene as changed whatever the jumps said; none leaves it.
+    {
+        ar::SceneCheck same{};
+        same.read = ar::SceneRead::same;
+        expect(ar::with_repeat_burst(same, std::nullopt).read == ar::SceneRead::same, "no burst: same stays same");
+        const auto marked = ar::with_repeat_burst(same, 6.2f);
+        expect(marked.read == ar::SceneRead::changed && marked.repeat_burst && *marked.repeat_burst == 6.2f,
+            "a burst 6.2 s after the step: changed");
+        expect(ar::with_repeat_burst(ar::SceneCheck{}, -3.0f).read == ar::SceneRead::changed, "unknown with a burst: changed");
+    }
+
+    // The 3080 laptop's synthetic-edge run (2026-11-26) through judge_trial with the burst: a reading for the step across the fade (11:44:09, -36 %,
+    // "scene same") is kept with no strike moved, so the strike from the trial before it stays; a reading against
+    // across the fade is rescheduled.
+    {
+        ar::StepStrikes strikes{};
+        ar::TrialDiscards discards{};
+        ar::SceneCheck same{};
+        same.read = ar::SceneRead::same;
+        const auto across = ar::with_repeat_burst(same, 5.0f).read;
+        expect(ar::judge_trial(ar::TrialReading{.gpu_ms_before = 44.0f, .gpu_ms_after = 44.4f, .fps_before = 17.0f,
+            .fps_after = 17.1f, .scene = ar::SceneRead::same}, strikes, discards, 100.0).outcome == ar::TrialOutcome::put_back,
+            "D3 11:43:24 in play, +1 %: put back");
+        const auto favourable = ar::judge_trial(ar::TrialReading{.gpu_ms_before = 45.0f, .gpu_ms_after = 28.8f,
+            .fps_before = 17.5f, .fps_after = 22.7f, .scene = across}, strikes, discards, 145.0);
+        expect(favourable.outcome == ar::TrialOutcome::kept && favourable.effect == ar::StepEffect::works,
+            "D3 11:44:09 across the fade, -36 %: kept, not judged...");
+        expect(strikes.count == 1, "...without resetting the strike");
+        const auto against = ar::judge_trial(ar::TrialReading{.gpu_ms_before = 37.9f, .gpu_ms_after = 43.0f,
+            .fps_before = 21.2f, .fps_after = 18.4f, .scene = across}, strikes, discards, 160.0);
+        expect(against.outcome == ar::TrialOutcome::rescheduled && strikes.count == 1, "against across the fade: rescheduled");
+    }
+}
+
 int main() {
     test_ladder();
     test_frame_bound();
@@ -823,6 +911,7 @@ int main() {
     test_step_strikes();
     test_scene_check();
     test_judge_trial();
+    test_repeat_burst();
     test_stall_clock();
     test_frame_generation();
 

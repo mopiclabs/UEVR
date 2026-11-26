@@ -2265,6 +2265,7 @@ private:
     void tick_autores_frame_bound_detect(sdk::UGameEngine* engine, float delta); // on_pre_engine_tick
     AutoResController m_autores_controller{};
     uevr::autores::StallClock m_autores_stall{};
+    uevr::autores::RepeatBurstClock m_autores_repeat_burst{};
     int m_autores_last_frame_count{-1};
     uevr::autores::FrameGenCheck m_autores_frame_generation{};
     // VR_AutoResFrameBoundDetect: the game thread's tick sums and the engine's frame rate settings (read once there).
