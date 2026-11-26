@@ -74,6 +74,7 @@ public:
         int level_interval_seconds{60}; // VR_AutoResLevelIntervalSeconds
         bool loading{false};            // the engine or the Presents stopped in the last seconds
         bool frame_generation{false};   // the game presents more often than its engine ticks
+        int64_t repeat_burst_ns{0};     // steady_clock ns of the last burst of repeated Presents (RepeatBurstClock), 0: none
         bool level_possible{true};      // the eye size follows OpenXR (not the 2D screen or extreme compatibility mode)
         bool frame_bound_detect{false}; // VR_AutoResFrameBoundDetect
         uint64_t tick_delta_us{0};      // TickClock's sums
@@ -152,7 +153,8 @@ private:
     clock::time_point m_next_adapter_lookup{};
 
     // An SP or upscaler step down is checked against the 3 s before it (check_step): the GPU time per frame 2-5 s
-    // after it (AutoResPolicy.hpp judge_step), and the frame rate (10 % slower leaves the actuator out).
+    // after it (AutoResPolicy.hpp judge_step), and the frame rate (10 % slower leaves the actuator out), when the
+    // seconds around it show one scene (compare_scene).
     struct StepCheck {
         uevr::autores::Actuator actuator{};
         int to{};          // the step it measures; any other step cancels it
@@ -174,6 +176,11 @@ private:
     // The verdicts against each in a row (AutoResPolicy.hpp StepStrikes), and when a step put back may be taken again.
     uevr::autores::StepStrikes m_sp_strikes{};
     uevr::autores::StepStrikes m_upscaler_strikes{};
+    // Trials against a step that saw the scene change, in a row (AutoResPolicy.hpp TrialDiscards).
+    uevr::autores::TrialDiscards m_sp_discards{};
+    uevr::autores::TrialDiscards m_upscaler_discards{};
+    // A step kept unjudged, put back once a minute later for a fresh trial (UnjudgedStep).
+    uevr::autores::UnjudgedStep m_unjudged{};
     clock::time_point m_retake_after{};
     uevr::autores::GpuBusySampler m_gpu{};
 

@@ -245,4 +245,28 @@ std::optional<float> GpuBusySampler::gpu_ms_per_frame(clock::time_point from, cl
 
     return (float)(busy_seconds * 1000.0 / (double)frames);
 }
+
+std::vector<SecondReading> GpuBusySampler::seconds(clock::time_point from, clock::time_point to) const {
+    std::scoped_lock _{m_mutex};
+    std::vector<SecondReading> out{};
+
+    for (size_t i = 1; i < m_samples.size(); ++i) {
+        const auto& before = m_samples[i - 1];
+        const auto& sample = m_samples[i];
+
+        if (sample.at <= from || sample.at > to) {
+            continue;
+        }
+
+        const auto seconds = std::chrono::duration<double>(sample.at - before.at).count();
+
+        if (seconds <= 0.0 || seconds > 2.0) {
+            break;
+        }
+
+        out.push_back(SecondReading{(float)seconds, sample.frames - before.frames, sample.busy_pct});
+    }
+
+    return out;
+}
 }

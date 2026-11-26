@@ -169,6 +169,7 @@ struct State {
     int level{BASE_LEVEL};
     int start_level{BASE_LEVEL};
     int level_cap{MAX_LEVEL}; // min(Max, the runtime's maxImageRect, the VRAM guard)
+    bool vram_over{false};    // GPU memory over the DXGI budget in the last second read: no level step up (next_up)
     Notification gpu{Notification::normal};
     Notification cpu{Notification::normal};
 };
@@ -192,6 +193,28 @@ struct Step {
 // up: the GPU has room. cpu_up: CPU-bound with the GPU NORMAL; the same step up, wanted for as long as both hold.
 enum class Request : uint8_t { none, down, up, cpu_up };
 
+// VR_AutoResNsfHoldMs (MopicNativeSubmitD3D12/D3D11): after a live resolution change the Native Stereo Fix's new
+// right-eye capture comes out dark for its first frames (exposure and history start over), so the left eye goes in both
+// halves from the change until hold_ms has passed since the new capture was accepted. Times in ms on one clock;
+// change_ms 0 = no live change yet. Before the new capture comes, the hold lasts at most hold_ms + NSF_HOLD_WAIT_MS
+// after the change; a capture accepted later than that still gets its hold_ms (within NSF_LATE_ACCEPT_MS of the change):
+// on the 3080 laptop at 113-119 % of the VRAM budget the capture came back 4.6-5.7 s after the change, after the old
+// single ceiling (hold_ms + 1.8 s), and its first frames showed a black right eye (Black Myth: Wukong, 2026-11-26).
+inline constexpr int64_t NSF_HOLD_WAIT_MS = 1800;
+inline constexpr int64_t NSF_LATE_ACCEPT_MS = 15000;
+
+inline bool nsf_resize_hold(int64_t now_ms, int64_t change_ms, int64_t accepted_ms, int64_t hold_ms) {
+    if (hold_ms <= 0 || change_ms == 0) {
+        return false;
+    }
+
+    if (accepted_ms >= change_ms) {
+        return accepted_ms - change_ms < NSF_LATE_ACCEPT_MS && now_ms - accepted_ms < hold_ms;
+    }
+
+    return now_ms - change_ms < hold_ms + NSF_HOLD_WAIT_MS;
+}
+
 // Records an edge and says what it asks for (design v1 §3-2). GPU RENDERING IMPAIRED: one step down; WARNING: hold;
 // NORMAL: one step up. CPU RENDERING IMPAIRED: CPU-bound, so SP and the upscaler go back to the game's values and the
 // spare GPU goes into pixels, but only when the GPU's last state is NORMAL. THERMAL and COMPOSITING are for display.
@@ -207,6 +230,13 @@ inline Request on_edge(State& state, Domain domain, SubDomain sub_domain, Notifi
 
     state.cpu = to;
     return to == Notification::impaired && state.gpu == Notification::normal ? Request::cpu_up : Request::none;
+}
+
+// Whether an automatic level step rebuilds live on this engine path (VR::autores_level_rebuilds_live, decided before the
+// eye size changes): inside the slider's version band (UE 4.27, 5.3+), or with VR_AutoResLevelOnAnyEngine any other
+// engine but UE4 before 4.27 and Stalker 2, whose live rebuild is off on purpose. A refused step changes nothing.
+inline bool level_step_rebuilds_live(bool version_band, bool level_on_any_engine, bool older_ue4, bool stalker2) {
+    return version_band || (level_on_any_engine && !older_ue4 && !stalker2);
 }
 
 // Whether a request held back (loading, the level interval) still stands.
@@ -244,8 +274,16 @@ inline std::optional<Step> next_down(const State& state, const Available& availa
 // One step up: the eye size back to the anchor (start_level: where the session started, or Base after
 // VR_AutoResOutputAnchor), then the internal resolution back to the game's own, then pixels above the anchor up to the
 // cap. SP and the upscaler are restored even when they are no longer available.
+//
+// No level step up while GPU memory is over the DXGI budget (state.vram_over): a bigger eye allocates new targets and,
+// on most engine paths, rebuilds the swapchains live while the OS is already demoting memory. The guard below only
+// steps down after 3 s over and had nothing to take at Min, so an 8 GB laptop at Min over the budget all along took a
+// NORMAL edge's Min -> Saver rebuild at 113-119 % (3080 laptop, Black Myth: Wukong, 2026-11-26: a GPU MMU fault 1.3 s
+// after the next step, Saver -> Base). SP and the upscaler still go back up: they render into the same targets.
 inline std::optional<Step> next_up(const State& state, const Available& available) {
-    if (available.level && state.level < state.start_level && state.level < state.level_cap) {
+    const auto level_up = available.level && !state.vram_over;
+
+    if (level_up && state.level < state.start_level && state.level < state.level_cap) {
         return Step{Actuator::level, state.level, state.level + 1};
     }
 
@@ -257,11 +295,34 @@ inline std::optional<Step> next_up(const State& state, const Available& availabl
         return Step{Actuator::sp, state.sp, state.sp - 1};
     }
 
-    if (available.level && state.level < state.level_cap) {
+    if (level_up && state.level < state.level_cap) {
         return Step{Actuator::level, state.level, state.level + 1};
     }
 
     return std::nullopt;
+}
+
+// Whether next_up's answer is nothing only because GPU memory is over the budget (a level step up held back).
+inline bool level_up_held_by_vram(const State& state, const Available& available) {
+    if (!state.vram_over || next_up(state, available)) {
+        return false;
+    }
+
+    auto under = state;
+    under.vram_over = false;
+    const auto step = next_up(under, available);
+    return step && step->actuator == Actuator::level;
+}
+
+// The VRAM guard (3 s over the budget, settled, not loading) at the lowest level: nothing to take, so the cap goes there
+// for the session, as a guard step down caps at the level it leaves. True when it set the cap now.
+inline bool cap_at_min_after_guard(State& state, const Available& available) {
+    if (!available.level || state.level != MIN_LEVEL || state.level_cap <= MIN_LEVEL) {
+        return false;
+    }
+
+    state.level_cap = MIN_LEVEL;
+    return true;
 }
 
 // Frame-bound games (design v1 §3-2, Appendix B): a game whose time runs with its frames plays in slow motion below its
@@ -604,24 +665,50 @@ struct AnchorGate {
 // step before) for the session. A verdict for it starts the count over, and so does the actuator going out. A first
 // verdict that no retake followed within FORGET_SECONDS (the GPU went NORMAL, the retake's window had a stall) is
 // forgotten: "in a row" is one episode, not two misreads minutes apart.
+//
+// The verdicts against must also agree (2026-11-25): Wukong's DLSS step read -3 % GPU time in play, then +18 % across a
+// loading picture into play, and the two in a row left the upscaler out for the session (3080L, 2026-11-23). A step
+// does the same each time it is taken in one scene, so each verdict against carries its cost ratio (GPU time per frame
+// after / before, else frames before / after) and the actuator goes out on one that is within AGREE of an earlier one
+// of the episode; a verdict against that agrees with none is put back like a first. A step that reads against every
+// time but never the same goes out at MAX_AGAINST in a row, so it can't flicker on and off for good. Trials of one step
+// in one game read 0.85-0.95 (TEKKEN's DLSS step, five in a run; three against in a row 0.93-0.97) and 0.88-0.95
+// (Wukong's), the harness logs of 2026-11-18..24.
 struct StepStrikes {
     static constexpr int OUT_AFTER = 2;
+    static constexpr int MAX_AGAINST = 4;
     static constexpr int RETAKE_SECONDS = 6;
     static constexpr double FORGET_SECONDS = 60.0;
+    static constexpr float AGREE = 0.10f;
 
     int count{0};
     double last{0.0};
+    std::array<std::optional<float>, MAX_AGAINST> ratios{}; // the episode's verdicts against, count of them
 
-    // True when the actuator goes out now.
-    bool verdict(bool against, double now_seconds) {
+    // True when the actuator goes out now. ratio: the verdict's cost ratio; none agrees with anything (as before the
+    // agreement rule).
+    bool verdict(bool against, double now_seconds, std::optional<float> ratio = std::nullopt) {
         if (count > 0 && now_seconds - last > FORGET_SECONDS) {
             count = 0;
         }
 
-        count = against ? count + 1 : 0;
         last = now_seconds;
 
-        if (count >= OUT_AFTER) {
+        if (!against) {
+            count = 0;
+            return false;
+        }
+
+        auto agrees = false;
+
+        for (int i = 0; i < count; ++i) {
+            agrees = agrees || !ratios[i] || !ratio || std::abs(*ratios[i] - *ratio) <= AGREE;
+        }
+
+        ratios[count] = ratio;
+        ++count;
+
+        if ((count >= OUT_AFTER && agrees) || count >= MAX_AGAINST) {
             count = 0;
             return true;
         }
@@ -629,6 +716,340 @@ struct StepStrikes {
         return false;
     }
 };
+
+// Whether a step's trial saw one scene (check_step). The verdict compares the seconds before the step with the
+// seconds after it, so it is the step's only while the content stays the same; a stall is caught (the trial is not
+// judged), a change the engine renders through is not: Black Myth: Wukong stepped its DLSS mode inside a 9 s loading
+// picture it renders at 37 fps, and the play after it read +18 % GPU time and 21 % fewer frames, "slower", the second
+// verdict against in a row, so the upscaler steps went off for the session (3080L, 2026-11-23).
+//
+// A step changes the frame rate and the GPU time once, at the step; the content changing makes a jump of its own,
+// anywhere. So the seconds before the step (from SCENE_BEFORE_SECONDS) and the seconds after it (from
+// SCENE_AFTER_FROM_SECONDS, which leaves the step's own second out) must each show one level: no split of either into
+// two runs of SCENE_MIN_RUN seconds or more whose frame rates, or GPU times per frame, differ by more than SCENE_JUMP. A
+// change in the second right after the step can't be told from the step, and a change between whole windows of one
+// content each is the step's to that check; the strike rule (two verdicts against in a row) covers both.
+//
+// Replayed on the harness runs' per-second frame counts (tools in the session notes, 2026-11-25): 25 % flags 0.3-5 %
+// of trials of steady play with no step (Wukong 5 %, its hitches) and catches a loading picture at 0.7x or 1.3x the
+// play's frame rate ending 2-4 s after the step in 88-100 % of trials; 20 % flagged up to 11 %. It flagged the
+// verdicts the logs show as misreads (TEKKEN's "slower" at 58.8 -> 52.4 fps over a stage-select dip, retaken 12 s later:
+// -12 %, works) and none of the verdicts for a step in steady play but one (a works, which it leaves alone).
+inline constexpr float SCENE_JUMP = 0.25f;
+inline constexpr float SCENE_BEFORE_SECONDS = 4.5f;
+inline constexpr float SCENE_AFTER_FROM_SECONDS = 1.0f;
+inline constexpr size_t SCENE_MIN_RUN = 2;
+
+// One second of the GPU sampler (GpuBusySampler::seconds): its length, the VR frames in it and the process's GPU busy
+// share.
+struct SecondReading {
+    float seconds{};
+    uint64_t frames{};
+    float busy_pct{};
+};
+
+enum class SceneRead : uint8_t { same, changed, unknown };
+
+struct SceneJump {
+    float jump{0.0f};      // the largest, as a fraction of the lower level
+    float from{0.0f};      // the levels either side of it
+    float to{0.0f};
+    bool gpu{false};       // GPU ms per frame; else frames per second
+};
+
+struct SceneCheck {
+    SceneRead read{SceneRead::unknown};
+    SceneJump before{};
+    SceneJump after{};
+    std::optional<float> repeat_burst{}; // seconds from the step to a burst of repeated Presents in the trial (RepeatBurstClock)
+};
+
+namespace detail {
+inline std::optional<float> rate(const SecondReading* first, const SecondReading* last, bool gpu) {
+    double seconds = 0.0, busy = 0.0;
+    uint64_t frames = 0;
+
+    for (auto it = first; it != last; ++it) {
+        seconds += it->seconds;
+        busy += it->busy_pct / 100.0 * it->seconds;
+        frames += it->frames;
+    }
+
+    if (seconds <= 0.0 || frames == 0) {
+        return std::nullopt;
+    }
+
+    return gpu ? (float)(busy * 1000.0 / (double)frames) : (float)((double)frames / seconds);
+}
+}
+
+// The largest level jump across any split of the seconds into two runs of SCENE_MIN_RUN or more, on the frame rate and
+// on the GPU time per frame (a split with no frames on a side is a jump of its own: the engine stopped).
+inline SceneJump scene_jump(const std::vector<SecondReading>& seconds) {
+    SceneJump best{};
+
+    for (size_t i = SCENE_MIN_RUN; i + SCENE_MIN_RUN <= seconds.size(); ++i) {
+        for (const auto gpu : {false, true}) {
+            const auto a = detail::rate(seconds.data(), seconds.data() + i, gpu);
+            const auto b = detail::rate(seconds.data() + i, seconds.data() + seconds.size(), gpu);
+            float jump = 0.0f;
+
+            if (a && b) {
+                const auto lo = (std::min)(*a, *b);
+                const auto hi = (std::max)(*a, *b);
+                jump = lo > 0.0f ? hi / lo - 1.0f : hi > 0.0f ? 1e9f : 0.0f;
+            } else if (a.has_value() != b.has_value() && !gpu) {
+                jump = 1e9f;
+            }
+
+            if (jump > best.jump) {
+                best = SceneJump{jump, a.value_or(0.0f), b.value_or(0.0f), gpu};
+            }
+        }
+    }
+
+    return best;
+}
+
+// The seconds before the step and after it (from SCENE_AFTER_FROM_SECONDS). Fewer than two runs' worth on a side (the
+// sampler is off or just started) is unknown, and the trial is judged as before the check.
+inline SceneCheck compare_scene(const std::vector<SecondReading>& before, const std::vector<SecondReading>& after) {
+    SceneCheck check{};
+
+    if (before.size() < 2 * SCENE_MIN_RUN || after.size() < 2 * SCENE_MIN_RUN) {
+        return check;
+    }
+
+    check.before = scene_jump(before);
+    check.after = scene_jump(after);
+    check.read = check.before.jump > SCENE_JUMP || check.after.jump > SCENE_JUMP ? SceneRead::changed : SceneRead::same;
+    return check;
+}
+
+// A fade the engine renders through can cut the content inside one second, too short for a split of SCENE_MIN_RUN
+// seconds a side (3080L, Black Myth: Wukong's death fade, 2026-11-26: a trial across it read -36 % GPU time, play's
+// were -8..-15 %). What the fade does show: the game presents without a new engine frame, 4-5 times a second for
+// about 2 s (the "Present passes skipped" counter), where play shows none. A burst of REPEAT_BURST_PRESENTS or more in
+// one second after REPEAT_QUIET_SECONDS with at most REPEAT_QUIET_PRESENTS in all marks such a cut; a game that always
+// presents twice never makes one, and frame generation (FrameGenCheck) isn't counted, so either keeps today's trial.
+// A burst from the start of the "before" seconds to the end of the trial reads the scene as changed: a reading
+// against the step is rescheduled, one for it is kept with no strike moved (judge_trial). It doesn't see a trial
+// wholly inside a loading picture, which measures the world the engine keeps rendering behind it (4090 laptop perf.csv,
+// 2026-11-26: a fresh right-eye render every frame of the picture, at play's frame rate).
+inline constexpr int REPEAT_BURST_PRESENTS = 3;
+inline constexpr int REPEAT_QUIET_SECONDS = 5;
+inline constexpr int REPEAT_QUIET_PRESENTS = 2;
+
+struct RepeatBurstClock {
+    int64_t second_start_ns{0};             // 0: none yet
+    int current{0};                         // repeats in the second from second_start_ns
+    std::array<int, REPEAT_QUIET_SECONDS> earlier{}; // the seconds before it, the latest first
+    bool burst_this_second{false};
+    int64_t last_burst_ns{0};               // 0: none yet
+
+    // One Present at now_ns; repeat: no new engine frame since the Present before. True when it starts a burst.
+    bool on_present(int64_t now_ns, bool repeat) {
+        constexpr int64_t second = 1'000'000'000;
+
+        if (second_start_ns == 0) {
+            second_start_ns = now_ns;
+        }
+
+        if (now_ns - second_start_ns >= second) {
+            const auto gone = (now_ns - second_start_ns) / second;
+
+            if (gone > REPEAT_QUIET_SECONDS) {
+                earlier.fill(0);
+            } else {
+                for (int64_t i = 0; i < gone; ++i) {
+                    for (size_t j = earlier.size() - 1; j > 0; --j) {
+                        earlier[j] = earlier[j - 1];
+                    }
+
+                    earlier[0] = i == 0 ? current : 0;
+                }
+            }
+
+            second_start_ns += gone * second;
+            current = 0;
+            burst_this_second = false;
+        }
+
+        if (!repeat) {
+            return false;
+        }
+
+        ++current;
+
+        auto quiet = 0;
+
+        for (const auto count : earlier) {
+            quiet += count;
+        }
+
+        if (!burst_this_second && current >= REPEAT_BURST_PRESENTS && quiet <= REPEAT_QUIET_PRESENTS) {
+            burst_this_second = true;
+            last_burst_ns = now_ns;
+            return true;
+        }
+
+        return false;
+    }
+};
+
+// compare_scene's check with a burst of repeated Presents in the trial (seconds from the step; before it negative).
+inline SceneCheck with_repeat_burst(SceneCheck check, std::optional<float> burst_seconds) {
+    if (burst_seconds) {
+        check.read = SceneRead::changed;
+        check.repeat_burst = burst_seconds;
+    }
+
+    return check;
+}
+
+// A trial whose reading is against the step while its windows show the scene changing is not a verdict: the step is put
+// back and taken again (StepStrikes::RETAKE_SECONDS) from a fresh "before", and the strikes don't move. MAX_IN_A_ROW
+// such trials in a row (a scene that keeps changing) and the next one keeps the step unjudged, as a trial with a stall
+// in it does: no verdict moves an actuator out on a scene's change, and the step can't flicker on and off for good.
+// Gone after StepStrikes::FORGET_SECONDS, and with any trial judged.
+struct TrialDiscards {
+    static constexpr int MAX_IN_A_ROW = 2;
+
+    int count{0};
+    double last{0.0};
+
+    // True: put back and taken again; false: kept unjudged (and the count starts over).
+    bool discard(double now_seconds) {
+        if (count > 0 && now_seconds - last > StepStrikes::FORGET_SECONDS) {
+            count = 0;
+        }
+
+        last = now_seconds;
+
+        if (count >= MAX_IN_A_ROW) {
+            count = 0;
+            return false;
+        }
+
+        ++count;
+        return true;
+    }
+
+    void judged() { count = 0; }
+};
+
+// A step kept unjudged (TrialOutcome::kept_unjudged) is not kept for good. The step was asked for (the GPU IMPAIRED) and
+// one trial in a scene that keeps changing says nothing about it; putting it back at once would only start the
+// put-back / retake flicker over and hold the GPU at the game's own internal resolution while it is IMPAIRED. But while
+// the GPU stays IMPAIRED nothing else takes it back (the next request steps past it; a NORMAL edge or the internal
+// recovery, off by default, would), so RECHECK_SECONDS later, outside a load and with no trial running, it is put back
+// once, and a request still wanted takes it again with a fresh trial (and two more reschedules). In a scene that never
+// settles that is one put-back a minute and the step on for most of it; a scene that settles gets its verdict.
+struct UnjudgedStep {
+    static constexpr double RECHECK_SECONDS = 60.0;
+
+    std::optional<Step> step{};
+    double due{0.0};
+
+    void kept(const Step& kept_step, double now_seconds) {
+        step = kept_step;
+        due = now_seconds + RECHECK_SECONDS;
+    }
+
+    // The step to put back now, once: due, not loading, no trial running, and the state at it. Below it (put back, the
+    // actuator gone out) the re-check ends; past it (a later step taken over it) it waits until the state is back at it,
+    // a later step capped there included.
+    std::optional<Step> take_due(const State& state, double now_seconds, bool loading, bool trial_running) {
+        if (!step) {
+            return std::nullopt;
+        }
+
+        const auto current = step->actuator == Actuator::sp ? state.sp : state.upscaler;
+
+        if (current < step->to) {
+            step.reset();
+            return std::nullopt;
+        }
+
+        if (current > step->to || now_seconds < due || loading || trial_running) {
+            return std::nullopt;
+        }
+
+        const auto kept_step = *step;
+        step.reset();
+        return Step{kept_step.actuator, kept_step.to, kept_step.from};
+    }
+};
+
+// One trial's outcome (check_step), from its readings: whether a stall or a level change fell in it, the GPU time per
+// frame and the frame rate before and after, and the scene check.
+enum class TrialOutcome : uint8_t {
+    works,         // 8 % or more off the GPU time
+    kept,          // in between, or a reading for the step with the scene changing (no strike moves)
+    put_back,      // a verdict against that agrees with no earlier one: back, taken again from a fresh "before"
+    out,           // one that agrees (or the StepStrikes::MAX_AGAINST-th): the actuator stops at the step before, or
+                   // goes out, for the session
+    rescheduled,   // against, but the scene changed: back and taken again, no strike
+    kept_unjudged, // the same with TrialDiscards::MAX_IN_A_ROW before it: kept, no verdict
+    not_judged,    // a stall or a level change in it: kept, no verdict
+};
+
+struct TrialReading {
+    bool stall{false};
+    std::optional<float> gpu_ms_before{};
+    std::optional<float> gpu_ms_after{};
+    float fps_before{0.0f};
+    float fps_after{0.0f};
+    SceneRead scene{SceneRead::unknown};
+};
+
+struct TrialVerdict {
+    TrialOutcome outcome{TrialOutcome::not_judged};
+    bool slower{false};
+    StepEffect effect{StepEffect::unclear};
+};
+
+// 10 % fewer frames is against the step too (Dead as Disco ran heavier at a lower r.ScreenPercentage, 2026-10-15).
+inline constexpr float STEP_SLOWER_FPS = 0.9f;
+
+inline TrialVerdict judge_trial(const TrialReading& reading, StepStrikes& strikes, TrialDiscards& discards, double now_seconds) {
+    TrialVerdict verdict{};
+
+    if (reading.stall) {
+        return verdict;
+    }
+
+    verdict.slower = reading.fps_after < STEP_SLOWER_FPS * reading.fps_before;
+    verdict.effect = reading.gpu_ms_before && reading.gpu_ms_after ? judge_step(*reading.gpu_ms_before, *reading.gpu_ms_after)
+                                                                   : StepEffect::unclear;
+    const auto against = verdict.slower || verdict.effect == StepEffect::nothing;
+
+    if (reading.scene == SceneRead::changed) {
+        verdict.outcome = !against ? TrialOutcome::kept
+            : discards.discard(now_seconds) ? TrialOutcome::rescheduled : TrialOutcome::kept_unjudged;
+        return verdict;
+    }
+
+    discards.judged();
+
+    // The cost ratio the strikes compare: GPU time per frame after / before, else frames before / after.
+    std::optional<float> ratio{};
+
+    if (reading.gpu_ms_before && reading.gpu_ms_after && *reading.gpu_ms_before > 0.0f) {
+        ratio = *reading.gpu_ms_after / *reading.gpu_ms_before;
+    } else if (reading.fps_after > 0.0f) {
+        ratio = reading.fps_before / reading.fps_after;
+    }
+
+    if (strikes.verdict(against, now_seconds, ratio)) {
+        verdict.outcome = TrialOutcome::out;
+    } else {
+        verdict.outcome = against ? TrialOutcome::put_back : verdict.effect == StepEffect::works ? TrialOutcome::works
+                                                                                                : TrialOutcome::kept;
+    }
+
+    return verdict;
+}
 
 inline void apply(State& state, const Step& step) {
     switch (step.actuator) {

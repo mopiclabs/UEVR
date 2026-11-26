@@ -11,6 +11,9 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
+
+#include "AutoResPolicy.hpp"
 
 namespace uevr::autores {
 class GpuBusySampler {
@@ -41,6 +44,10 @@ public:
 
     // The mean busy share of the samples taken in (from, to]; empty without one.
     std::optional<float> busy_percent(clock::time_point from, clock::time_point to) const;
+
+    // The samples taken in (from, to] as seconds (length, frames, busy share), oldest first, for the step checks' scene
+    // check. Empty when the counters are not available; a gap of more than 2 s (the thread stalled) ends the list there.
+    std::vector<SecondReading> seconds(clock::time_point from, clock::time_point to) const;
 
 private:
     void run(std::stop_token stop);
