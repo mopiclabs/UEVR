@@ -159,6 +159,7 @@
 #include "FFakeStereoRenderingHook.hpp"
 #include "RtSceneShare.hpp"
 #include "GdfShare.hpp"
+#include "CascadeShare.hpp"
 #include "../../utility/D3DDeviceIdentity.hpp"
 #include "CompatibilityPolicy.hpp"
 #include "BodycamTextureLayout.hpp"
@@ -29278,6 +29279,13 @@ void FFakeStereoRenderingHook::begin_render_viewfamily_real(void* render_module,
             reinterpret_cast<uintptr_t>(view_family->get_render_target()), reinterpret_cast<uintptr_t>(rtfrt));
     }
 
+    // VR_NativeStereoFixShareShadowCascades (vr/CascadeShare.hpp): both families' render targets identify them on the
+    // render thread, where the right family adopts the left family's shadow cascades and skips its own shadow atlas.
+    if (!use_hellblade_paired_renderer_transaction) {
+        uevr::cascade_share::on_left_submission(vr->is_native_stereo_fix_share_shadow_cascades_enabled(),
+            reinterpret_cast<uintptr_t>(view_family->get_render_target()), reinterpret_cast<uintptr_t>(rtfrt));
+    }
+
     {
         LumenViewOriginHold first_hold{hold_lumen_origin};
         // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): once, after a failed exchange back, the left
@@ -30737,6 +30745,9 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
     // VR_NativeStereoFixShareGlobalDistanceField (vr/GdfShare.hpp): exchange the GDF blocks back after the previous
     // family's render, and exchange them for the right eye's family when the game thread chose to share.
     uevr::gdf_share::on_family_render(vr->get_debug_share_gdf_fail_verify(),
+        reinterpret_cast<uintptr_t>(view_family.get_render_target()));
+    // VR_NativeStereoFixShareShadowCascades (vr/CascadeShare.hpp): which family's render begins (left / right / other).
+    uevr::cascade_share::on_family_render(reinterpret_cast<uintptr_t>(&view_family),
         reinterpret_cast<uintptr_t>(view_family.get_render_target()));
     struct NativePreRenderKey {
         uint32_t frame{};

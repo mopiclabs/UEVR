@@ -1770,6 +1770,9 @@ private:
     const ModToggle::Ptr m_native_stereo_fix_share_gdf{ ModToggle::create(generate_name("NativeStereoFixShareGlobalDistanceField"), true) };
     // Debug (default 0): 1 / 2 fail the GDF share's game / render thread check on purpose, to see the refresh take over.
     const ModInt32::Ptr m_debug_share_gdf_fail_verify{ ModInt32::create(generate_name("DebugShareGlobalDistanceFieldFailVerify"), 0) };
+    // VR_NativeStereoFixShareShadowCascades: the default (on) acts only where GetShadowSplitBounds and the shadow atlas
+    // pass are found and verified (vr/CascadeShare.hpp: UE 5.0 only); everywhere else the right eye keeps its own.
+    const ModToggle::Ptr m_native_stereo_fix_share_shadow_cascades{ ModToggle::create(generate_name("NativeStereoFixShareShadowCascades"), true) };
     const ModInt32::Ptr m_experiment_right_eye_rt_share{ ModInt32::create(generate_name("ExperimentRightEyeRTShare"), 0) };
     const ModToggle::Ptr m_experiment_right_eye_rt_share_cull_gather{ ModToggle::create(generate_name("ExperimentRightEyeRTShareCullGather"), false) };
     const ModToggle::Ptr m_native_stereo_fix_texture_array_submit{ ModToggle::create(generate_name("NativeStereoFixTextureArraySubmit"), false) };
@@ -2128,6 +2131,7 @@ public:
             *m_native_stereo_fix_second_gdf_refresh_on_change_frames,
             *m_native_stereo_fix_share_gdf,
             *m_debug_share_gdf_fail_verify,
+            *m_native_stereo_fix_share_shadow_cascades,
             *m_experiment_right_eye_rt_share,
             *m_experiment_right_eye_rt_share_cull_gather,
             *m_native_stereo_fix_texture_array_submit,

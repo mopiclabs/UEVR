@@ -9561,6 +9561,12 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
                 "its own, and the refresh above is skipped while it does (Black Myth: Wukong: about 3% more fps, no "
                 "rebuild spikes, eyes unchanged). Acts only on engine versions with a validated layout (today UE 5.0) and "
                 "where the field is found and checked by name in every frame; anywhere else the refresh runs as before.");
+            m_native_stereo_fix_share_shadow_cascades->draw("Share the Left Eye's Shadow Cascades With the Right Eye");
+            ImGui::TextWrapped(
+                "Default on. The right eye's render uses the sun's shadow cascades the left eye's render just built and "
+                "doesn't draw its own copy of the shadow map (Black Myth: Wukong: about 3% more fps, eyes unchanged). Acts "
+                "only on UE 5.0 and where the functions and the shadow map list are found and checked; anywhere else the "
+                "right eye builds and draws its own as before.");
             m_native_stereo_fix_disable_frame_generation->draw("Turn Off Frame Generation");
             ImGui::TextWrapped(
                 "Default on. Holds the game's frame generation (XeSS FG, DLSS FG, FSR frame interpolation) off while the "
