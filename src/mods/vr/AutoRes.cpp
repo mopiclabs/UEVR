@@ -180,7 +180,13 @@ void AutoResController::on_present(runtimes::OpenXR& openxr, CVarManager& cvars,
         if (!ar::still_wanted(m_state, m_pending)) {
             m_pending = ar::Request::none;
         } else if (!picked) {
-            SPDLOG_INFO("[autores] {}: nothing left to step {}", m_pending_why, m_pending == ar::Request::down ? "down" : "up");
+            if (m_pending != ar::Request::down && ar::level_up_held_by_vram(m_state, m_available)) {
+                SPDLOG_INFO("[autores] {}: VRAM {:.0f} % of the budget, no level step up", m_pending_why,
+                    m_vram_percent.value_or(0.0f));
+            } else {
+                SPDLOG_INFO("[autores] {}: nothing left to step {}", m_pending_why, m_pending == ar::Request::down ? "down" : "up");
+            }
+
             m_pending = ar::Request::none;
         } else if (inputs.loading) {
             if (!m_waiting_logged) {
@@ -419,6 +425,9 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
     m_vram_percent = query_vram_percent();
     const auto settling = m_last_level_change.time_since_epoch().count() != 0 && now - m_last_level_change < std::chrono::seconds{5};
     m_vram_over_seconds = m_vram_percent && *m_vram_percent > 100.0f && !settling && !inputs.loading ? m_vram_over_seconds + 1 : 0;
+    // Any second over the budget holds the level steps up (AutoResPolicy.hpp next_up), settling and loading included: no
+    // step makes room there. No reading (the counter unavailable): as before.
+    m_state.vram_over = m_vram_percent && *m_vram_percent > 100.0f;
     m_anchor_due = m_anchor_gate.tick(inputs.loading, m_vram_percent);
 
     // VR_AutoResInternalRecover counts calm seconds only while settled; a load starts the count over.
@@ -493,7 +502,13 @@ void AutoResController::check_guards(runtimes::OpenXR& openxr, CVarManager& cvar
             return;
         }
 
-        // Nothing to take: the count starts over (a later raise, the slider's too, gets its 3 s) and no guard step.
+        // Nothing to take: the cap goes to the lowest level for the session (cap_at_min_after_guard), the count starts over
+        // (a later raise, the slider's too, gets its 3 s) and no guard step.
+        if (ar::cap_at_min_after_guard(m_state, m_available)) {
+            SPDLOG_WARN("[autores] VRAM {:.0f} % of the budget at {}: capped there for this session (no level steps up)",
+                *m_vram_percent, ar::LEVELS[m_state.level_cap].name);
+        }
+
         m_vram_over_seconds = 0;
     }
 

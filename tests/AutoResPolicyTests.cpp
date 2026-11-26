@@ -220,6 +220,68 @@ static void test_limits() {
         "no room under DLSS: the level");
 }
 
+static void test_vram_step_up() {
+    const ar::Available dlss{.sp = false};
+
+    // The 3080 laptop at Min with DLSS at its floor, over the budget (2026-11-26): a NORMAL edge brings DLSS back up
+    // first, then would take Min -> Saver; over the budget the level stays.
+    {
+        ar::State state{.upscaler = 1, .level = ar::MIN_LEVEL, .vram_over = true};
+        expect(step(state, dlss, ar::Request::up) && state.upscaler == 0 && state.level == ar::MIN_LEVEL,
+            "over the budget: the upscaler still goes back up");
+        expect(!ar::level_up_held_by_vram(ar::State{.upscaler = 1, .level = ar::MIN_LEVEL, .vram_over = true}, dlss),
+            "a step that does go (the upscaler) is not held back");
+        expect(!step(state, dlss, ar::Request::up) && state.level == ar::MIN_LEVEL, "over the budget: no level step up");
+        expect(ar::level_up_held_by_vram(state, dlss), "the step up is held back by the memory, not missing");
+        state.vram_over = false;
+        expect(step(state, dlss, ar::Request::up) && state.level == ar::MIN_LEVEL + 1, "under the budget again: Min -> Saver");
+        expect(!ar::level_up_held_by_vram(state, dlss), "under the budget nothing is held back");
+    }
+
+    // Below the start level (the steps took the eye down): the way back up is held too; down steps are not.
+    {
+        ar::State state{.level = ar::MIN_LEVEL, .start_level = ar::BASE_LEVEL, .vram_over = true};
+        expect(!step(state, dlss, ar::Request::up), "over the budget: not back up to the start either");
+        ar::State high{.level = ar::BASE_LEVEL, .vram_over = true};
+        expect(step(high, ar::Available{.sp = false, .upscaler_steps = 0}, ar::Request::down) && high.level == ar::BASE_LEVEL - 1,
+            "over the budget: steps down as before");
+    }
+
+    // At the top already (or no level steps): nothing to step, and nothing held back either.
+    {
+        ar::State state{.level = ar::MAX_LEVEL, .vram_over = true};
+        expect(!ar::level_up_held_by_vram(state, dlss), "at Max: nothing held back");
+        expect(!ar::level_up_held_by_vram(ar::State{.vram_over = true}, ar::Available{.sp = false, .level = false}),
+            "no level steps: nothing held back");
+    }
+
+    // The guard at Min: the cap goes to Min once, for the session; above Min, or without level steps, it doesn't.
+    {
+        ar::State state{.level = ar::MIN_LEVEL};
+        expect(ar::cap_at_min_after_guard(state, dlss) && state.level_cap == ar::MIN_LEVEL, "guard at Min: capped at Min");
+        expect(!ar::cap_at_min_after_guard(state, dlss), "capped once");
+        state.vram_over = false;
+        expect(!step(state, dlss, ar::Request::up) && state.level == ar::MIN_LEVEL, "capped: no step up under the budget either");
+
+        ar::State saver{.level = ar::MIN_LEVEL + 1};
+        expect(!ar::cap_at_min_after_guard(saver, dlss) && saver.level_cap == ar::MAX_LEVEL, "above Min: the guard steps instead");
+        ar::State no_levels{.level = ar::MIN_LEVEL};
+        expect(!ar::cap_at_min_after_guard(no_levels, ar::Available{.level = false}), "no level steps: no cap");
+    }
+
+    // A PC with headroom: never over, every step up as before, Base -> Max.
+    {
+        ar::State state{};
+        int steps = 0;
+
+        while (step(state, dlss, ar::Request::up)) {
+            ++steps;
+        }
+
+        expect(state.level == ar::MAX_LEVEL && steps == ar::MAX_LEVEL - ar::BASE_LEVEL, "headroom: up to Max as before");
+    }
+}
+
 static void test_dlss_floor() {
     // The UE5 plugin's modes as (optimal %, mode): DLAA 100, Ultra Quality 77, Quality 66.7, Balanced 58, Performance 50,
     // Ultra Performance 33.3; Auto (1) reports Performance's.
@@ -621,6 +683,7 @@ int main() {
     test_edges();
     test_order();
     test_limits();
+    test_vram_step_up();
     test_upscaler_probe();
     test_step_effect();
     test_dlss_floor();
