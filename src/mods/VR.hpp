@@ -223,6 +223,10 @@ public:
         uint32_t new_height,
         bool automatic = false);
 
+    // Before a VR_AutoRes level step touches the eye size: whether on_openxr_resolution_scale_changed will rebuild live
+    // on this engine path (false logs the refusal; nothing is changed either way).
+    bool autores_level_rebuilds_live(uint32_t old_width, uint32_t old_height, uint32_t new_width, uint32_t new_height);
+
 
     Vector4f get_position(uint32_t index, bool grip = true)  const;
     Vector4f get_velocity(uint32_t index)  const;

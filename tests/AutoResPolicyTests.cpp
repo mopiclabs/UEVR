@@ -220,6 +220,16 @@ static void test_limits() {
         "no room under DLSS: the level");
 }
 
+static void test_level_rebuilds_live() {
+    // version_band, level_on_any_engine, older_ue4, stalker2
+    expect(ar::level_step_rebuilds_live(true, false, false, false), "UE 5.3+ / 4.27: live without the option");
+    expect(ar::level_step_rebuilds_live(true, true, true, false), "UE 4.27 (in the band, reads as 4.x): live");
+    expect(ar::level_step_rebuilds_live(false, true, false, false), "UE 5.0-5.2 / unreadable with the option (default): live");
+    expect(!ar::level_step_rebuilds_live(false, false, false, false), "UE 5.0-5.2 with the option off: refused");
+    expect(!ar::level_step_rebuilds_live(false, true, true, false), "UE4 before 4.27: refused");
+    expect(!ar::level_step_rebuilds_live(false, true, false, true), "Stalker 2: refused");
+}
+
 static void test_dlss_floor() {
     // The UE5 plugin's modes as (optimal %, mode): DLAA 100, Ultra Quality 77, Quality 66.7, Balanced 58, Performance 50,
     // Ultra Performance 33.3; Auto (1) reports Performance's.
@@ -621,6 +631,7 @@ int main() {
     test_edges();
     test_order();
     test_limits();
+    test_level_rebuilds_live();
     test_upscaler_probe();
     test_step_effect();
     test_dlss_floor();

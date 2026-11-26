@@ -506,6 +506,12 @@ bool OpenXR::apply_autores_level(uint32_t width, uint32_t height, const char* re
         return true;
     }
 
+    // A step the engine path refuses changes nothing: the game reads level_size every frame (get_width/get_height), so a
+    // size set first and put back after the refusal reallocated the view target twice.
+    if (!vr->autores_level_rebuilds_live(old_width, old_height, width, height)) {
+        return false;
+    }
+
     // The slider's scale in use, recorded the way on_draw_ui does before its first change; a level sets the applied
     // size below, which would skip that.
     if (this->last_applied_resolution_width == 0 || this->last_applied_resolution_height == 0) {
