@@ -2192,10 +2192,16 @@ bool Framework::first_frame_initialize() {
         return is_init_ok;
     }
 
-    m_vr_start_deferred = should_defer_vr_start_for_shader_compile();
+    // Once the worker has started, the shader-compile wait has already let VR start: asking it again on every
+    // Present returns "defer" for each new 1 s measuring window and would hold the result until a window ends.
+    if (m_async_first_frame_state.load() == AsyncFirstFrameState::Idle ||
+        m_async_first_frame_state.load() == AsyncFirstFrameState::Failed)
+    {
+        m_vr_start_deferred = should_defer_vr_start_for_shader_compile();
 
-    if (m_vr_start_deferred) {
-        return false;
+        if (m_vr_start_deferred) {
+            return false;
+        }
     }
 
     // On a worker (see use_async_first_frame_initialize): this and later Presents return at once with VR start
@@ -2231,6 +2237,7 @@ bool Framework::first_frame_initialize() {
             return false;
         } else if (state == AsyncFirstFrameState::Done) {
             m_first_frame_d3d_initialize = false;
+            m_vr_start_deferred = false;
 
             if (m_async_first_frame_error) {
                 m_error = m_async_first_frame_error->empty() ? "An unknown error has occurred." : *m_async_first_frame_error;
