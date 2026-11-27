@@ -164,6 +164,7 @@
 #include "BodycamTextureLayout.hpp"
 #include "HellraiserCaptureLayout.hpp"
 #include "BreathedgeInventoryPolicy.hpp"
+#include "SlatePoseHandoffPolicy.hpp"
 #include "Borderlands4Slate.hpp"
 #include "Pre57SlateDiscovery.hpp"
 #include "Pre57SlateCode.hpp"
@@ -23340,7 +23341,9 @@ struct SceneViewExtensionAnalyzer {
         return call_orig();
     }
 
-    static void hook_new_rhi_command(sdk::FRHICommandBase_New* last_command, uint32_t frame_count) {
+    // Returns false when the candidate was rejected and the poses were enqueued directly instead; true when a queued
+    // command carries them (newly hooked, or an already hooked command relabelled or kept).
+    static bool hook_new_rhi_command(sdk::FRHICommandBase_New* last_command, uint32_t frame_count) {
         std::scoped_lock __{vtable_mutex};
 
         auto& vr = VR::get();
@@ -23361,7 +23364,7 @@ struct SceneViewExtensionAnalyzer {
                 "falling back to render-thread poses",
                 rejection_reason != nullptr ? rejection_reason : "unknown");
             runtime->enqueue_render_poses(frame_count);
-            return;
+            return false;
         }
 
         // Whichever one gets called first is the winner winner chicken dinner
@@ -23391,7 +23394,7 @@ struct SceneViewExtensionAnalyzer {
             }
             // The replayed family has not created another command. In particular,
             // do not relabel an already queued command or enqueue its poses twice.
-            return;
+            return true;
         }
         if (preserve_pending_identity) {
             runtime->on_pre_render_render_thread(frame_count);
@@ -23425,11 +23428,12 @@ struct SceneViewExtensionAnalyzer {
                 vr->note_stalker2_transition_stress("duplicate_rhi_command");
             }
 
-            return;
+            return true;
         }
 
         original_vtables[last_command] = *(void***)last_command;
         *(void***)last_command = (void**)new_vtable.data();
+        return true;
     }
 
     static void hook_old_rhi_command(sdk::FRHICommandBase_Old* last_command, uint32_t frame_count) {
@@ -30952,17 +30956,22 @@ void FFakeStereoRenderingHook::pre_render_viewfamily_renderthread(ISceneViewExte
                 // UE5.1+: the worker got the frame's FRDGBuilder. Carry the poses on the newest command of the immediate
                 // list it refers to, so the RHI thread hands them over between the previous Present and this frame's.
                 if (is_ue5) {
-                    // Once per frame: a second RenderTexture call of the same frame (Dead as Disco renders twice)
-                    // leaves the frame's poses where the first call put them, on a command or enqueued directly.
-                    static uint32_t last_carried_frame = UINT32_MAX;
-                    const auto carried = frame_count + compensation;
-                    if (carried == last_carried_frame) {
+                    // A second RenderTexture call of the same frame (Dead as Disco renders twice) is skipped only when
+                    // a command already carries the frame's poses. Without a command, or when hook_new_rhi_command
+                    // rejects it (it then enqueues directly), every call behaves as before the command path.
+                    static uevr::slate_pose_handoff::State handoff{};
+                    const auto frame = frame_count + compensation;
+                    auto* newest = uevr::slate_pose_handoff::is_carried(handoff, frame)
+                        ? nullptr : slate_rdg_list::newest_command(command_list);
+                    switch (uevr::slate_pose_handoff::decide(handoff, frame, newest != nullptr)) {
+                    case uevr::slate_pose_handoff::Action::Skip:
                         return;
-                    }
-                    last_carried_frame = carried;
-                    if (auto* newest = slate_rdg_list::newest_command(command_list); newest != nullptr) {
-                        SceneViewExtensionAnalyzer::hook_new_rhi_command(newest, carried);
+                    case uevr::slate_pose_handoff::Action::HookCommand:
+                        uevr::slate_pose_handoff::note_hook_result(handoff, frame,
+                            SceneViewExtensionAnalyzer::hook_new_rhi_command(newest, frame));
                         return;
+                    case uevr::slate_pose_handoff::Action::EnqueueDirect:
+                        break;
                     }
                 }
 

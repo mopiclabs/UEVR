@@ -1173,6 +1173,48 @@ if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	unset(CMKR_SOURCES)
 endif()
 
+# Target slate-pose-handoff-policy-tests
+if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
+	set(CMKR_TARGET slate-pose-handoff-policy-tests)
+	set(slate-pose-handoff-policy-tests_SOURCES "")
+
+	list(APPEND slate-pose-handoff-policy-tests_SOURCES
+		"tests/SlatePoseHandoffPolicyTests.cpp"
+	)
+
+	list(APPEND slate-pose-handoff-policy-tests_SOURCES
+		cmake.toml
+	)
+
+	set(CMKR_SOURCES ${slate-pose-handoff-policy-tests_SOURCES})
+	add_executable(slate-pose-handoff-policy-tests)
+
+	if(slate-pose-handoff-policy-tests_SOURCES)
+		target_sources(slate-pose-handoff-policy-tests PRIVATE ${slate-pose-handoff-policy-tests_SOURCES})
+	endif()
+
+	get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+	if(NOT CMKR_VS_STARTUP_PROJECT)
+		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT slate-pose-handoff-policy-tests)
+	endif()
+
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${slate-pose-handoff-policy-tests_SOURCES})
+
+	target_compile_features(slate-pose-handoff-policy-tests PRIVATE
+		cxx_std_23
+	)
+
+	target_include_directories(slate-pose-handoff-policy-tests PRIVATE
+		"src/"
+	)
+
+	add_test(NAME slate-pose-handoff-policy-tests COMMAND slate-pose-handoff-policy-tests)
+	set_tests_properties(slate-pose-handoff-policy-tests PROPERTIES TIMEOUT 30)
+
+	unset(CMKR_TARGET)
+	unset(CMKR_SOURCES)
+endif()
+
 # Target input-hook-installation-tests
 if(UEVR_BUILD_COMPATIBILITY_TESTS) # compatibility-policy-tests
 	set(CMKR_TARGET input-hook-installation-tests)
@@ -2079,6 +2121,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/SatisfactoryRuntime.hpp"
 	"src/mods/vr/SifuMeshCommands.hpp"
 	"src/mods/vr/SifuRendererEntry.hpp"
+	"src/mods/vr/SlatePoseHandoffPolicy.hpp"
 	"src/mods/vr/SlateViewportOffset.hpp"
 	"src/mods/vr/SlateVrTargetPolicy.hpp"
 	"src/mods/vr/Stalker2NativeD3D12.hpp"

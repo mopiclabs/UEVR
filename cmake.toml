@@ -366,6 +366,17 @@ add_test(NAME autores-policy-tests COMMAND autores-policy-tests)
 set_tests_properties(autores-policy-tests PROPERTIES TIMEOUT 30)
 """
 
+[target.slate-pose-handoff-policy-tests]
+condition = "compatibility-policy-tests"
+type = "executable"
+sources = ["tests/SlatePoseHandoffPolicyTests.cpp"]
+include-directories = ["src/"]
+compile-features = ["cxx_std_23"]
+cmake-after = """
+add_test(NAME slate-pose-handoff-policy-tests COMMAND slate-pose-handoff-policy-tests)
+set_tests_properties(slate-pose-handoff-policy-tests PROPERTIES TIMEOUT 30)
+"""
+
 [target.input-hook-installation-tests]
 condition = "compatibility-policy-tests"
 type = "executable"
