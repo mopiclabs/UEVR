@@ -27,7 +27,7 @@ jobs:
 
       # Mopic test targets, apart from upstream's list above so a joeyhodge release that changes that list merges cleanly.
       - name: Build Mopic offline tests
-        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target safetyhook-trap-race-tests window-filter-tests perf-log-tests autores-policy-tests
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --target safetyhook-trap-race-tests window-filter-tests perf-log-tests autores-policy-tests slate-pose-handoff-policy-tests
       - name: Run offline tests
         run: ctest --test-dir ${{github.workspace}}/build -C ${{env.BUILD_TYPE}} --output-on-failure --no-tests=error
 
